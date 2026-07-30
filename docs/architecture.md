@@ -21,7 +21,15 @@
 
 一句话定位：
 
-> 基于 llama.cpp fork 重构的缓存感知 LLM 推理运行时，核心实现 Token-level Continuous Batching、KV Block 管理、Prefix 共享、资源抢占和自适应 Speculative Decoding。
+> 基于 llama.cpp fork 重构的缓存感知 LLM 推理运行时，贯通 Serving Scheduler、KV Runtime 与 CUDA KV Backend，核心实现 Token-level Continuous Batching、Paged Prefix KV、资源抢占和自适应 Speculative Decoding。
+
+项目必须形成三层可演示的个人实现：
+
+1. **Serving 层**：Token-level Scheduler、Admission、Preemption 和 SLO；
+2. **Runtime 层**：Block Table、Prefix Sharing、COW、Swap 和 Speculation；
+3. **GPU Backend 层**：CUDA KV Gather/Scatter/COW Kernel、Pinned Memory、Stream 和 Event。
+
+只有前两层而没有 CUDA 时，项目仍属于 LLM Serving Infra，但不满足本项目最终面向“高性能推理引擎”的完整验收标准。
 
 项目面向：
 
@@ -64,8 +72,9 @@ HTTP、配置、日志和脚本是必要配套，但不计为主要 AI Infra 创
 
 ### 3.4 第三方代码不冒充个人贡献
 
-- GGML 算子、CUDA/Metal/Vulkan Backend、GGUF 基础格式和既有模型定义保留上游来源；
-- 重构后的运行时、调度、KV 策略、控制算法、测试和实验属于个人贡献；
+- GGML 通用算子、既有 CUDA/Metal/Vulkan Backend、GGUF 基础格式和模型定义保留上游来源；
+- 项目必须新增一个自研 CUDA KV Block Backend，而不是只调用上游 CUDA 二进制；
+- 重构后的运行时、调度、KV 策略、CUDA KV Kernel、控制算法、测试和实验属于个人贡献；
 - Patch、Git commit 和代码统计分别报告继承、修改和新增代码。
 
 ## 4. 范围与非目标
@@ -79,6 +88,9 @@ HTTP、配置、日志和脚本是必要配套，但不计为主要 AI Infra 创
 - Prefix Block 共享和 Copy-on-Write；
 - KV 成本感知淘汰；
 - 请求抢占、换出和恢复；
+- CUDA KV Block Gather/Scatter 与 Copy-on-Write Kernel；
+- CUDA Stream、Event 和 Pinned Host Memory 驱动的异步 KV Swap；
+- CPU Reference 与 CUDA Backend 的逐元素正确性对照；
 - 自适应 Speculative Decoding；
 - 模型结构、量化、KV 和性能成本建模；
 - TTFT、TPOT、吞吐、P95/P99、KV 利用率等原生指标；
@@ -86,7 +98,8 @@ HTTP、配置、日志和脚本是必要配套，但不计为主要 AI Infra 创
 
 ### 4.2 明确非目标
 
-- 从零重写 CUDA、Metal、Vulkan、BLAS 等全部算子；
+- 从零重写全部 CUDA、Metal、Vulkan、BLAS 算子；本项目只自研与 Paged KV 主线直接相关的 CUDA Kernel；
+- 自研通用量化 GEMM、FlashAttention 或完整 CUDA Graph Compiler；这些可作为后续扩展，但不能替代本期 KV CUDA Backend；
 - 从零重写所有已支持模型的 Graph 定义；
 - 自创 GGUF 文件格式；
 - 分布式训练；
@@ -124,6 +137,11 @@ flowchart TD
     Scheduler --> Spec["SpeculationController"]
     KV --> Prefix["PrefixIndex"]
     KV --> Swap["KvSwapStore"]
+    KV --> BlockBackend["KvBlockBackend"]
+    BlockBackend --> CpuKv["CPU Reference Backend"]
+    BlockBackend --> CudaKv["PagedKvCudaBackend"]
+    CudaKv --> CudaKernel["Gather / Scatter / COW CUDA Kernels"]
+    CudaKv --> Pinned["Pinned Host Pool + Streams/Events"]
     Batch --> Runtime["LlamaRuntime Adapter"]
     Spec --> Runtime
     Runtime --> Memory["llama_memory / KV Backend"]
@@ -172,6 +190,11 @@ serving/
 
 backends/
   llama-runtime-adapter.*
+  kv-block-backend.*
+  kv-block-cpu.*
+  paged-kv-cuda.h
+  paged-kv-cuda.cu
+  cuda-pinned-pool.*
 
 tests/
 benchmarks/
@@ -572,6 +595,93 @@ public:
 - 生产 `LlamaCppRuntime`；
 - 测试 `DeterministicRuntime`，可注入 OOM、延迟和部分失败。
 
+### 8.10 KvBlockBackend 与 PagedKvCudaBackend
+
+职责：执行 KV Block 的物理复制、聚集、分散、Copy-on-Write 和 Device/Host Swap。`KvCacheManager` 决定移动什么以及为什么移动，Backend 只负责按照不可变映射高效执行。
+
+该 Module 是本期必做的 GPU 实现，不属于可选加分项。CPU Reference Adapter 用于正确性测试；CUDA Adapter 用于真实 RTX 4050 性能验证。
+
+Interface：
+
+```cpp
+struct KvTensorLayout {
+    uint32_t layers;
+    uint32_t kv_heads;
+    uint32_t head_dim;
+    uint32_t block_tokens;
+    KvElementType element_type;
+    KvMemoryLayout memory_layout;
+};
+
+struct BlockCopy {
+    PhysicalBlockId source;
+    PhysicalBlockId destination;
+};
+
+class KvBlockBackend {
+public:
+    virtual BackendEvent copy_blocks(
+        Span<const BlockCopy> mapping,
+        const KvTensorLayout &) = 0;
+
+    virtual BackendEvent swap_out(
+        Span<const PhysicalBlockId> blocks,
+        MutableHostBlockSpan destination) = 0;
+
+    virtual BackendEvent swap_in(
+        HostBlockSpan source,
+        Span<const PhysicalBlockId> destinations) = 0;
+
+    virtual void wait(BackendEvent) = 0;
+};
+```
+
+CUDA Kernel 至少覆盖：
+
+```cpp
+template <typename scalar_t>
+__global__ void gather_kv_blocks(
+    const scalar_t * src_k,
+    const scalar_t * src_v,
+    scalar_t * dst_k,
+    scalar_t * dst_v,
+    const BlockCopy * mapping,
+    KvTensorLayout layout);
+
+template <typename scalar_t>
+__global__ void scatter_kv_blocks(...);
+
+template <typename scalar_t>
+__global__ void clone_shared_tail_block(...); // Copy-on-Write
+```
+
+实现要求：
+
+- 支持 FP16，并为当前 llama.cpp KV 类型保留模板扩展点；
+- 一个 Kernel Launch 处理一组非连续 Block Mapping，避免每个 Block 单独发起 `cudaMemcpyAsync`；
+- K/V 可采用同一 Grid 中的独立 Plane，具体布局由 `KvTensorLayout` 描述，不在 Kernel 中写死模型结构；
+- Device-to-Host 使用 Pinned Memory Pool；
+- Copy、Swap Out、Swap In 使用独立 CUDA Stream，并用 Event 向 Engine 暴露依赖；
+- 禁止在调度主线程调用全局 `cudaDeviceSynchronize()`；
+- BackendEvent 完成前，源 Block 和目标 Block 都不得被回收或重新分配；
+- CUDA 错误必须转换为 Runtime Error，触发重计算或请求失败，不得留下半提交 Block Table；
+- CPU Reference 与 CUDA 输出逐元素相同；
+- 不支持 CUDA 的构建继续使用 CPU Adapter，功能正确但不宣称 GPU 性能收益。
+
+性能目标不是击败单次大块连续 `cudaMemcpyAsync`，而是在真实的非连续 Block Mapping、Prefix COW 和多 Block Swap 场景中，减少 Launch 数、同步次数和尾延迟。
+
+CUDA 子系统的依赖方向固定为：
+
+```text
+KvCacheManager
+    -> KvBlockBackend Interface
+        -> CpuKvBlockBackend
+        -> PagedKvCudaBackend
+            -> CUDA Runtime / GGML CUDA allocation Adapter
+```
+
+`PagedKvCudaBackend` 不得反向依赖 Scheduler、HTTP 或 Request 类型。
+
 ## 9. 一次推理迭代的数据流
 
 ```mermaid
@@ -580,6 +690,7 @@ sequenceDiagram
     participant E as InferenceEngine
     participant A as AdmissionController
     participant K as KvCacheManager
+    participant B as KvBlockBackend
     participant S as InferenceScheduler
     participant P as SpeculationController
     participant R as LlamaRuntime
@@ -594,6 +705,10 @@ sequenceDiagram
     P-->>S: per-sequence draft length
     S-->>E: immutable IterationPlan
     E->>K: apply prepare/preemption
+    K->>B: gather/COW/swap block mappings
+    B-->>K: CUDA event or CPU completion
+    K-->>E: KV prepare event
+    E->>B: wait only required dependencies
     E->>R: decode PhysicalBatch
     R-->>E: logits + runtime timing
     E->>P: acceptance feedback
@@ -609,6 +724,8 @@ sequenceDiagram
 - Backend Decode 可异步，但计划提交由 Engine Loop 串行完成；
 - Metrics 使用快照或原子计数，不持有 Engine 主锁执行 I/O；
 - Swap I/O 通过工作线程完成，Sequence 保持 `SWAPPED/PREEMPTED`；
+- CUDA Block 操作异步提交，Engine 只等待当前 Decode 真正依赖的 Event；
+- Pinned Buffer 和 Device Block 的生命周期延长到对应 CUDA Event 完成；
 - 同一 Sequence 同时最多存在一个未提交 IterationPlan。
 
 必须保持：
@@ -619,6 +736,7 @@ sequenceDiagram
 - 输出 Token 只有在 Target 验证并提交后才能发送；
 - 取消不回收仍被正在执行 Batch 引用的 KV；
 - 失败回滚后 Scheduler Snapshot 与 Runtime Snapshot 一致。
+- CUDA 操作失败时不得提交部分 Block Mapping；旧 Block Table 保持可重算。
 
 ## 11. 配置设计
 
@@ -635,6 +753,9 @@ sequenceDiagram
 --kv-eviction-policy lru|cost
 --kv-swap-path PATH
 --kv-swap-budget-mib N
+--kv-block-backend cpu|cuda
+--kv-cuda-copy-streams N
+--kv-pinned-pool-mib N
 --spec-policy fixed|adaptive
 --spec-target-acceptance FLOAT
 --spec-ewma-alpha FLOAT
@@ -690,6 +811,19 @@ sequenceDiagram
 - `speculation_disabled_total{reason}`
 - `speculation_net_saved_ms`
 
+### 12.5 CUDA KV Backend 指标
+
+- `cuda_kv_kernel_launches_total`
+- `cuda_kv_blocks_copied_total`
+- `cuda_kv_copy_bytes_total`
+- `cuda_kv_copy_seconds`
+- `cuda_kv_swap_out_seconds`
+- `cuda_kv_swap_in_seconds`
+- `cuda_kv_effective_bandwidth_bytes`
+- `cuda_kv_events_waited_total`
+- `cuda_kv_pinned_pool_bytes`
+- `cuda_kv_backend_errors_total`
+
 指标必须区分累计值、当前 Gauge 和 Histogram；不得把所有 Prometheus 样本都标记成 Gauge。
 
 ## 13. 测试策略
@@ -734,6 +868,19 @@ sequenceDiagram
 - 多轮对话与共享 System Prompt；
 - 混合短 Decode、长 Prefill 负载。
 
+### 13.5 CUDA Kernel 测试
+
+- CPU Reference 与 CUDA Gather/Scatter/COW 逐元素对照；
+- FP16 K/V、不同 Layer/KV Head/Head Dim；
+- Block Size 8/16/32/64；
+- 连续、随机、重复和重叠映射；
+- 非 Block 整除尾部；
+- In-place COW 禁止覆盖共享源；
+- 多 Stream Event 依赖；
+- Pinned Pool 耗尽与 CUDA OOM；
+- Compute Sanitizer 或等效越界检查；
+- CUDA 不可用时构建和 CPU 降级路径。
+
 ## 14. Benchmark 设计
 
 所有实验至少三次 fresh-process trial，报告 Median、P95 和原始数据。
@@ -747,6 +894,9 @@ sequenceDiagram
 | KV 压力 | 被动失败清理 | Admission/Preemption | OOM、抢占、恢复时间 |
 | Speculation | Fixed Draft | Adaptive Draft | 接受率、TPS、额外 KV、净收益 |
 | Swap | Recompute | Host/Disk Restore | 恢复延迟、总吞吐 |
+| CUDA Block Copy | per-block `cudaMemcpyAsync` | batched Gather/Scatter Kernel | Launch 数、带宽、P50/P95 |
+| CUDA COW | 整 Sequence 复制 | Tail Block COW Kernel | 复制字节、延迟、显存峰值 |
+| CUDA Swap | Pageable/同步 | Pinned/Stream/Event | Swap 延迟、Decode Stall、有效带宽 |
 
 负结果策略：
 
@@ -792,35 +942,45 @@ sequenceDiagram
 - Hybrid/Recurrent 能力降级；
 - Prefix A/B。
 
-### Phase 5：Preemption 与 Swap
+### Phase 5：CUDA KV Block Backend
+
+- 建立 `KvBlockBackend` Interface 和 CPU Reference；
+- 实现 FP16 Gather/Scatter/COW CUDA Kernel；
+- 实现 Pinned Host Pool、Copy/Swap Stream 和 Event；
+- 接入 GGML CUDA 分配与 llama KV 物理布局；
+- 与 per-block `cudaMemcpyAsync` 做 Microbenchmark；
+- 在 RTX 4050 上完成真实 Prefix COW 和 Swap A/B；
+- 本阶段未通过 CUDA 编译、正确性和性能验证前，不得宣称覆盖 GPU Runtime。
+
+### Phase 6：Preemption 与 Swap
 
 - Sequence 抢占；
 - Host/Disk 两种 Swap Adapter；
 - 保存失败退化重计算；
 - KV 压力故障注入。
 
-### Phase 6：Adaptive Prefill
+### Phase 7：Adaptive Prefill
 
 - 收集每轮 Batch 与 Kernel 时间；
 - Backend/Context/Concurrency Bucket；
 - 在线选择 Chunk；
 - 与 Greedy 和固定 Chunk 对比。
 
-### Phase 7：Adaptive Speculation
+### Phase 8：Adaptive Speculation
 
 - 提取 SpeculationController；
 - 接受率 EWMA、迟滞与 KV 压力反馈；
 - Draft/Target 成本建模；
 - 真实 Draft 模型或 N-gram Spec A/B。
 
-### Phase 8：Serving 收口
+### Phase 9：Serving 收口
 
 - C++ OpenAI Streaming Adapter；
 - 完整取消、Deadline 和背压；
 - 移除或归档 Python 控制面原型；
 - 统一 Metrics 和 Debug Snapshot。
 
-### Phase 9：面试交付
+### Phase 10：面试交付
 
 - 一键构建、测试和 benchmark；
 - 架构图、火焰图、结果报告；
@@ -836,6 +996,8 @@ sequenceDiagram
 | `tools/server/server-kv-capacity-planner.*` | Admission / KV Eviction | 与 Block Manager 合并形成深模块 |
 | `src/llama-kv-cache.*` | Physical KV Backend | 保留核心并增加 Block Interface |
 | `src/llama-memory.*` | Runtime Memory Adapter | 增加 Capability 与稳定 Block 操作 |
+| `ggml/src/ggml-cuda/*` | CUDA Allocation/Launch 基础设施 | 复用上游基础设施，新增独立 Paged KV Kernel 和 Adapter |
+| 新增 `backends/paged-kv-cuda.*` | PagedKvCudaBackend | 个人实现 Gather/Scatter/COW/Swap 热路径 |
 | `common/speculative.*` | Draft Executor | 保留生成实现，控制策略移出 |
 | `src/cacheflow/*` | 控制面原型 | C++ 替代后移入 prototypes 或删除 |
 | `src/llama_lab/*` | Benchmark / Report | 保留为实验工具，不计运行时核心 |
@@ -857,6 +1019,7 @@ sequenceDiagram
 - Prefix Block 共享和 COW 真实运行；
 - KV 准入、抢占和恢复真实运行；
 - Adaptive Prefill 与 Adaptive Speculation 可开关；
+- CUDA KV Gather/Scatter、COW 和异步 Swap 在真实 GPU 上运行；
 - OpenAI 非流式与流式请求可用。
 
 ### 正确性
@@ -865,6 +1028,8 @@ sequenceDiagram
 - 随机状态序列无 Block 泄漏；
 - 上游兼容模式输出一致；
 - 故障注入无死锁、悬空请求或 KV 引用错误；
+- CPU Reference 与 CUDA KV Backend 在覆盖矩阵内逐元素一致；
+- CUDA Sanitizer 不报告越界、竞态或非法访问；
 - 质量测试未因优化静默下降。
 
 ### 性能证据
@@ -873,6 +1038,8 @@ sequenceDiagram
 - 至少一个高并发场景改善 TTFT/TPOT/P95 中的明确目标；
 - Adaptive 策略不劣于其固定候选的错误参数点；
 - CPU 与 CUDA 分别报告；
+- Batched CUDA Block Kernel 在非连续多 Block 场景中减少 Kernel/Copy Launch，并至少在一个真实 COW 或 Swap 场景改善 P95；
+- 报告 CUDA Kernel 时间、端到端时间和额外显存，不能只报告理论带宽；
 - 原始 Trial 数据可复查。
 
 ### 工程交付
@@ -892,6 +1059,9 @@ sequenceDiagram
 | Chunk 过小降低 GEMM 效率 | 负优化 | 在线成本模型，保留 Greedy 动作 |
 | 抢占导致重计算放大 | 尾延迟恶化 | Deadline/重计算成本进入策略 |
 | Spec 接受率不稳定 | 额外 Draft 成本 | EWMA、迟滞、低收益关闭 |
+| 当前机器缺少 CUDA Toolkit/nvcc | 无法验证自研 `.cu` | 将 Toolkit 安装和 CMake CUDA 构建列为 Phase 5 前置条件；未实测不得标完成 |
+| KV 物理布局因 Backend/模型变化 | Kernel 读写错误 | 显式 Layout 描述、CPU 对照、Capability 和 Sanitizer |
+| CUDA 异步生命周期错误 | UAF/数据竞争 | Event 持有 Block/Buffer lease，提交后统一回收 |
 | 指标测量扰动 | Benchmark 偏差 | 低开销计数、fresh process、多 Trial |
 | 全库重构范围失控 | 长期不可交付 | 按 Phase 替换，每阶段真实可运行 |
 
@@ -899,7 +1069,7 @@ sequenceDiagram
 
 1. 采用 llama.cpp fork，而不是外围 Wrapper 作为项目主体；
 2. 保留成熟 Backend/模型实现，不做无价值逐行重写；
-3. 重构重点是 Engine Loop、Scheduler、KV Memory 和 Speculation；
+3. 重构重点是 Engine Loop、Scheduler、KV Memory、CUDA KV Backend 和 Speculation；
 4. Scheduler 返回不可变计划，不直接修改 Runtime；
 5. KV Block Manager 是 KV 状态唯一所有者；
 6. Prefix 共享使用完整 Block，尾 Block 使用 COW；
@@ -907,6 +1077,8 @@ sequenceDiagram
 8. Chunk 和 Draft 长度必须硬件/模型感知，固定参数仅作 Baseline；
 9. 任何优化必须有上游兼容开关和真实模型 A/B；
 10. 负结果属于设计输入，不从报告中删除。
+11. CUDA 不是全部重写，但 Paged KV Gather/Scatter/COW/Swap 是本期强制个人实现；
+12. CUDA 微基准与端到端收益必须同时成立，单独 Kernel 数字不能替代 Serving 指标。
 
 ## 20. 下一实现切片
 
@@ -916,8 +1088,11 @@ sequenceDiagram
 2. 使用固定 Block Size 管理逻辑 Token Block；
 3. 实现引用计数、最长 Prefix 命中和 COW；
 4. 通过 `llama_memory_seq_*` Adapter 接入一个 Attention KV 路径；
-5. 原生测试验证共享、释放、抢占和容量守恒；
-6. 真实多轮请求验证 Prefix Block 指标；
-7. 然后拆分 `update_slots()` 的 plan/execute/commit 阶段。
+5. 同时定义 `KvBlockBackend` Interface 和 CPU Reference Adapter；
+6. 固定 KV Tensor Layout，搭建 CUDA Toolkit/CMake 编译链；
+7. 实现第一版 FP16 Gather/Scatter/COW CUDA Kernel；
+8. 原生测试验证共享、释放、抢占、容量守恒和 CPU/CUDA 一致性；
+9. 真实多轮请求验证 Prefix Block 与 CUDA COW 指标；
+10. 然后拆分 `update_slots()` 的 plan/execute/commit 阶段。
 
 该切片完成前，不开始扩展 HTTP 功能或美化外围界面。
