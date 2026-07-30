@@ -60,6 +60,8 @@ The patch adds Prometheus counters/gauges for:
   `llama_get_memory_breakdown()`.
 - token-level scheduler iterations and scheduled decode tokens;
 - scheduled prefill tokens and prompt chunk counts.
+- proactive KV pressure, victim, reclaimed-token, and unresolved-admission
+  counters.
 
 Logical KV token utilization and allocated bytes intentionally remain separate:
 the buffer is generally allocated up front, while logical occupancy changes per

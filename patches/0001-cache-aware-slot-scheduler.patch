@@ -47,10 +47,10 @@ index 0b284cb..1ba8a9d 100644
      // batched-bench params
      bool is_pp_shared   = false;
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index e284a58..5ad9afe 100644
+index e284a58..3684e9e 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -116,6 +116,11 @@ function(llama_build_and_test source)
+@@ -116,6 +116,16 @@ function(llama_build_and_test source)
      set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})
  endfunction()
  
@@ -58,6 +58,11 @@ index e284a58..5ad9afe 100644
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-inference-scheduler.cpp)
 +target_include_directories(test-inference-scheduler PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
 +llama_test(test-inference-scheduler)
++
++llama_build(test-kv-capacity-planner.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-capacity-planner.cpp)
++target_include_directories(test-kv-capacity-planner PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++llama_test(test-kv-capacity-planner)
 +
  # build test-tokenizer-0 target once and add many tests
  llama_build(test-tokenizer-0.cpp)
@@ -129,32 +134,81 @@ index 0000000..d5a597b
 +    test_zero_chunk_preserves_greedy_upstream_behavior();
 +    return 0;
 +}
+diff --git a/tests/test-kv-capacity-planner.cpp b/tests/test-kv-capacity-planner.cpp
+new file mode 100644
+index 0000000..2f24408
+--- /dev/null
++++ b/tests/test-kv-capacity-planner.cpp
+@@ -0,0 +1,40 @@
++#include "server-kv-capacity-planner.h"
++
++#include <cassert>
++
++static void test_no_pressure_keeps_all_caches() {
++    server_kv_capacity_planner planner;
++    const auto plan = planner.plan(1000, 900, 1000000, {{0, 200, 1}});
++    assert(plan.fits());
++    assert(plan.victim_ids.empty());
++}
++
++static void test_old_cache_is_evicted_before_recent_cache() {
++    server_kv_capacity_planner planner(1000);
++    const auto plan = planner.plan(1000, 1100, 10000000, {
++        {0, 150, 9900000},
++        {1, 150, 1000000},
++    });
++    assert(plan.fits());
++    assert(plan.victim_ids.size() == 1);
++    assert(plan.victim_ids[0] == 1);
++}
++
++static void test_reclaims_multiple_slots_and_reports_unresolved_pressure() {
++    server_kv_capacity_planner planner;
++    const auto enough = planner.plan(1000, 1300, 1000000, {
++        {0, 100, 0}, {1, 250, 0},
++    });
++    assert(enough.fits());
++    assert(enough.reclaimed_tokens >= 300);
++
++    const auto insufficient = planner.plan(1000, 1500, 1000000, {{0, 100, 0}});
++    assert(!insufficient.fits());
++}
++
++int main() {
++    test_no_pressure_keeps_all_caches();
++    test_old_cache_is_evicted_before_recent_cache();
++    test_reclaims_multiple_slots_and_reports_unresolved_pressure();
++    return 0;
++}
 diff --git a/tools/server/CMakeLists.txt b/tools/server/CMakeLists.txt
-index 7d42743..f900b90 100644
+index 7d42743..95e192c 100644
 --- a/tools/server/CMakeLists.txt
 +++ b/tools/server/CMakeLists.txt
-@@ -11,6 +11,8 @@ add_library(${TARGET} STATIC
+@@ -11,6 +11,10 @@ add_library(${TARGET} STATIC
      server-task.h
      server-queue.cpp
      server-queue.h
 +    server-inference-scheduler.cpp
 +    server-inference-scheduler.h
++    server-kv-capacity-planner.cpp
++    server-kv-capacity-planner.h
      server-common.cpp
      server-common.h
      server-context.cpp
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..c9f3d8c 100644
+index 986b2f1..ec851b9 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -4,6 +4,7 @@
+@@ -4,6 +4,8 @@
  #include "server-http.h"
  #include "server-task.h"
  #include "server-queue.h"
 +#include "server-inference-scheduler.h"
++#include "server-kv-capacity-planner.h"
  
  #include "build-info.h"
  #include "common.h"
-@@ -685,6 +686,7 @@ struct server_metrics {
+@@ -685,6 +687,7 @@ struct server_metrics {
      int64_t t_start = 0;
  
      uint64_t n_prompt_tokens_processed_total = 0;
@@ -162,7 +216,7 @@ index 986b2f1..c9f3d8c 100644
      uint64_t t_prompt_processing_total       = 0;
      uint64_t n_tokens_predicted_total        = 0;
      uint64_t t_tokens_generation_total       = 0;
-@@ -692,6 +694,7 @@ struct server_metrics {
+@@ -692,6 +695,7 @@ struct server_metrics {
      uint64_t n_tokens_max = 0;
  
      uint64_t n_prompt_tokens_processed = 0;
@@ -170,7 +224,7 @@ index 986b2f1..c9f3d8c 100644
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -700,6 +703,15 @@ struct server_metrics {
+@@ -700,6 +704,19 @@ struct server_metrics {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -182,11 +236,15 @@ index 986b2f1..c9f3d8c 100644
 +    uint64_t n_decode_tokens_scheduled_total  = 0;
 +    uint64_t n_prefill_tokens_scheduled_total = 0;
 +    uint64_t n_prefill_chunks_scheduled_total = 0;
++    uint64_t n_kv_admission_pressure_total = 0;
++    uint64_t n_kv_proactive_evictions_total = 0;
++    uint64_t n_kv_proactive_reclaimed_tokens_total = 0;
++    uint64_t n_kv_admission_failures_total = 0;
 +
      void init() {
          t_start = ggml_time_us();
      }
-@@ -707,6 +719,8 @@ struct server_metrics {
+@@ -707,6 +724,8 @@ struct server_metrics {
      void on_prompt_eval(const server_slot & slot) {
          n_prompt_tokens_processed_total += slot.n_prompt_tokens_processed;
          n_prompt_tokens_processed       += slot.n_prompt_tokens_processed;
@@ -195,7 +253,7 @@ index 986b2f1..c9f3d8c 100644
          t_prompt_processing             += slot.t_prompt_processing;
          t_prompt_processing_total       += slot.t_prompt_processing;
  
-@@ -730,8 +744,26 @@ struct server_metrics {
+@@ -730,8 +749,36 @@ struct server_metrics {
          }
      }
  
@@ -216,23 +274,34 @@ index 986b2f1..c9f3d8c 100644
 +        n_prefill_chunks_scheduled_total += plan.allocations.size();
 +    }
 +
++    void on_kv_capacity_plan(const server_kv_capacity_plan & plan) {
++        if (plan.deficit_tokens == 0) {
++            return;
++        }
++        n_kv_admission_pressure_total++;
++        n_kv_proactive_evictions_total += plan.victim_ids.size();
++        n_kv_proactive_reclaimed_tokens_total += plan.reclaimed_tokens;
++        n_kv_admission_failures_total += plan.fits() ? 0 : 1;
++    }
++
      void reset_bucket() {
          n_prompt_tokens_processed = 0;
 +        n_prompt_tokens_cached    = 0;
          t_prompt_processing       = 0;
          n_tokens_predicted        = 0;
          t_tokens_generation       = 0;
-@@ -816,8 +848,7 @@ private:
+@@ -816,8 +863,8 @@ private:
      json json_ui_settings = json::object();    // Primary: new name
      json json_webui_settings = json::object();    // Deprecated: use json_ui_settings instead (kept for compat)
  
 -    // Necessary similarity of prompt for slot selection
 -    float slot_prompt_similarity = 0.0f;
 +    server_inference_scheduler inference_scheduler;
++    server_kv_capacity_planner kv_capacity_planner;
  
      std::string model_name; // name of the loaded model, to be used by API
      std::set<std::string> model_aliases; // additional names for the model
-@@ -1114,8 +1145,11 @@ private:
+@@ -1114,8 +1161,11 @@ private:
  
          n_swa = params_base.swa_full ? 0 : llama_model_n_swa(model_tgt);
  
@@ -246,7 +315,7 @@ index 986b2f1..c9f3d8c 100644
  
          // setup slots
          SRV_INF("initializing slots, n_slots = %d\n", params_base.n_parallel);
-@@ -1383,9 +1417,10 @@ private:
+@@ -1383,9 +1433,10 @@ private:
  
          bool update_cache = false;
  
@@ -260,7 +329,7 @@ index 986b2f1..c9f3d8c 100644
  
              for (server_slot & slot : slots) {
                  // skip the slot if it is not available
-@@ -1393,29 +1428,27 @@ private:
+@@ -1393,29 +1444,27 @@ private:
                      continue;
                  }
  
@@ -308,7 +377,7 @@ index 986b2f1..c9f3d8c 100644
  
                  // if we are about to lose a large portion of the existing context - save it in the prompt cache
                  if (f_keep < 0.5f) {
-@@ -1443,6 +1476,7 @@ private:
+@@ -1443,6 +1492,7 @@ private:
  
              if (ret != nullptr) {
                  SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
@@ -316,7 +385,118 @@ index 986b2f1..c9f3d8c 100644
  
                  update_cache = true;
              }
-@@ -2301,6 +2335,7 @@ private:
+@@ -1469,41 +1519,88 @@ private:
+ 
+                 SRV_INF("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
+             }
++
++            proactively_reclaim_kv(*ret, task);
+         }
+ 
+         return ret;
+     }
+ 
+-    // return true if at least one slot has been cleared
+-    // TODO: improve logic
+-    //       - smarter decision which slot to clear (LRU or longest prompt?)
+-    //       - move slot to level 2 cache instead of removing?
+-    //       - instead of purging, try to store and resume later?
+-    bool try_clear_idle_slots() {
+-        bool res = false;
+-
+-        if (!params_base.kv_unified) {
+-            return res;
++    void proactively_reclaim_kv(server_slot & selected, const server_task & task) {
++        if (!params_base.kv_unified || task.type != SERVER_TASK_TYPE_COMPLETION) {
++            return;
++        }
++        auto * memory = llama_get_memory(ctx_tgt);
++        if (!memory) {
++            return;
+         }
+ 
+-        for (auto & slot : slots) {
+-            if (slot.is_processing()) {
+-                continue;
++        size_t used_tokens = 0;
++        size_t selected_tokens = 0;
++        std::vector<server_kv_cache_candidate> candidates;
++        const int64_t now = ggml_time_us();
++        for (const auto & slot : slots) {
++            const llama_pos pos_min = llama_memory_seq_pos_min(memory, slot.id);
++            const llama_pos pos_max = llama_memory_seq_pos_max(memory, slot.id);
++            const size_t occupied = pos_min >= 0 && pos_max >= pos_min
++                    ? (size_t) (pos_max - pos_min + 1)
++                    : 0;
++            used_tokens += occupied;
++            if (slot.id == selected.id) {
++                selected_tokens = occupied;
++            } else if (!slot.is_processing() && occupied > 0) {
++                candidates.push_back({slot.id, occupied, slot.t_last_used});
+             }
++        }
+ 
+-            if (slot.prompt.n_tokens() > 0) {
+-                SRV_WRN("purging slot %d with %zu tokens\n", slot.id, slot.prompt.tokens.size());
+-
+-                slot.prompt_clear(false);
++        // The selected sequence is truncated to its common prefix before new
++        // prompt tokens enter llama_decode. Its projected footprint therefore
++        // becomes the new prompt size rather than old + new.
++        const size_t projected = used_tokens - selected_tokens + task.tokens.size();
++        const auto plan = kv_capacity_planner.plan((size_t) n_ctx, projected, now, candidates);
++        metrics.on_kv_capacity_plan(plan);
++        for (int victim_id : plan.victim_ids) {
++            auto * victim = get_slot_by_id(victim_id);
++            GGML_ASSERT(victim != nullptr && !victim->is_processing());
++            SRV_WRN("proactively purging KV slot %d with %zu tokens; pressure = %zu, expected recompute = %.2f\n",
++                    victim_id, victim->prompt.tokens.size(), plan.deficit_tokens,
++                    plan.expected_recompute_tokens);
++            victim->prompt_clear(false);
++        }
++        if (!plan.fits()) {
++            SRV_WRN("KV admission remains over capacity by %zu tokens after reclaiming %zu; decode fallback remains active\n",
++                    plan.deficit_tokens - plan.reclaimed_tokens, plan.reclaimed_tokens);
++        }
++    }
+ 
+-                res = true;
++    // Last-resort path for physical fragmentation that cannot be predicted by
++    // logical token spans. Use the same value-aware planner instead of purging
++    // the first idle slot in vector order.
++    bool try_clear_idle_slots() {
++        if (!params_base.kv_unified) {
++            return false;
++        }
+ 
+-                // clear slots one by one
+-                break;
++        std::vector<server_kv_cache_candidate> candidates;
++        for (const auto & slot : slots) {
++            if (!slot.is_processing() && slot.prompt.n_tokens() > 0) {
++                candidates.push_back({slot.id, slot.prompt.tokens.size(), slot.t_last_used});
+             }
+         }
+-
+-        return res;
++        // A one-token synthetic deficit asks for exactly one lowest-value
++        // victim; llama_decode will retry and request another victim only if
++        // fragmentation remains.
++        const auto plan = kv_capacity_planner.plan(0, 1, ggml_time_us(), candidates);
++        if (plan.victim_ids.empty()) {
++            return false;
++        }
++        metrics.on_kv_capacity_plan(plan);
++        auto * victim = get_slot_by_id(plan.victim_ids.front());
++        GGML_ASSERT(victim != nullptr && !victim->is_processing());
++        SRV_WRN("purging planned KV victim slot %d with %zu tokens after decode allocation failure\n",
++                victim->id, victim->prompt.tokens.size());
++        victim->prompt_clear(false);
++        return true;
+     }
+ 
+     std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
+@@ -2301,6 +2398,7 @@ private:
                      res->t_start             = metrics.t_start;
  
                      res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
@@ -324,7 +504,7 @@ index 986b2f1..c9f3d8c 100644
                      res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
                      res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
                      res->t_tokens_generation_total       = metrics.t_tokens_generation_total;
-@@ -2308,12 +2343,40 @@ private:
+@@ -2308,12 +2406,44 @@ private:
                      res->n_tokens_max = metrics.n_tokens_max;
  
                      res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
@@ -343,6 +523,10 @@ index 986b2f1..c9f3d8c 100644
 +                    res->n_decode_tokens_scheduled_total  = metrics.n_decode_tokens_scheduled_total;
 +                    res->n_prefill_tokens_scheduled_total = metrics.n_prefill_tokens_scheduled_total;
 +                    res->n_prefill_chunks_scheduled_total = metrics.n_prefill_chunks_scheduled_total;
++                    res->n_kv_admission_pressure_total = metrics.n_kv_admission_pressure_total;
++                    res->n_kv_proactive_evictions_total = metrics.n_kv_proactive_evictions_total;
++                    res->n_kv_proactive_reclaimed_tokens_total = metrics.n_kv_proactive_reclaimed_tokens_total;
++                    res->n_kv_admission_failures_total = metrics.n_kv_admission_failures_total;
 +
 +                    auto memory = llama_get_memory(ctx_tgt);
 +                    if (memory) {
@@ -365,7 +549,7 @@ index 986b2f1..c9f3d8c 100644
  
                      if (task.metrics_reset_bucket) {
                          metrics.reset_bucket();
-@@ -2705,6 +2768,35 @@ private:
+@@ -2705,6 +2835,35 @@ private:
          int32_t n_batch  = llama_n_batch(ctx_tgt);
          int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
  
@@ -401,7 +585,7 @@ index 986b2f1..c9f3d8c 100644
          float  alora_scale       = -1.0f;
          size_t alora_disabled_id = 0;
  
-@@ -2730,6 +2822,13 @@ private:
+@@ -2730,6 +2889,13 @@ private:
                  if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
                      const auto & input_tokens = slot.task->tokens;
  
@@ -415,7 +599,7 @@ index 986b2f1..c9f3d8c 100644
                      // used to determine the number of tokens added to the batch for the current slot
                      const auto n_tokens_prev = batch.n_tokens;
  
-@@ -3110,7 +3209,9 @@ private:
+@@ -3110,7 +3276,9 @@ private:
                      const bool n_before_user_known = n_before_user > 0;
  
                      // add prompt tokens for processing in the current batch
@@ -426,7 +610,7 @@ index 986b2f1..c9f3d8c 100644
                          // get next token to process
                          llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                          if (cur_tok == LLAMA_TOKEN_NULL) {
-@@ -4127,6 +4228,42 @@ void server_routes::init_routes() {
+@@ -4127,6 +4295,58 @@ void server_routes::init_routes() {
                      {"name",  "prompt_tokens_total"},
                      {"help",  "Number of prompt tokens processed."},
                      {"value",  (uint64_t) res_task->n_prompt_tokens_processed_total}
@@ -466,10 +650,26 @@ index 986b2f1..c9f3d8c 100644
 +                    {"name",  "prefill_chunks_scheduled_total"},
 +                    {"help",  "Prompt chunks admitted by the iteration-level prefill planner."},
 +                    {"value",  res_task->n_prefill_chunks_scheduled_total}
++            }, {
++                    {"name",  "kv_admission_pressure_total"},
++                    {"help",  "Requests projected to exceed unified KV capacity before decode."},
++                    {"value",  res_task->n_kv_admission_pressure_total}
++            }, {
++                    {"name",  "kv_proactive_evictions_total"},
++                    {"help",  "Idle KV sequences proactively evicted before llama_decode."},
++                    {"value",  res_task->n_kv_proactive_evictions_total}
++            }, {
++                    {"name",  "kv_proactive_reclaimed_tokens_total"},
++                    {"help",  "Logical KV tokens proactively reclaimed by admission planning."},
++                    {"value",  res_task->n_kv_proactive_reclaimed_tokens_total}
++            }, {
++                    {"name",  "kv_admission_failures_total"},
++                    {"help",  "KV admission plans still over capacity after all idle victims."},
++                    {"value",  res_task->n_kv_admission_failures_total}
              }, {
                      {"name",  "prompt_seconds_total"},
                      {"help",  "Prompt process time"},
-@@ -4156,6 +4293,43 @@ void server_routes::init_routes() {
+@@ -4156,6 +4376,43 @@ void server_routes::init_routes() {
                      {"name",  "predicted_tokens_seconds"},
                      {"help",  "Average generation throughput in tokens/s."},
                      {"value",  res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}
@@ -712,8 +912,112 @@ index 0000000..797b48f
 +    server_scheduler_config config_;
 +    int last_prefill_slot_ = -1;
 +};
+diff --git a/tools/server/server-kv-capacity-planner.cpp b/tools/server/server-kv-capacity-planner.cpp
+new file mode 100644
+index 0000000..d65bef6
+--- /dev/null
++++ b/tools/server/server-kv-capacity-planner.cpp
+@@ -0,0 +1,51 @@
++#include "server-kv-capacity-planner.h"
++
++#include <algorithm>
++#include <cmath>
++#include <limits>
++
++server_kv_capacity_planner::server_kv_capacity_planner(double reuse_half_life_ms) :
++        reuse_half_life_us_(std::max(reuse_half_life_ms, 1.0) * 1000.0) {}
++
++server_kv_capacity_plan server_kv_capacity_planner::plan(
++        size_t capacity_tokens,
++        size_t projected_tokens,
++        int64_t now_us,
++        std::vector<server_kv_cache_candidate> candidates) const {
++    server_kv_capacity_plan result;
++    result.capacity_tokens = capacity_tokens;
++    result.projected_tokens = projected_tokens;
++    result.deficit_tokens = projected_tokens > capacity_tokens
++            ? projected_tokens - capacity_tokens
++            : 0;
++    if (result.deficit_tokens == 0) {
++        return result;
++    }
++
++    while (result.reclaimed_tokens < result.deficit_tokens && !candidates.empty()) {
++        const size_t remaining = result.deficit_tokens - result.reclaimed_tokens;
++        auto best = candidates.begin();
++        double best_probability = std::numeric_limits<double>::infinity();
++        size_t best_overshoot = std::numeric_limits<size_t>::max();
++
++        for (auto it = candidates.begin(); it != candidates.end(); ++it) {
++            const int64_t age_us = std::max<int64_t>(0, now_us - it->last_used_us);
++            const double probability = std::exp2(-(double) age_us / reuse_half_life_us_);
++            const size_t overshoot = it->cached_tokens > remaining
++                    ? it->cached_tokens - remaining
++                    : 0;
++            if (probability < best_probability ||
++                    (probability == best_probability && overshoot < best_overshoot)) {
++                best = it;
++                best_probability = probability;
++                best_overshoot = overshoot;
++            }
++        }
++
++        result.victim_ids.push_back(best->id);
++        result.reclaimed_tokens += best->cached_tokens;
++        result.expected_recompute_tokens += best_probability * best->cached_tokens;
++        candidates.erase(best);
++    }
++    return result;
++}
+diff --git a/tools/server/server-kv-capacity-planner.h b/tools/server/server-kv-capacity-planner.h
+new file mode 100644
+index 0000000..ad1db6c
+--- /dev/null
++++ b/tools/server/server-kv-capacity-planner.h
+@@ -0,0 +1,41 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <vector>
++
++struct server_kv_cache_candidate {
++    int id = -1;
++    size_t cached_tokens = 0;
++    int64_t last_used_us = -1;
++};
++
++struct server_kv_capacity_plan {
++    size_t capacity_tokens = 0;
++    size_t projected_tokens = 0;
++    size_t deficit_tokens = 0;
++    size_t reclaimed_tokens = 0;
++    double expected_recompute_tokens = 0.0;
++    std::vector<int> victim_ids;
++
++    bool fits() const {
++        return projected_tokens <= capacity_tokens + reclaimed_tokens;
++    }
++};
++
++// Plans proactive eviction from unified KV memory. Recent caches carry a
++// higher expected reuse value; equally valuable candidates minimize excess
++// reclamation so the engine does not purge more KV than the batch needs.
++class server_kv_capacity_planner {
++public:
++    explicit server_kv_capacity_planner(double reuse_half_life_ms = 30000.0);
++
++    server_kv_capacity_plan plan(
++            size_t capacity_tokens,
++            size_t projected_tokens,
++            int64_t now_us,
++            std::vector<server_kv_cache_candidate> candidates) const;
++
++private:
++    double reuse_half_life_us_;
++};
 diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
-index 72a4bd0..b217cdc 100644
+index 72a4bd0..66e2dce 100644
 --- a/tools/server/server-task.cpp
 +++ b/tools/server/server-task.cpp
 @@ -1895,6 +1895,7 @@ json server_task_result_metrics::to_json() {
@@ -732,7 +1036,7 @@ index 72a4bd0..b217cdc 100644
          { "t_prompt_processing",             t_prompt_processing },
          { "n_tokens_predicted",              n_tokens_predicted },
          { "t_tokens_generation",             t_tokens_generation },
-@@ -1909,6 +1911,22 @@ json server_task_result_metrics::to_json() {
+@@ -1909,6 +1911,26 @@ json server_task_result_metrics::to_json() {
          { "n_decode_total",                  n_decode_total },
          { "n_busy_slots_total",              n_busy_slots_total },
  
@@ -744,6 +1048,10 @@ index 72a4bd0..b217cdc 100644
 +        { "n_decode_tokens_scheduled_total",  n_decode_tokens_scheduled_total },
 +        { "n_prefill_tokens_scheduled_total", n_prefill_tokens_scheduled_total },
 +        { "n_prefill_chunks_scheduled_total", n_prefill_chunks_scheduled_total },
++        { "n_kv_admission_pressure_total", n_kv_admission_pressure_total },
++        { "n_kv_proactive_evictions_total", n_kv_proactive_evictions_total },
++        { "n_kv_proactive_reclaimed_tokens_total", n_kv_proactive_reclaimed_tokens_total },
++        { "n_kv_admission_failures_total", n_kv_admission_failures_total },
 +
 +        { "kv_cache_tokens",                 kv_cache_tokens },
 +        { "kv_cache_capacity_tokens",        kv_cache_capacity_tokens },
@@ -756,7 +1064,7 @@ index 72a4bd0..b217cdc 100644
      };
  }
 diff --git a/tools/server/server-task.h b/tools/server/server-task.h
-index bdadcff..7fd7d96 100644
+index bdadcff..2ee89bd 100644
 --- a/tools/server/server-task.h
 +++ b/tools/server/server-task.h
 @@ -517,6 +517,7 @@ struct server_task_result_metrics : server_task_result {
@@ -775,7 +1083,7 @@ index bdadcff..7fd7d96 100644
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -532,6 +534,22 @@ struct server_task_result_metrics : server_task_result {
+@@ -532,6 +534,26 @@ struct server_task_result_metrics : server_task_result {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -787,6 +1095,10 @@ index bdadcff..7fd7d96 100644
 +    uint64_t n_decode_tokens_scheduled_total  = 0;
 +    uint64_t n_prefill_tokens_scheduled_total = 0;
 +    uint64_t n_prefill_chunks_scheduled_total = 0;
++    uint64_t n_kv_admission_pressure_total = 0;
++    uint64_t n_kv_proactive_evictions_total = 0;
++    uint64_t n_kv_proactive_reclaimed_tokens_total = 0;
++    uint64_t n_kv_admission_failures_total = 0;
 +
 +    uint64_t kv_cache_tokens          = 0;
 +    uint64_t kv_cache_capacity_tokens = 0;

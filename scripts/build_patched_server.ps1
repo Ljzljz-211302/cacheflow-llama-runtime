@@ -5,6 +5,7 @@ $sourceRoot = Join-Path $projectRoot "vendor\llama.cpp"
 $buildRoot = Join-Path $projectRoot "build\patched-cpu-noui"
 $serverExe = Join-Path $buildRoot "bin\Release\llama-server.exe"
 $testExe = Join-Path $buildRoot "bin\Release\test-inference-scheduler.exe"
+$kvTestExe = Join-Path $buildRoot "bin\Release\test-kv-capacity-planner.exe"
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot ".git"))) {
     throw "llama.cpp source missing; run scripts\bootstrap.ps1 first"
@@ -25,7 +26,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "patched server configure failed"
 }
 
-& cmake --build $buildRoot --config Release --target llama-server test-inference-scheduler -j 8
+& cmake --build $buildRoot --config Release --target llama-server test-inference-scheduler test-kv-capacity-planner -j 8
 if ($LASTEXITCODE -ne 0) {
     throw "patched server build failed"
 }
@@ -33,6 +34,11 @@ if ($LASTEXITCODE -ne 0) {
 & $testExe
 if ($LASTEXITCODE -ne 0) {
     throw "native inference scheduler tests failed"
+}
+
+& $kvTestExe
+if ($LASTEXITCODE -ne 0) {
+    throw "native KV capacity planner tests failed"
 }
 
 if (-not (Test-Path -LiteralPath $serverExe)) {

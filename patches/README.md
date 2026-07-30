@@ -8,6 +8,7 @@ The patch contains the project-owned C++ contribution:
 - eviction-cost-aware KV-cache slot selection;
 - an extracted iteration-level `InferenceScheduler` module;
 - decode-first token budgeting and configurable fair chunked prefill;
+- proactive unified-KV capacity admission and recency-aware victim planning;
 - engine-native KV, prompt-cache, scheduler, and memory metrics;
 - a native C++ scheduler test target covering compatibility and fairness.
 
