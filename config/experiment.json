@@ -1,0 +1,52 @@
+{
+  "bench_exe": "runtime/bin/llama-bench.exe",
+  "models": [
+    {
+      "key": "q4_k_m",
+      "quantization": "Q4_K_M",
+      "path": "models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+    },
+    {
+      "key": "q8_0",
+      "quantization": "Q8_0",
+      "path": "models/qwen2.5-0.5b-instruct-q8_0.gguf"
+    },
+    {
+      "key": "fp16",
+      "quantization": "F16",
+      "path": "models/qwen2.5-0.5b-instruct-fp16.gguf"
+    }
+  ],
+  "cases": [
+    {
+      "name": "gpu-quantization",
+      "models": ["q4_k_m", "q8_0", "fp16"],
+      "prompt_tokens": 256,
+      "generation_tokens": 64,
+      "threads": 12,
+      "gpu_layers": -1,
+      "repetitions": 3,
+      "flash_attention": "auto"
+    },
+    {
+      "name": "cpu-thread-6",
+      "models": ["q4_k_m"],
+      "prompt_tokens": 256,
+      "generation_tokens": 64,
+      "threads": 6,
+      "gpu_layers": 0,
+      "repetitions": 3,
+      "flash_attention": "off"
+    },
+    {
+      "name": "cpu-thread-12",
+      "models": ["q4_k_m"],
+      "prompt_tokens": 256,
+      "generation_tokens": 64,
+      "threads": 12,
+      "gpu_layers": 0,
+      "repetitions": 3,
+      "flash_attention": "off"
+    }
+  ]
+}

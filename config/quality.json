@@ -1,0 +1,54 @@
+{
+  "server_exe": "runtime/bin/llama-server.exe",
+  "port": 18081,
+  "context": 2048,
+  "gpu_layers": -1,
+  "max_tokens": 96,
+  "models": [
+    {
+      "key": "q4_k_m",
+      "quantization": "Q4_K_M",
+      "path": "models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+    },
+    {
+      "key": "q8_0",
+      "quantization": "Q8_0",
+      "path": "models/qwen2.5-0.5b-instruct-q8_0.gguf"
+    },
+    {
+      "key": "fp16",
+      "quantization": "F16",
+      "path": "models/qwen2.5-0.5b-instruct-fp16.gguf"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "capital",
+      "prompt": "法国的首都是什么？只回答城市名。",
+      "required_patterns": ["巴黎"]
+    },
+    {
+      "id": "arithmetic",
+      "prompt": "计算 17+25，只回答结果。",
+      "required_patterns": ["42"]
+    },
+    {
+      "id": "binary-search",
+      "prompt": "二分查找成立的关键条件和时间复杂度是什么？",
+      "required_patterns": ["有序", "log"],
+      "forbidden_patterns": ["长度是偶数", "长度是奇数"]
+    },
+    {
+      "id": "process-thread",
+      "prompt": "同一进程中的线程共享什么？请列出地址空间和打开文件。",
+      "required_patterns": ["地址空间", "文件"],
+      "forbidden_patterns": ["每个线程都有自己的地址空间", "地址空间的大小通常"]
+    },
+    {
+      "id": "kv-cache",
+      "prompt": "KV Cache 随上下文长度增加时，显存占用通常如何变化？",
+      "required_patterns": ["线性"],
+      "forbidden_patterns": ["内存不足", "旧的数据块会被删除"]
+    }
+  ]
+}
