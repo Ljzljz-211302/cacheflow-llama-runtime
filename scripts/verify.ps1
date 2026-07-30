@@ -37,6 +37,12 @@ try {
     if ($Full) {
         powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_patched_server.ps1
         if ($LASTEXITCODE -ne 0) { throw "patched server build failed" }
+        powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_cuda_kv.ps1
+        if ($LASTEXITCODE -ne 0) { throw "CUDA KV backend build failed" }
+        python scripts\run_kv_block_smoke.py --mode share
+        if ($LASTEXITCODE -ne 0) { throw "resident prefix sharing smoke failed" }
+        python scripts\run_kv_block_smoke.py --mode preempt --port 8108
+        if ($LASTEXITCODE -ne 0) { throw "preempt/restore smoke failed" }
         python scripts\run_engine_ab.py
         if ($LASTEXITCODE -ne 0) { throw "engine scheduler A/B failed" }
         python scripts\run_prefill_ab.py

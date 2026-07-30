@@ -1,8 +1,27 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9e7b125..6195e3f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -169,6 +169,14 @@ llama_option_depr(WARNING     LLAMA_SYCL_F16            GGML_SYCL_F16)
+ llama_option_depr(WARNING     LLAMA_CANN                GGML_CANN)
+ llama_option_depr(WARNING     LLAMA_CURL)
+ 
++# CacheFlow adds CUDA sources outside ggml/src/ggml-cuda. Enable the language
++# and toolkit targets at project scope so the server adapter and its native
++# correctness test use the same compiler/toolkit as the ggml CUDA backend.
++if (GGML_CUDA)
++    find_package(CUDAToolkit REQUIRED)
++    enable_language(CUDA)
++endif()
++
+ include("cmake/license.cmake")
+ license_add_file("llama.cpp" "LICENSE")
+ 
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 8382c1d..a2d44dd 100644
+index 8382c1d..8ed8fc2 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -3256,6 +3256,30 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3256,6 +3256,75 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.slot_prompt_similarity = std::stof(value);
          }
      ).set_examples({LLAMA_EXAMPLE_SERVER}));
@@ -19,6 +38,21 @@ index 8382c1d..a2d44dd 100644
 +        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
++        {"--kv-block-runtime"},
++        "enable transactional block-level prefix sharing and residency tracking",
++        [](common_params & params) { params.kv_block_runtime = true; }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--kv-block-size"}, "N",
++        string_format("logical KV block size in tokens (default: %d)", params.kv_block_size),
++        [](common_params & params, int value) {
++            if (value <= 0 || (value & (value - 1)) != 0) {
++                throw std::invalid_argument("KV block size must be a positive power of two");
++            }
++            params.kv_block_size = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
 +        {"--prefill-chunk-size"}, "N",
 +        string_format(
 +            "maximum prompt tokens scheduled per slot in one decode iteration (default: %d; 0 = upstream greedy prefill)",
@@ -30,27 +64,105 @@ index 8382c1d..a2d44dd 100644
 +            params.prefill_chunk_size = value;
 +        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--prefill-chunk-adaptive"},
++        "adapt prefill chunk size to measured iteration latency and decode pressure",
++        [](common_params & params) { params.prefill_chunk_adaptive = true; }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--prefill-chunk-min"}, "N",
++        string_format("minimum adaptive prefill chunk (default: %d)", params.prefill_chunk_min),
++        [](common_params & params, int value) {
++            if (value <= 0) throw std::invalid_argument("minimum prefill chunk must be positive");
++            params.prefill_chunk_min = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--prefill-chunk-max"}, "N",
++        string_format("maximum adaptive prefill chunk (default: %d)", params.prefill_chunk_max),
++        [](common_params & params, int value) {
++            if (value <= 0) throw std::invalid_argument("maximum prefill chunk must be positive");
++            params.prefill_chunk_max = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--prefill-target-iteration-ms"}, "MS",
++        string_format("adaptive prefill iteration latency target (default: %.1f ms)", params.prefill_target_iteration_ms),
++        [](common_params & params, const std::string & text) {
++            const float value = std::stof(text);
++            if (value <= 0.0f) throw std::invalid_argument("prefill target latency must be positive");
++            params.prefill_target_iteration_ms = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
      add_opt(common_arg(
          {"--lora-init-without-apply"},
          string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),
+@@ -3413,6 +3482,37 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+ 
+     //
+     // speculative parameters
++    add_opt(common_arg(
++        {"--speculative-adaptive"},
++        "adapt draft length per sequence using acceptance and KV pressure",
++        [](common_params & params) { params.speculative_adaptive = true; }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--speculative-disable-acceptance"}, "RATIO",
++        string_format("temporarily disable speculation below acceptance EWMA (default: %.2f)", params.speculative_disable_acceptance),
++        [](common_params & params, const std::string & text) {
++            const float value = std::stof(text);
++            if (value < 0.0f || value > 1.0f) throw std::invalid_argument("speculative acceptance must be in [0, 1]");
++            params.speculative_disable_acceptance = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--speculative-kv-pressure"}, "RATIO",
++        string_format("shrink draft length above KV utilization (default: %.2f)", params.speculative_kv_pressure),
++        [](common_params & params, const std::string & text) {
++            const float value = std::stof(text);
++            if (value < 0.0f || value > 1.0f) throw std::invalid_argument("speculative KV pressure must be in [0, 1]");
++            params.speculative_kv_pressure = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--speculative-cooldown"}, "N",
++        string_format("iterations to disable low-value speculation (default: %d)", params.speculative_cooldown),
++        [](common_params & params, int value) {
++            if (value < 0) throw std::invalid_argument("speculative cooldown must be non-negative");
++            params.speculative_cooldown = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+     //
+ 
+     add_opt(common_arg(
 diff --git a/common/common.h b/common/common.h
-index 0b284cb..1ba8a9d 100644
+index 0b284cb..903f701 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -653,6 +653,8 @@ struct common_params {
+@@ -653,6 +653,18 @@ struct common_params {
      std::string media_path; // path to directory for loading media files
  
      float slot_prompt_similarity = 0.1f;
 +    float slot_cache_eviction_penalty = 0.0f;
 +    int32_t prefill_chunk_size = 0;
++    bool    prefill_chunk_adaptive = false;
++    int32_t prefill_chunk_min = 16;
++    int32_t prefill_chunk_max = 512;
++    float   prefill_target_iteration_ms = 25.0f;
++    bool    speculative_adaptive = false;
++    float   speculative_disable_acceptance = 0.20f;
++    float   speculative_kv_pressure = 0.85f;
++    int32_t speculative_cooldown = 8;
++    bool    kv_block_runtime = false;
++    int32_t kv_block_size = 16;
  
      // batched-bench params
      bool is_pp_shared   = false;
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index e284a58..3684e9e 100644
+index e284a58..c018bc9 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -116,6 +116,16 @@ function(llama_build_and_test source)
+@@ -116,6 +116,50 @@ function(llama_build_and_test source)
      set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})
  endfunction()
  
@@ -64,15 +176,49 @@ index e284a58..3684e9e 100644
 +target_include_directories(test-kv-capacity-planner PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
 +llama_test(test-kv-capacity-planner)
 +
++llama_build(test-kv-block-manager.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-block-manager.cpp)
++target_include_directories(test-kv-block-manager PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++llama_test(test-kv-block-manager)
++
++llama_build(test-kv-runtime.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-runtime.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-block-manager.cpp)
++target_include_directories(test-kv-runtime PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++llama_test(test-kv-runtime)
++
++llama_build(test-kv-block-backend.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-block-backend.cpp)
++target_include_directories(test-kv-block-backend PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++llama_test(test-kv-block-backend)
++
++llama_build(test-speculation-controller.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-speculation-controller.cpp)
++target_include_directories(test-speculation-controller PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++llama_test(test-speculation-controller)
++
++if (GGML_CUDA)
++    # This correctness target intentionally does not link the full llama/ggml
++    # graph so CUDA KV kernel iteration stays fast and independently testable.
++    add_executable(test-kv-block-cuda
++        test-kv-block-cuda.cpp
++        ${PROJECT_SOURCE_DIR}/tools/server/server-kv-block-backend.cpp
++        ${PROJECT_SOURCE_DIR}/tools/server/server-kv-block-cuda.cu)
++    target_include_directories(test-kv-block-cuda PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++    target_compile_definitions(test-kv-block-cuda PRIVATE GGML_USE_CUDA)
++    target_link_libraries(test-kv-block-cuda PRIVATE CUDA::cudart)
++    llama_test(test-kv-block-cuda)
++endif()
++
  # build test-tokenizer-0 target once and add many tests
  llama_build(test-tokenizer-0.cpp)
  
 diff --git a/tests/test-inference-scheduler.cpp b/tests/test-inference-scheduler.cpp
 new file mode 100644
-index 0000000..d5a597b
+index 0000000..814c5f0
 --- /dev/null
 +++ b/tests/test-inference-scheduler.cpp
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,83 @@
 +#include "server-inference-scheduler.h"
 +
 +#include <cassert>
@@ -127,11 +273,394 @@ index 0000000..d5a597b
 +    assert(next.quota(1) == 0);
 +}
 +
++static void test_adaptive_chunk_responds_to_real_iteration_feedback() {
++    server_scheduler_config config;
++    config.adaptive_prefill = true;
++    config.prefill_chunk_size = 128;
++    config.prefill_chunk_min = 16;
++    config.prefill_chunk_max = 256;
++    config.target_iteration_ms = 20.0;
++    server_inference_scheduler scheduler(config);
++
++    assert(scheduler.plan_prefill({{0, 1000}}, 512).quota(0) == 128);
++    scheduler.observe_iteration({1, 128, 50.0});
++    assert(scheduler.state().effective_chunk_size == 64);
++    scheduler.observe_iteration({1, 64, 40.0});
++    assert(scheduler.state().effective_chunk_size == 32);
++    scheduler.observe_iteration({1, 32, 10.0});
++    assert(scheduler.state().effective_chunk_size == 48);
++    scheduler.observe_iteration({0, 48, 100.0});
++    assert(scheduler.state().effective_chunk_size == 256);
++    assert(scheduler.state().observations == 4);
++}
++
 +int main() {
 +    test_cost_aware_slot_selection();
 +    test_threshold_negative_benefit_and_lru_tie_break();
 +    test_chunked_prefill_shares_an_iteration_budget();
 +    test_zero_chunk_preserves_greedy_upstream_behavior();
++    test_adaptive_chunk_responds_to_real_iteration_feedback();
++    return 0;
++}
+diff --git a/tests/test-kv-block-backend.cpp b/tests/test-kv-block-backend.cpp
+new file mode 100644
+index 0000000..3f51340
+--- /dev/null
++++ b/tests/test-kv-block-backend.cpp
+@@ -0,0 +1,91 @@
++#include "server-kv-block-backend.h"
++
++#include <cassert>
++#include <cstdint>
++#include <stdexcept>
++#include <vector>
++
++static server_kv_tensor_layout test_layout() {
++    return { 2, 2, 3, 4, server_kv_element_type::fp16,
++        server_kv_memory_layout::separate_k_v_planes };
++}
++
++static std::vector<uint16_t> payload(size_t size, uint16_t seed) {
++    std::vector<uint16_t> result(size);
++    for (size_t i = 0; i < size; ++i) result[i] = (uint16_t) (seed + i * 17);
++    return result;
++}
++
++static void test_copy_and_cow_match_source() {
++    const auto layout = test_layout();
++    auto backend = server_kv_create_cpu_block_backend(layout, 8);
++    const auto k = payload(layout.elements_per_plane_block(), 100);
++    const auto v = payload(layout.elements_per_plane_block(), 900);
++    backend->write_block(1, k, v);
++    backend->wait(backend->copy_blocks({{ 1, 4 }}, layout));
++    backend->wait(backend->clone_shared_tail(1, 5, layout));
++    const auto result = backend->read_blocks({ 4, 5 });
++    assert(result.block_count == 2);
++    assert(std::vector<uint16_t>(result.k.begin(), result.k.begin() + k.size()) == k);
++    assert(std::vector<uint16_t>(result.k.begin() + k.size(), result.k.end()) == k);
++    assert(std::vector<uint16_t>(result.v.begin(), result.v.begin() + v.size()) == v);
++    assert(std::vector<uint16_t>(result.v.begin() + v.size(), result.v.end()) == v);
++    const auto stats = backend->stats();
++    assert(stats.blocks_copied == 4); // copy + COW + two-block readback
++    assert(stats.events_waited == 3);
++}
++
++static void test_overlapping_batch_uses_snapshot_semantics() {
++    const auto layout = test_layout();
++    auto backend = server_kv_create_cpu_block_backend(layout, 4);
++    const size_t size = layout.elements_per_plane_block();
++    const auto k0 = payload(size, 10);
++    const auto v0 = payload(size, 20);
++    const auto k1 = payload(size, 30);
++    const auto v1 = payload(size, 40);
++    backend->write_block(0, k0, v0);
++    backend->write_block(1, k1, v1);
++    backend->wait(backend->copy_blocks({{ 0, 1 }, { 1, 2 }}, layout));
++    const auto result = backend->read_blocks({ 1, 2 });
++    assert(std::vector<uint16_t>(result.k.begin(), result.k.begin() + size) == k0);
++    assert(std::vector<uint16_t>(result.k.begin() + size, result.k.end()) == k1);
++    assert(std::vector<uint16_t>(result.v.begin(), result.v.begin() + size) == v0);
++    assert(std::vector<uint16_t>(result.v.begin() + size, result.v.end()) == v1);
++}
++
++static void test_swap_round_trip_and_validation() {
++    const auto layout = test_layout();
++    auto backend = server_kv_create_cpu_block_backend(layout, 6);
++    const size_t size = layout.elements_per_plane_block();
++    const auto k = payload(size, 0x1000);
++    const auto v = payload(size, 0x2000);
++    backend->write_block(2, k, v);
++    server_kv_host_blocks host;
++    backend->wait(backend->swap_out({ 2 }, host));
++    backend->wait(backend->swap_in(host, { 5 }));
++    const auto restored = backend->read_blocks({ 5 });
++    assert(restored.k == k && restored.v == v);
++
++    bool rejected = false;
++    try {
++        backend->copy_blocks({{ 2, 7 }}, layout);
++    } catch (const std::out_of_range &) {
++        rejected = true;
++    }
++    assert(rejected);
++
++    rejected = false;
++    try {
++        backend->copy_blocks({{ 0, 3 }, { 1, 3 }}, layout);
++    } catch (const std::invalid_argument &) {
++        rejected = true;
++    }
++    assert(rejected);
++}
++
++int main() {
++    test_copy_and_cow_match_source();
++    test_overlapping_batch_uses_snapshot_semantics();
++    test_swap_round_trip_and_validation();
++    return 0;
++}
+diff --git a/tests/test-kv-block-cuda.cpp b/tests/test-kv-block-cuda.cpp
+new file mode 100644
+index 0000000..cb1a5ab
+--- /dev/null
++++ b/tests/test-kv-block-cuda.cpp
+@@ -0,0 +1,102 @@
++#include "server-kv-block-backend.h"
++
++#include <algorithm>
++#include <cassert>
++#include <cstdint>
++#include <random>
++#include <stdexcept>
++#include <vector>
++
++static std::vector<uint16_t> payload(size_t size, uint16_t seed) {
++    std::vector<uint16_t> result(size);
++    for (size_t i = 0; i < size; ++i) result[i] = (uint16_t) (seed ^ (i * 131));
++    return result;
++}
++
++static void require_equal(const server_kv_host_blocks & left, const server_kv_host_blocks & right) {
++    assert(left.block_count == right.block_count);
++    assert(left.k == right.k);
++    assert(left.v == right.v);
++}
++
++static void run_layout_case(uint32_t block_tokens, uint32_t head_dim, uint32_t seed) {
++    const server_kv_tensor_layout layout = {
++        3, 4, head_dim, block_tokens, server_kv_element_type::fp16,
++        server_kv_memory_layout::separate_k_v_planes,
++    };
++    constexpr uint32_t capacity = 48;
++    auto cpu = server_kv_create_cpu_block_backend(layout, capacity);
++    auto cuda = server_kv_create_cuda_block_backend(layout, capacity);
++    const size_t elements = layout.elements_per_plane_block();
++    for (uint32_t block = 0; block < capacity; ++block) {
++        const auto k = payload(elements, (uint16_t) (seed + block));
++        const auto v = payload(elements, (uint16_t) (seed + 1000 + block));
++        cpu->write_block(block, k, v);
++        cuda->write_block(block, k, v);
++    }
++
++    // Non-contiguous, overlapping and repeated sources exercise the batched
++    // gather/scatter snapshot contract.
++    const std::vector<server_kv_block_copy> mapping = {
++        { 0, 13 }, { 7, 3 }, { 3, 20 }, { 7, 21 }, { 2, 0 },
++    };
++    cpu->wait(cpu->copy_blocks(mapping, layout));
++    cuda->wait(cuda->copy_blocks(mapping, layout));
++    require_equal(cpu->read_blocks({ 0, 3, 13, 20, 21 }),
++            cuda->read_blocks({ 0, 3, 13, 20, 21 }));
++
++    cpu->wait(cpu->clone_shared_tail(7, 25, layout));
++    cuda->wait(cuda->clone_shared_tail(7, 25, layout));
++    require_equal(cpu->read_blocks({ 25 }), cuda->read_blocks({ 25 }));
++
++    server_kv_host_blocks cpu_host;
++    server_kv_host_blocks cuda_host;
++    cpu->wait(cpu->swap_out({ 0, 7, 25 }, cpu_host));
++    cuda->wait(cuda->swap_out({ 0, 7, 25 }, cuda_host));
++    require_equal(cpu_host, cuda_host);
++    cpu->wait(cpu->swap_in(cpu_host, { 26, 27, 28 }));
++    cuda->wait(cuda->swap_in(cuda_host, { 26, 27, 28 }));
++    require_equal(cpu->read_blocks({ 26, 27, 28 }), cuda->read_blocks({ 26, 27, 28 }));
++
++    // Property-style randomized batches cover non-contiguous mappings and
++    // source/destination overlap across many generations.
++    std::mt19937 rng(seed);
++    for (size_t iteration = 0; iteration < 100; ++iteration) {
++        const size_t count = 1 + rng() % 12;
++        std::vector<server_kv_block_copy> copies;
++        std::vector<uint32_t> destinations;
++        while (copies.size() < count) {
++            const uint32_t destination = rng() % capacity;
++            if (std::find(destinations.begin(), destinations.end(), destination) != destinations.end()) {
++                continue;
++            }
++            destinations.push_back(destination);
++            copies.push_back({ rng() % capacity, destination });
++        }
++        cpu->wait(cpu->copy_blocks(copies, layout));
++        cuda->wait(cuda->copy_blocks(copies, layout));
++        require_equal(cpu->read_blocks(destinations), cuda->read_blocks(destinations));
++    }
++
++    bool cpu_rejected = false;
++    bool cuda_rejected = false;
++    try { cpu->copy_blocks({{ 0, 2 }, { 1, 2 }}, layout); }
++    catch (const std::invalid_argument &) { cpu_rejected = true; }
++    try { cuda->copy_blocks({{ 0, 2 }, { 1, 2 }}, layout); }
++    catch (const std::invalid_argument &) { cuda_rejected = true; }
++    assert(cpu_rejected && cuda_rejected);
++    const auto stats = cuda->stats();
++    assert(stats.kernel_launches > 0);
++    assert(stats.blocks_copied > 0);
++    assert(stats.copy_bytes >= stats.blocks_copied * layout.bytes_per_block());
++    assert(stats.pinned_bytes_current == 0);
++    assert(stats.pinned_bytes_peak > 0);
++}
++
++int main() {
++    run_layout_case(8, 16, 11);
++    run_layout_case(16, 32, 22);
++    run_layout_case(32, 64, 33);
++    run_layout_case(64, 128, 44);
++    return 0;
++}
+diff --git a/tests/test-kv-block-manager.cpp b/tests/test-kv-block-manager.cpp
+new file mode 100644
+index 0000000..ff90ecd
+--- /dev/null
++++ b/tests/test-kv-block-manager.cpp
+@@ -0,0 +1,150 @@
++#include "server-kv-block-manager.h"
++
++#include <cassert>
++#include <algorithm>
++#include <random>
++#include <string>
++#include <vector>
++
++static std::vector<server_kv_token> tokens(int begin, int count) {
++    std::vector<server_kv_token> result;
++    for (int i = 0; i < count; ++i) result.push_back(begin + i);
++    return result;
++}
++
++static void test_prefix_blocks_are_shared_but_partial_tail_is_private() {
++    server_kv_block_manager manager(4, 16);
++    const auto first = manager.attach(1, tokens(0, 10), 0, 10);
++    const auto second = manager.attach(2, tokens(0, 10), 0, 20);
++    assert(first.admitted && second.admitted);
++    assert(first.allocated_blocks == 3);
++    assert(second.shared_blocks == 2);
++    assert(second.allocated_blocks == 1);
++    assert(second.matched_tokens == 8);
++    const auto snapshot = manager.snapshot();
++    assert(snapshot.allocated_blocks == 4);
++    assert(snapshot.shared_blocks == 2);
++    assert(manager.validate().empty());
++}
++
++static void test_copy_on_write_clones_shared_tail() {
++    server_kv_block_manager manager(4, 8);
++    assert(manager.attach(1, tokens(0, 8), 4, 10).admitted);
++    assert(manager.attach(2, tokens(0, 8), 4, 20).admitted);
++    const auto before = manager.snapshot();
++    assert(before.allocated_blocks == 2);
++    const auto writable = manager.make_tail_writable(2, 30);
++    assert(writable.writable && writable.copied);
++    const auto after = manager.snapshot();
++    assert(after.allocated_blocks == 3);
++    assert(after.sequences[0].blocks.back() != after.sequences[1].blocks.back());
++    assert(manager.validate().empty());
++}
++
++static void test_reservation_enforces_admission_and_is_consumed_by_append() {
++    server_kv_block_manager manager(4, 4);
++    const auto admitted = manager.attach(1, tokens(0, 4), 8, 1);
++    assert(admitted.admitted);
++    assert(admitted.reserved_blocks == 2);
++    assert(!manager.attach(2, tokens(10, 8), 0, 2).admitted);
++    std::string error;
++    assert(manager.append(1, tokens(100, 8), 3, &error));
++    const auto snapshot = manager.snapshot();
++    assert(snapshot.allocated_blocks == 3);
++    assert(snapshot.reserved_blocks == 0);
++    assert(manager.validate().empty());
++}
++
++static void test_release_preserves_shared_prefix_until_last_owner() {
++    server_kv_block_manager manager(4, 8);
++    assert(manager.attach(1, tokens(0, 8), 0, 1).admitted);
++    assert(manager.attach(2, tokens(0, 8), 0, 2).admitted);
++    assert(manager.release(1));
++    assert(manager.snapshot().allocated_blocks == 2);
++    assert(manager.longest_prefix_blocks(tokens(0, 8)) == 2);
++    assert(manager.release(2));
++    assert(manager.snapshot().allocated_blocks == 0);
++    assert(manager.longest_prefix_blocks(tokens(0, 8)) == 0);
++    assert(manager.validate().empty());
++}
++
++static void test_failed_attach_is_atomic() {
++    server_kv_block_manager manager(4, 2);
++    assert(manager.attach(1, tokens(0, 8), 0, 1).admitted);
++    const auto before = manager.snapshot();
++    const auto failed = manager.attach(2, tokens(20, 4), 0, 2);
++    assert(!failed.admitted);
++    const auto after = manager.snapshot();
++    assert(before.allocated_blocks == after.allocated_blocks);
++    assert(before.sequences.size() == after.sequences.size());
++    assert(manager.validate().empty());
++}
++
++static void test_cow_descendants_never_enter_root_prefix_index() {
++    server_kv_block_manager manager(4, 16);
++    assert(manager.attach(1, tokens(0, 8), 8, 1).admitted);
++    assert(manager.attach(2, tokens(0, 8), 8, 2).admitted);
++    assert(manager.make_tail_writable(2, 3).copied);
++    std::string error;
++    assert(manager.append(2, tokens(8, 8), 4, &error));
++
++    const auto snapshot = manager.snapshot();
++    for (const auto & sequence : snapshot.sequences) {
++        if (sequence.id != 2) continue;
++        assert(sequence.blocks.size() == 4);
++        assert(!snapshot.blocks[sequence.blocks[1] - 1].prefix_indexed);
++        assert(!snapshot.blocks[sequence.blocks[2] - 1].prefix_indexed);
++        assert(!snapshot.blocks[sequence.blocks[3] - 1].prefix_indexed);
++    }
++    // Only the original two-block canonical chain remains reusable.
++    assert(manager.longest_prefix_blocks(tokens(0, 16)) == 2);
++    assert(manager.validate().empty());
++}
++
++static void test_randomized_operations_preserve_capacity_and_references() {
++    server_kv_block_manager manager(4, 32);
++    std::mt19937 rng(20260730);
++    std::vector<server_kv_sequence_id> active;
++    server_kv_sequence_id next_id = 1;
++
++    for (uint64_t step = 1; step <= 2000; ++step) {
++        const int operation = (int) (rng() % 4);
++        if (operation == 0 || active.empty()) {
++            const int length = 1 + (int) (rng() % 20);
++            auto prompt = tokens((rng() % 3 == 0) ? 0 : (int) (rng() % 1000), length);
++            const auto result = manager.attach(next_id, prompt, rng() % 9, step);
++            if (result.admitted) active.push_back(next_id);
++            next_id++;
++        } else {
++            const size_t index = rng() % active.size();
++            const auto id = active[index];
++            if (operation == 1) {
++                std::string error;
++                manager.append(id, tokens((int) (rng() % 1000), 1 + rng() % 7), step, &error);
++            } else if (operation == 2) {
++                manager.make_tail_writable(id, step);
++            } else {
++                assert(manager.release(id));
++                active.erase(active.begin() + index);
++            }
++        }
++        assert(manager.validate().empty());
++        const auto snapshot = manager.snapshot();
++        assert(snapshot.allocated_blocks + snapshot.reserved_blocks <= snapshot.capacity_blocks);
++    }
++
++    for (auto id : active) assert(manager.release(id));
++    assert(manager.snapshot().allocated_blocks == 0);
++    assert(manager.validate().empty());
++}
++
++int main() {
++    test_prefix_blocks_are_shared_but_partial_tail_is_private();
++    test_copy_on_write_clones_shared_tail();
++    test_reservation_enforces_admission_and_is_consumed_by_append();
++    test_release_preserves_shared_prefix_until_last_owner();
++    test_failed_attach_is_atomic();
++    test_cow_descendants_never_enter_root_prefix_index();
++    test_randomized_operations_preserve_capacity_and_references();
 +    return 0;
 +}
 diff --git a/tests/test-kv-capacity-planner.cpp b/tests/test-kv-capacity-planner.cpp
@@ -180,11 +709,158 @@ index 0000000..2f24408
 +    test_reclaims_multiple_slots_and_reports_unresolved_pressure();
 +    return 0;
 +}
+diff --git a/tests/test-kv-runtime.cpp b/tests/test-kv-runtime.cpp
+new file mode 100644
+index 0000000..554e228
+--- /dev/null
++++ b/tests/test-kv-runtime.cpp
+@@ -0,0 +1,83 @@
++#include "server-kv-runtime.h"
++
++#include <algorithm>
++#include <cassert>
++#include <random>
++#include <string>
++#include <vector>
++
++static std::vector<server_kv_token> tokens(int begin, int count) {
++    std::vector<server_kv_token> result;
++    for (int i = 0; i < count; ++i) result.push_back(begin + i);
++    return result;
++}
++
++static void test_prefix_plan_uses_only_full_resident_blocks() {
++    server_kv_runtime runtime(4, 16);
++    assert(runtime.synchronize(1, tokens(0, 10), 0, 10));
++    auto plan = runtime.plan_prefix_share(2, tokens(0, 9));
++    assert(plan.donor == 1 && plan.matched_tokens == 8 && plan.matched_blocks == 2);
++    assert(runtime.preempt(1, 20));
++    assert(runtime.is_swapped(1));
++    assert(!runtime.plan_prefix_share(2, tokens(0, 9)).found());
++    assert(runtime.restore(1, 30));
++    assert(!runtime.is_swapped(1));
++    assert(runtime.plan_prefix_share(2, tokens(0, 9)).matched_tokens == 8);
++    assert(runtime.validate().empty());
++}
++
++static void test_failed_growth_preserves_old_table_atomically() {
++    server_kv_runtime runtime(4, 3);
++    assert(runtime.synchronize(1, tokens(0, 4), 4, 1));
++    const auto before = runtime.snapshot();
++    std::string error;
++    assert(!runtime.synchronize(1, tokens(0, 12), 4, 2, &error));
++    const auto after = runtime.snapshot();
++    assert(!error.empty());
++    assert(after.sequences[0].committed_tokens == before.sequences[0].committed_tokens);
++    assert(after.blocks.allocated_blocks == before.blocks.allocated_blocks);
++    assert(after.blocks.reserved_blocks == before.blocks.reserved_blocks);
++    assert(runtime.validate().empty());
++}
++
++static void test_eligible_donor_filter_and_release() {
++    server_kv_runtime runtime(4, 16);
++    assert(runtime.synchronize(1, tokens(0, 8), 0, 1));
++    assert(runtime.synchronize(2, tokens(0, 12), 0, 2));
++    assert(runtime.plan_prefix_share(3, tokens(0, 12), {1}).donor == 1);
++    assert(runtime.plan_prefix_share(3, tokens(0, 12), {2}).donor == 2);
++    assert(runtime.release(2));
++    assert(runtime.plan_prefix_share(3, tokens(0, 12)).matched_tokens == 8);
++}
++
++static void test_randomized_residency_transitions_preserve_invariants() {
++    server_kv_runtime runtime(4, 40);
++    std::mt19937 rng(20260730);
++    for (uint64_t step = 1; step <= 1000; ++step) {
++        const int id = 1 + rng() % 12;
++        const auto snapshot = runtime.snapshot();
++        auto found = std::find_if(snapshot.sequences.begin(), snapshot.sequences.end(),
++                [id](const auto & value) { return value.id == id; });
++        if (found == snapshot.sequences.end()) {
++            runtime.synchronize(id, tokens((rng() % 3) * 100, 1 + rng() % 16), rng() % 5, step);
++        } else if (found->residency == server_kv_residency::resident && rng() % 3 == 0) {
++            runtime.preempt(id, step);
++        } else if (found->residency == server_kv_residency::swapped && rng() % 2 == 0) {
++            std::string error;
++            runtime.restore(id, step, &error);
++        } else if (rng() % 4 == 0) {
++            runtime.release(id);
++        } else if (found->residency == server_kv_residency::resident) {
++            runtime.synchronize(id, tokens((rng() % 3) * 100, 1 + rng() % 20), rng() % 5, step);
++        }
++        assert(runtime.validate().empty());
++    }
++}
++
++int main() {
++    test_prefix_plan_uses_only_full_resident_blocks();
++    test_failed_growth_preserves_old_table_atomically();
++    test_eligible_donor_filter_and_release();
++    test_randomized_residency_transitions_preserve_invariants();
++    return 0;
++}
+diff --git a/tests/test-speculation-controller.cpp b/tests/test-speculation-controller.cpp
+new file mode 100644
+index 0000000..c052ed3
+--- /dev/null
++++ b/tests/test-speculation-controller.cpp
+@@ -0,0 +1,52 @@
++#include "server-speculation-controller.h"
++
++#include <cassert>
++
++static server_speculation_config adaptive_config() {
++    server_speculation_config config;
++    config.adaptive = true;
++    config.min_draft_tokens = 1;
++    config.max_draft_tokens = 8;
++    config.acceptance_alpha = 0.5;
++    config.cooldown_iterations = 3;
++    config.warmup_observations = 2;
++    return config;
++}
++
++static void test_high_acceptance_grows_and_pressure_shrinks() {
++    server_speculation_controller controller(adaptive_config());
++    assert(controller.recommend(1, 6, 0.2) == 6);
++    controller.observe({1, 6, 6, 0.2});
++    assert(controller.state(1).draft_tokens == 8);
++    assert(controller.recommend(1, 8, 0.9) == 4);
++    controller.observe({1, 4, 4, 0.9});
++    assert(controller.state(1).draft_tokens == 4);
++}
++
++static void test_low_acceptance_disables_then_recovers() {
++    server_speculation_controller controller(adaptive_config());
++    controller.observe({2, 8, 0, 0.2});
++    controller.observe({2, 4, 0, 0.2});
++    assert(controller.state(2).disabled);
++    assert(controller.recommend(2, 8, 0.2) == 0);
++    assert(controller.recommend(2, 8, 0.2) == 0);
++    assert(controller.recommend(2, 8, 0.2) == 0);
++    assert(controller.recommend(2, 8, 0.2) == 1);
++}
++
++static void test_sequences_are_independent_and_fixed_mode_is_compatible() {
++    server_speculation_controller adaptive(adaptive_config());
++    adaptive.observe({1, 8, 0, 0.0});
++    assert(adaptive.state(1).draft_tokens == 4);
++    assert(adaptive.state(2).draft_tokens == 8);
++
++    server_speculation_controller fixed;
++    assert(fixed.recommend(1, 5, 1.0) == 5);
++}
++
++int main() {
++    test_high_acceptance_grows_and_pressure_shrinks();
++    test_low_acceptance_disables_then_recovers();
++    test_sequences_are_independent_and_fixed_mode_is_compatible();
++    return 0;
++}
 diff --git a/tools/server/CMakeLists.txt b/tools/server/CMakeLists.txt
-index 7d42743..95e192c 100644
+index 7d42743..6c7ecde 100644
 --- a/tools/server/CMakeLists.txt
 +++ b/tools/server/CMakeLists.txt
-@@ -11,6 +11,10 @@ add_library(${TARGET} STATIC
+@@ -11,6 +11,18 @@ add_library(${TARGET} STATIC
      server-task.h
      server-queue.cpp
      server-queue.h
@@ -192,23 +868,46 @@ index 7d42743..95e192c 100644
 +    server-inference-scheduler.h
 +    server-kv-capacity-planner.cpp
 +    server-kv-capacity-planner.h
++    server-kv-block-manager.cpp
++    server-kv-block-manager.h
++    server-kv-runtime.cpp
++    server-kv-runtime.h
++    server-kv-block-backend.cpp
++    server-kv-block-backend.h
++    server-speculation-controller.cpp
++    server-speculation-controller.h
      server-common.cpp
      server-common.h
      server-context.cpp
+@@ -27,6 +39,12 @@ target_include_directories(${TARGET} PRIVATE ../mtmd)
+ target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
+ target_link_libraries(${TARGET} PUBLIC llama-common mtmd ${CMAKE_THREAD_LIBS_INIT})
+ 
++if (GGML_CUDA)
++    target_sources(${TARGET} PRIVATE server-kv-block-cuda.cu)
++    target_compile_definitions(${TARGET} PUBLIC GGML_USE_CUDA)
++    target_link_libraries(${TARGET} PUBLIC CUDA::cudart)
++endif()
++
+ # llama-server-impl: server logic, reusable by app
+ 
+ set(TARGET llama-server-impl)
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..ec851b9 100644
+index 986b2f1..777ee09 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -4,6 +4,8 @@
+@@ -4,6 +4,10 @@
  #include "server-http.h"
  #include "server-task.h"
  #include "server-queue.h"
 +#include "server-inference-scheduler.h"
 +#include "server-kv-capacity-planner.h"
++#include "server-kv-runtime.h"
++#include "server-speculation-controller.h"
  
  #include "build-info.h"
  #include "common.h"
-@@ -685,6 +687,7 @@ struct server_metrics {
+@@ -685,6 +689,7 @@ struct server_metrics {
      int64_t t_start = 0;
  
      uint64_t n_prompt_tokens_processed_total = 0;
@@ -216,7 +915,7 @@ index 986b2f1..ec851b9 100644
      uint64_t t_prompt_processing_total       = 0;
      uint64_t n_tokens_predicted_total        = 0;
      uint64_t t_tokens_generation_total       = 0;
-@@ -692,6 +695,7 @@ struct server_metrics {
+@@ -692,6 +697,7 @@ struct server_metrics {
      uint64_t n_tokens_max = 0;
  
      uint64_t n_prompt_tokens_processed = 0;
@@ -224,7 +923,7 @@ index 986b2f1..ec851b9 100644
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -700,6 +704,19 @@ struct server_metrics {
+@@ -700,6 +706,19 @@ struct server_metrics {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -244,7 +943,7 @@ index 986b2f1..ec851b9 100644
      void init() {
          t_start = ggml_time_us();
      }
-@@ -707,6 +724,8 @@ struct server_metrics {
+@@ -707,6 +726,8 @@ struct server_metrics {
      void on_prompt_eval(const server_slot & slot) {
          n_prompt_tokens_processed_total += slot.n_prompt_tokens_processed;
          n_prompt_tokens_processed       += slot.n_prompt_tokens_processed;
@@ -253,7 +952,7 @@ index 986b2f1..ec851b9 100644
          t_prompt_processing             += slot.t_prompt_processing;
          t_prompt_processing_total       += slot.t_prompt_processing;
  
-@@ -730,8 +749,36 @@ struct server_metrics {
+@@ -730,8 +751,36 @@ struct server_metrics {
          }
      }
  
@@ -290,7 +989,7 @@ index 986b2f1..ec851b9 100644
          t_prompt_processing       = 0;
          n_tokens_predicted        = 0;
          t_tokens_generation       = 0;
-@@ -816,8 +863,8 @@ private:
+@@ -816,8 +865,10 @@ private:
      json json_ui_settings = json::object();    // Primary: new name
      json json_webui_settings = json::object();    // Deprecated: use json_ui_settings instead (kept for compat)
  
@@ -298,10 +997,12 @@ index 986b2f1..ec851b9 100644
 -    float slot_prompt_similarity = 0.0f;
 +    server_inference_scheduler inference_scheduler;
 +    server_kv_capacity_planner kv_capacity_planner;
++    std::unique_ptr<server_kv_runtime> kv_runtime;
++    server_speculation_controller speculation_controller;
  
      std::string model_name; // name of the loaded model, to be used by API
      std::set<std::string> model_aliases; // additional names for the model
-@@ -1114,8 +1161,11 @@ private:
+@@ -1114,8 +1165,35 @@ private:
  
          n_swa = params_base.swa_full ? 0 : llama_model_n_swa(model_tgt);
  
@@ -311,11 +1012,35 @@ index 986b2f1..ec851b9 100644
 +            params_base.slot_prompt_similarity,
 +            params_base.slot_cache_eviction_penalty,
 +            (size_t) params_base.prefill_chunk_size,
++            params_base.prefill_chunk_adaptive,
++            (size_t) params_base.prefill_chunk_min,
++            (size_t) params_base.prefill_chunk_max,
++            params_base.prefill_target_iteration_ms,
 +        });
++        speculation_controller.configure({
++            params_base.speculative_adaptive,
++            1,
++            (size_t) std::max(1, params_base.speculative.draft.n_max),
++            0.2,
++            params_base.speculative_disable_acceptance,
++            0.75,
++            params_base.speculative_kv_pressure,
++            (size_t) params_base.speculative_cooldown,
++            4,
++        });
++        if (params_base.kv_block_runtime) {
++            const size_t block_size = (size_t) params_base.kv_block_size;
++            const size_t capacity_blocks = ((size_t) n_ctx + block_size - 1) / block_size;
++            kv_runtime = std::make_unique<server_kv_runtime>(block_size, capacity_blocks);
++            SRV_INF("block KV runtime enabled: block_size = %zu, capacity_blocks = %zu\n",
++                    block_size, capacity_blocks);
++        } else {
++            kv_runtime.reset();
++        }
  
          // setup slots
          SRV_INF("initializing slots, n_slots = %d\n", params_base.n_parallel);
-@@ -1383,9 +1433,10 @@ private:
+@@ -1383,9 +1461,10 @@ private:
  
          bool update_cache = false;
  
@@ -329,7 +1054,7 @@ index 986b2f1..ec851b9 100644
  
              for (server_slot & slot : slots) {
                  // skip the slot if it is not available
-@@ -1393,29 +1444,27 @@ private:
+@@ -1393,29 +1472,27 @@ private:
                      continue;
                  }
  
@@ -377,7 +1102,7 @@ index 986b2f1..ec851b9 100644
  
                  // if we are about to lose a large portion of the existing context - save it in the prompt cache
                  if (f_keep < 0.5f) {
-@@ -1443,6 +1492,7 @@ private:
+@@ -1443,6 +1520,7 @@ private:
  
              if (ret != nullptr) {
                  SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
@@ -385,7 +1110,7 @@ index 986b2f1..ec851b9 100644
  
                  update_cache = true;
              }
-@@ -1469,41 +1519,88 @@ private:
+@@ -1469,41 +1547,114 @@ private:
  
                  SRV_INF("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
              }
@@ -403,7 +1128,20 @@ index 986b2f1..ec851b9 100644
 -    //       - instead of purging, try to store and resume later?
 -    bool try_clear_idle_slots() {
 -        bool res = false;
--
++    double current_kv_pressure() const {
++        auto * memory = llama_get_memory(ctx_tgt);
++        if (!memory || n_ctx <= 0) return 0.0;
++        size_t used_tokens = 0;
++        for (const auto & slot : slots) {
++            const llama_pos pos_min = llama_memory_seq_pos_min(memory, slot.id);
++            const llama_pos pos_max = llama_memory_seq_pos_max(memory, slot.id);
++            if (pos_min >= 0 && pos_max >= pos_min) {
++                used_tokens += (size_t) (pos_max - pos_min + 1);
++            }
++        }
++        return std::min(1.0, (double) used_tokens / n_ctx);
++    }
+ 
 -        if (!params_base.kv_unified) {
 -            return res;
 +    void proactively_reclaim_kv(server_slot & selected, const server_task & task) {
@@ -452,6 +1190,12 @@ index 986b2f1..ec851b9 100644
 +            SRV_WRN("proactively purging KV slot %d with %zu tokens; pressure = %zu, expected recompute = %.2f\n",
 +                    victim_id, victim->prompt.tokens.size(), plan.deficit_tokens,
 +                    plan.expected_recompute_tokens);
++            bool saved = false;
++            if (prompt_cache) {
++                saved = victim->prompt_save(*prompt_cache);
++                if (saved) prompt_cache->update();
++            }
++            if (saved) mark_slot_preempted(*victim);
 +            victim->prompt_clear(false);
 +        }
 +        if (!plan.fits()) {
@@ -491,12 +1235,127 @@ index 986b2f1..ec851b9 100644
 +        GGML_ASSERT(victim != nullptr && !victim->is_processing());
 +        SRV_WRN("purging planned KV victim slot %d with %zu tokens after decode allocation failure\n",
 +                victim->id, victim->prompt.tokens.size());
++        bool saved = false;
++        if (prompt_cache) {
++            saved = victim->prompt_save(*prompt_cache);
++            if (saved) prompt_cache->update();
++        }
++        if (saved) mark_slot_preempted(*victim);
 +        victim->prompt_clear(false);
 +        return true;
      }
  
      std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
-@@ -2301,6 +2398,7 @@ private:
+@@ -1519,7 +1670,82 @@ private:
+         return output;
+     }
+ 
++    void try_adopt_shared_prefix(server_slot & destination, const server_task & task) {
++        if (!kv_runtime || !params_base.kv_unified || !task.params.cache_prompt ||
++                destination.prompt.tokens.has_mtmd || task.tokens.has_mtmd) {
++            return;
++        }
++        std::vector<server_kv_sequence_id> eligible;
++        for (const auto & donor : slots) {
++            if (donor.id == destination.id || donor.prompt.tokens.empty() ||
++                    donor.prompt.tokens.has_mtmd || !are_lora_equal(donor.lora, destination.lora)) {
++                continue;
++            }
++            eligible.push_back(donor.id);
++        }
++        const auto plan = kv_runtime->plan_prefix_share(
++                destination.id, task.tokens.get_tokens(), eligible);
++        const size_t existing = destination.prompt.tokens.get_common_prefix(task.tokens);
++        if (!plan.found() || plan.matched_tokens <= existing) return;
++
++        auto * donor = get_slot_by_id((int) plan.donor);
++        if (!donor || donor->prompt.tokens.size() < plan.matched_tokens) return;
++        common_context_seq_rm(ctx_tgt, destination.id, -1, -1);
++        llama_memory_seq_cp(llama_get_memory(ctx_tgt),
++                donor->id, destination.id, 0, (llama_pos) plan.matched_tokens);
++        if (ctx_dft) {
++            common_context_seq_rm(ctx_dft.get(), destination.id, -1, -1);
++            llama_memory_seq_cp(llama_get_memory(ctx_dft.get()),
++                    donor->id, destination.id, 0, (llama_pos) plan.matched_tokens);
++        }
++        llama_tokens shared;
++        shared.reserve(plan.matched_tokens);
++        for (size_t i = 0; i < plan.matched_tokens; ++i) {
++            shared.push_back(donor->prompt.tokens[i]);
++        }
++        destination.prompt.tokens.clear();
++        destination.prompt.tokens.insert(shared);
++        SRV_INF("shared %zu prefix KV blocks (%zu tokens) from slot %d to slot %d\n",
++                plan.matched_blocks, plan.matched_tokens, donor->id, destination.id);
++    }
++
++    void synchronize_kv_runtime() {
++        if (!kv_runtime) return;
++        const uint64_t now = (uint64_t) ggml_time_us();
++        for (const auto & slot : slots) {
++            if (slot.prompt.tokens.empty()) {
++                if (!kv_runtime->is_swapped(slot.id)) {
++                    kv_runtime->release(slot.id);
++                }
++                continue;
++            }
++            std::string error;
++            if (!kv_runtime->synchronize(
++                    slot.id, slot.prompt.tokens.get_tokens(), 0, now, &error)) {
++                SRV_WRN("logical KV synchronization rejected for slot %d: %s\n",
++                        slot.id, error.c_str());
++            }
++        }
++        const std::string invalid = kv_runtime->validate();
++        GGML_ASSERT(invalid.empty());
++    }
++
++    void mark_slot_preempted(server_slot & slot) {
++        if (!kv_runtime || slot.prompt.tokens.empty()) return;
++        if (!kv_runtime->preempt(slot.id, (uint64_t) ggml_time_us())) {
++            // The logical snapshot may lag a just-completed request by one
++            // iteration. Synchronize it before retrying the transition.
++            std::string error;
++            if (kv_runtime->synchronize(
++                    slot.id, slot.prompt.tokens.get_tokens(), 0,
++                    (uint64_t) ggml_time_us(), &error)) {
++                kv_runtime->preempt(slot.id, (uint64_t) ggml_time_us());
++            }
++        }
++    }
++
+     bool launch_slot_with_task(server_slot & slot, server_task && task) {
++        speculation_controller.reset(slot.id);
+         // process per-request lora adapters
+         if (!task.params.lora.empty()) {
+             auto task_loras = construct_lora_list(task.params.lora);
+@@ -1590,6 +1816,8 @@ private:
+             return false;
+         }
+ 
++        try_adopt_shared_prefix(slot, task);
++
+         SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
+ 
+         // initialize samplers
+@@ -2214,13 +2442,15 @@ private:
+                             if (!slot.is_processing()) {
+                                 SLT_INF(slot, "%s", "saving idle slot to prompt cache\n");
+ 
+-                                if (slot.prompt_save(*prompt_cache)) {
++                                const bool saved = slot.prompt_save(*prompt_cache);
++                                if (saved) {
+                                     SLT_DBG(slot, "%s", "__TEST_TAG_CACHE_IDLE_SLOT__\n");
+                                     prompt_cache->update();
+                                 }
+ 
+                                 if (params_base.kv_unified) {
+                                     // [TAG_IDLE_SLOT_CLEAR]
++                                    if (saved) mark_slot_preempted(slot);
+                                     slot.prompt_clear(false);
+                                 }
+                             }
+@@ -2301,6 +2531,7 @@ private:
                      res->t_start             = metrics.t_start;
  
                      res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
@@ -504,7 +1363,7 @@ index 986b2f1..ec851b9 100644
                      res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
                      res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
                      res->t_tokens_generation_total       = metrics.t_tokens_generation_total;
-@@ -2308,12 +2406,44 @@ private:
+@@ -2308,12 +2539,44 @@ private:
                      res->n_tokens_max = metrics.n_tokens_max;
  
                      res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
@@ -549,7 +1408,18 @@ index 986b2f1..ec851b9 100644
  
                      if (task.metrics_reset_bucket) {
                          metrics.reset_bucket();
-@@ -2705,6 +2835,35 @@ private:
+@@ -2602,7 +2865,9 @@ private:
+                 const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+                 const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
+ 
+-                const int n_draft_max = slot.get_n_draft_max();
++                const int n_draft_configured = slot.get_n_draft_max();
++                const int n_draft_max = (int) speculation_controller.recommend(
++                        slot.id, (size_t) std::max(0, n_draft_configured), current_kv_pressure());
+ 
+                 if (n_draft_max > 0) {
+                     GGML_ASSERT(slot.can_speculate());
+@@ -2705,6 +2970,38 @@ private:
          int32_t n_batch  = llama_n_batch(ctx_tgt);
          int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
  
@@ -577,6 +1447,9 @@ index 986b2f1..ec851b9 100644
 +            const size_t total = (size_t) slot.task->n_tokens();
 +            prefill_candidates.push_back({slot.id, total > cached ? total - cached : 0});
 +        }
++
++        const size_t decode_tokens_planned = (size_t) batch.n_tokens;
++        const int64_t iteration_started_us = ggml_time_us();
 +        const auto prefill_plan = inference_scheduler.plan_prefill(
 +                prefill_candidates,
 +                n_batch > batch.n_tokens ? (size_t) (n_batch - batch.n_tokens) : 0);
@@ -585,7 +1458,7 @@ index 986b2f1..ec851b9 100644
          float  alora_scale       = -1.0f;
          size_t alora_disabled_id = 0;
  
-@@ -2730,6 +2889,13 @@ private:
+@@ -2730,6 +3027,13 @@ private:
                  if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
                      const auto & input_tokens = slot.task->tokens;
  
@@ -599,7 +1472,7 @@ index 986b2f1..ec851b9 100644
                      // used to determine the number of tokens added to the batch for the current slot
                      const auto n_tokens_prev = batch.n_tokens;
  
-@@ -3110,7 +3276,9 @@ private:
+@@ -3110,7 +3414,9 @@ private:
                      const bool n_before_user_known = n_before_user > 0;
  
                      // add prompt tokens for processing in the current batch
@@ -610,7 +1483,34 @@ index 986b2f1..ec851b9 100644
                          // get next token to process
                          llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                          if (cur_tok == LLAMA_TOKEN_NULL) {
-@@ -4127,6 +4295,58 @@ void server_routes::init_routes() {
+@@ -3593,6 +3899,12 @@ private:
+ 
+                 // update how many tokens out of those tested were accepted
+                 slot.n_draft_accepted += ids.size() - 1;
++                speculation_controller.observe({
++                    slot.id,
++                    n_draft,
++                    ids.size() - 1,
++                    current_kv_pressure(),
++                });
+ 
+                 // add accepted tokens to the prompt
+                 slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - n_draft);
+@@ -3633,6 +3945,13 @@ private:
+             }
+         }
+ 
++        inference_scheduler.observe_iteration({
++            decode_tokens_planned,
++            prefill_plan.tokens_scheduled,
++            (ggml_time_us() - iteration_started_us) / 1000.0,
++        });
++        synchronize_kv_runtime();
++
+         SRV_DBG("%s", "run slots completed\n");
+     }
+ 
+@@ -4127,6 +4446,58 @@ void server_routes::init_routes() {
                      {"name",  "prompt_tokens_total"},
                      {"help",  "Number of prompt tokens processed."},
                      {"value",  (uint64_t) res_task->n_prompt_tokens_processed_total}
@@ -669,7 +1569,7 @@ index 986b2f1..ec851b9 100644
              }, {
                      {"name",  "prompt_seconds_total"},
                      {"help",  "Prompt process time"},
-@@ -4156,6 +4376,43 @@ void server_routes::init_routes() {
+@@ -4156,6 +4527,43 @@ void server_routes::init_routes() {
                      {"name",  "predicted_tokens_seconds"},
                      {"help",  "Average generation throughput in tokens/s."},
                      {"value",  res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}
@@ -715,10 +1615,10 @@ index 986b2f1..ec851b9 100644
                      {"help",  "Number of requests processing."},
 diff --git a/tools/server/server-inference-scheduler.cpp b/tools/server/server-inference-scheduler.cpp
 new file mode 100644
-index 0000000..e2aa586
+index 0000000..cc8d76e
 --- /dev/null
 +++ b/tools/server/server-inference-scheduler.cpp
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,167 @@
 +#include "server-inference-scheduler.h"
 +
 +#include <algorithm>
@@ -739,7 +1639,14 @@ index 0000000..e2aa586
 +void server_inference_scheduler::configure(server_scheduler_config config) {
 +    config.min_prefix_similarity = std::max(config.min_prefix_similarity, 0.0f);
 +    config.eviction_penalty = std::max(config.eviction_penalty, 0.0f);
++    config.prefill_chunk_min = std::max<size_t>(1, config.prefill_chunk_min);
++    config.prefill_chunk_max = std::max(config.prefill_chunk_min, config.prefill_chunk_max);
++    config.target_iteration_ms = std::max(0.1, config.target_iteration_ms);
 +    config_ = config;
++    adaptive_chunk_size_ = std::clamp(
++            config.prefill_chunk_size == 0 ? config.prefill_chunk_max : config.prefill_chunk_size,
++            config.prefill_chunk_min,
++            config.prefill_chunk_max);
 +}
 +
 +server_slot_plan server_inference_scheduler::select_slot(
@@ -784,6 +1691,10 @@ index 0000000..e2aa586
 +        size_t token_budget) {
 +    server_prefill_plan plan;
 +    plan.token_budget = token_budget;
++    const size_t chunk_size = config_.adaptive_prefill
++            ? adaptive_chunk_size_
++            : config_.prefill_chunk_size;
++    plan.effective_chunk_size = chunk_size;
 +    if (token_budget == 0 || candidates.empty()) {
 +        return plan;
 +    }
@@ -805,7 +1716,7 @@ index 0000000..e2aa586
 +    }
 +
 +    size_t start = 0;
-+    if (config_.prefill_chunk_size != 0) {
++    if (chunk_size != 0) {
 +        const auto next = std::find_if(ordered.begin(), ordered.end(), [this](const auto & candidate) {
 +            return candidate.id > last_prefill_slot_;
 +        });
@@ -817,9 +1728,9 @@ index 0000000..e2aa586
 +    size_t remaining_budget = token_budget;
 +    for (size_t offset = 0; offset < ordered.size() && remaining_budget > 0; ++offset) {
 +        const auto & candidate = ordered[(start + offset) % ordered.size()];
-+        const size_t per_slot_limit = config_.prefill_chunk_size == 0
++        const size_t per_slot_limit = chunk_size == 0
 +                ? remaining_budget
-+                : config_.prefill_chunk_size;
++                : chunk_size;
 +        const size_t allocation = std::min({
 +                candidate.remaining_tokens,
 +                per_slot_limit,
@@ -831,18 +1742,56 @@ index 0000000..e2aa586
 +        plan.allocations.push_back({candidate.id, allocation});
 +        plan.tokens_scheduled += allocation;
 +        remaining_budget -= allocation;
-+        if (config_.prefill_chunk_size != 0) {
++        if (chunk_size != 0) {
 +            last_prefill_slot_ = candidate.id;
 +        }
 +    }
 +    return plan;
 +}
++
++void server_inference_scheduler::observe_iteration(
++        const server_scheduler_observation & observation) {
++    if (observation.elapsed_ms <= 0.0) return;
++    constexpr double alpha = 0.2;
++    iteration_latency_ewma_ms_ = observations_ == 0
++            ? observation.elapsed_ms
++            : alpha * observation.elapsed_ms + (1.0 - alpha) * iteration_latency_ewma_ms_;
++    observations_++;
++    if (!config_.adaptive_prefill || observation.prefill_tokens == 0) return;
++
++    if (observation.decode_tokens == 0) {
++        // No latency-sensitive decode work is waiting: consume prompt at the
++        // configured throughput ceiling.
++        adaptive_chunk_size_ = config_.prefill_chunk_max;
++        return;
++    }
++
++    if (observation.elapsed_ms > config_.target_iteration_ms) {
++        adaptive_chunk_size_ = std::max(
++                config_.prefill_chunk_min,
++                adaptive_chunk_size_ / 2);
++    } else if (observation.elapsed_ms < config_.target_iteration_ms * 0.70) {
++        // Additive growth avoids oscillating directly back to a large chunk.
++        adaptive_chunk_size_ = std::min(
++                config_.prefill_chunk_max,
++                adaptive_chunk_size_ + config_.prefill_chunk_min);
++    }
++}
++
++server_scheduler_state server_inference_scheduler::state() const {
++    return {
++        config_.adaptive_prefill,
++        config_.adaptive_prefill ? adaptive_chunk_size_ : config_.prefill_chunk_size,
++        iteration_latency_ewma_ms_,
++        observations_,
++    };
++}
 diff --git a/tools/server/server-inference-scheduler.h b/tools/server/server-inference-scheduler.h
 new file mode 100644
-index 0000000..797b48f
+index 0000000..fb474db
 --- /dev/null
 +++ b/tools/server/server-inference-scheduler.h
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,93 @@
 +#pragma once
 +
 +#include <cstddef>
@@ -854,6 +1803,10 @@ index 0000000..797b48f
 +    float  min_prefix_similarity = 0.0f;
 +    float  eviction_penalty      = 0.0f;
 +    size_t prefill_chunk_size    = 0; // zero preserves the upstream greedy policy
++    bool   adaptive_prefill      = false;
++    size_t prefill_chunk_min     = 16;
++    size_t prefill_chunk_max     = 512;
++    double target_iteration_ms   = 25.0;
 +};
 +
 +struct server_slot_candidate {
@@ -887,8 +1840,22 @@ index 0000000..797b48f
 +    std::vector<server_prefill_allocation> allocations;
 +    size_t token_budget = 0;
 +    size_t tokens_scheduled = 0;
++    size_t effective_chunk_size = 0;
 +
 +    size_t quota(int id) const;
++};
++
++struct server_scheduler_observation {
++    size_t decode_tokens = 0;
++    size_t prefill_tokens = 0;
++    double elapsed_ms = 0.0;
++};
++
++struct server_scheduler_state {
++    bool adaptive_prefill = false;
++    size_t effective_chunk_size = 0;
++    double iteration_latency_ewma_ms = 0.0;
++    uint64_t observations = 0;
 +};
 +
 +// Owns request-to-slot placement and iteration-level prefill allocation.
@@ -908,9 +1875,1351 @@ index 0000000..797b48f
 +            const std::vector<server_prefill_candidate> & candidates,
 +            size_t token_budget);
 +
++    void observe_iteration(const server_scheduler_observation & observation);
++    server_scheduler_state state() const;
++
 +private:
 +    server_scheduler_config config_;
 +    int last_prefill_slot_ = -1;
++    size_t adaptive_chunk_size_ = 0;
++    double iteration_latency_ewma_ms_ = 0.0;
++    uint64_t observations_ = 0;
++};
+diff --git a/tools/server/server-kv-block-backend.cpp b/tools/server/server-kv-block-backend.cpp
+new file mode 100644
+index 0000000..9b2ff21
+--- /dev/null
++++ b/tools/server/server-kv-block-backend.cpp
+@@ -0,0 +1,224 @@
++#include "server-kv-block-backend.h"
++
++#include <algorithm>
++#include <limits>
++#include <stdexcept>
++#include <string>
++#include <unordered_set>
++
++namespace {
++
++size_t checked_multiply(size_t left, size_t right, const char * what) {
++    if (right != 0 && left > std::numeric_limits<size_t>::max() / right) {
++        throw std::overflow_error(std::string("KV layout overflow in ") + what);
++    }
++    return left * right;
++}
++
++void require_same_layout(
++        const server_kv_tensor_layout & expected,
++        const server_kv_tensor_layout & actual) {
++    if (expected.layers != actual.layers || expected.kv_heads != actual.kv_heads ||
++            expected.head_dim != actual.head_dim ||
++            expected.block_tokens != actual.block_tokens ||
++            expected.element_type != actual.element_type ||
++            expected.memory_layout != actual.memory_layout) {
++        throw std::invalid_argument("KV tensor layout does not match backend allocation");
++    }
++}
++
++class server_kv_cpu_block_backend final : public server_kv_block_backend {
++public:
++    server_kv_cpu_block_backend(server_kv_tensor_layout layout, size_t capacity_blocks) :
++            layout_(layout), capacity_blocks_(capacity_blocks) {
++        layout_.validate();
++        if (capacity_blocks == 0) {
++            throw std::invalid_argument("KV backend capacity must be positive");
++        }
++        const size_t elements = checked_multiply(
++                layout_.elements_per_plane_block(), capacity_blocks_, "backend capacity");
++        k_.resize(elements);
++        v_.resize(elements);
++    }
++
++    size_t capacity_blocks() const override { return capacity_blocks_; }
++
++    server_kv_backend_event copy_blocks(
++            const std::vector<server_kv_block_copy> & mapping,
++            const server_kv_tensor_layout & layout) override {
++        require_same_layout(layout_, layout);
++        validate_mapping(mapping);
++        const size_t stride = layout_.elements_per_plane_block();
++
++        // Snapshot all sources before touching destinations. This defines
++        // deterministic gather/scatter semantics for overlapping mappings.
++        std::vector<uint16_t> staged_k(checked_multiply(stride, mapping.size(), "copy staging"));
++        std::vector<uint16_t> staged_v(staged_k.size());
++        for (size_t i = 0; i < mapping.size(); ++i) {
++            copy_plane(k_, mapping[i].source, staged_k, i, stride);
++            copy_plane(v_, mapping[i].source, staged_v, i, stride);
++        }
++        for (size_t i = 0; i < mapping.size(); ++i) {
++            copy_plane(staged_k, i, k_, mapping[i].destination, stride);
++            copy_plane(staged_v, i, v_, mapping[i].destination, stride);
++        }
++        stats_.blocks_copied += mapping.size();
++        stats_.copy_bytes += mapping.size() * layout_.bytes_per_block();
++        return complete_event();
++    }
++
++    server_kv_backend_event clone_shared_tail(
++            server_kv_physical_block_id source,
++            server_kv_physical_block_id destination,
++            const server_kv_tensor_layout & layout) override {
++        return copy_blocks({{ source, destination }}, layout);
++    }
++
++    server_kv_backend_event swap_out(
++            const std::vector<server_kv_physical_block_id> & blocks,
++            server_kv_host_blocks & destination) override {
++        validate_blocks(blocks);
++        destination.resize(layout_, blocks.size());
++        const size_t stride = layout_.elements_per_plane_block();
++        for (size_t i = 0; i < blocks.size(); ++i) {
++            copy_plane(k_, blocks[i], destination.k, i, stride);
++            copy_plane(v_, blocks[i], destination.v, i, stride);
++        }
++        stats_.blocks_copied += blocks.size();
++        stats_.copy_bytes += blocks.size() * layout_.bytes_per_block();
++        return complete_event();
++    }
++
++    server_kv_backend_event swap_in(
++            const server_kv_host_blocks & source,
++            const std::vector<server_kv_physical_block_id> & destinations) override {
++        require_same_layout(layout_, source.layout);
++        validate_blocks(destinations);
++        if (source.block_count != destinations.size()) {
++            throw std::invalid_argument("swap-in source and destination counts differ");
++        }
++        const size_t stride = layout_.elements_per_plane_block();
++        const size_t expected = checked_multiply(stride, source.block_count, "swap-in buffer");
++        if (source.k.size() != expected || source.v.size() != expected) {
++            throw std::invalid_argument("swap-in host buffer has invalid size");
++        }
++        for (size_t i = 0; i < destinations.size(); ++i) {
++            copy_plane(source.k, i, k_, destinations[i], stride);
++            copy_plane(source.v, i, v_, destinations[i], stride);
++        }
++        stats_.blocks_copied += destinations.size();
++        stats_.copy_bytes += destinations.size() * layout_.bytes_per_block();
++        return complete_event();
++    }
++
++    void wait(server_kv_backend_event event) override {
++        if (event.value == 0 || event.value > completed_event_) {
++            throw std::invalid_argument("unknown CPU KV backend event");
++        }
++        stats_.events_waited++;
++    }
++
++    server_kv_backend_stats stats() const override { return stats_; }
++
++    void write_block(
++            server_kv_physical_block_id block,
++            const std::vector<uint16_t> & k,
++            const std::vector<uint16_t> & v) override {
++        validate_block(block);
++        const size_t stride = layout_.elements_per_plane_block();
++        if (k.size() != stride || v.size() != stride) {
++            throw std::invalid_argument("block payload does not match KV layout");
++        }
++        copy_plane(k, 0, k_, block, stride);
++        copy_plane(v, 0, v_, block, stride);
++    }
++
++    server_kv_host_blocks read_blocks(
++            const std::vector<server_kv_physical_block_id> & blocks) override {
++        server_kv_host_blocks result;
++        wait(swap_out(blocks, result));
++        return result;
++    }
++
++private:
++    server_kv_tensor_layout layout_;
++    size_t capacity_blocks_;
++    uint64_t completed_event_ = 0;
++    std::vector<uint16_t> k_;
++    std::vector<uint16_t> v_;
++    server_kv_backend_stats stats_;
++
++    server_kv_backend_event complete_event() { return { ++completed_event_ }; }
++
++    void validate_block(server_kv_physical_block_id block) const {
++        if (block >= capacity_blocks_) throw std::out_of_range("physical KV block is out of range");
++    }
++
++    void validate_blocks(const std::vector<server_kv_physical_block_id> & blocks) const {
++        for (auto block : blocks) validate_block(block);
++    }
++
++    void validate_mapping(const std::vector<server_kv_block_copy> & mapping) const {
++        std::unordered_set<server_kv_physical_block_id> destinations;
++        for (const auto & copy : mapping) {
++            validate_block(copy.source);
++            validate_block(copy.destination);
++            if (!destinations.insert(copy.destination).second) {
++                throw std::invalid_argument("KV block mapping contains duplicate destinations");
++            }
++        }
++    }
++
++    static void copy_plane(
++            const std::vector<uint16_t> & source,
++            size_t source_block,
++            std::vector<uint16_t> & destination,
++            size_t destination_block,
++            size_t stride) {
++        std::copy_n(source.begin() + source_block * stride, stride,
++                destination.begin() + destination_block * stride);
++    }
++};
++
++} // namespace
++
++size_t server_kv_tensor_layout::elements_per_plane_block() const {
++    size_t result = layers;
++    result = checked_multiply(result, kv_heads, "KV heads");
++    result = checked_multiply(result, head_dim, "head dimension");
++    return checked_multiply(result, block_tokens, "block tokens");
++}
++
++size_t server_kv_tensor_layout::bytes_per_block() const {
++    // Two FP16 planes: K and V.
++    return checked_multiply(elements_per_plane_block(), 2 * sizeof(uint16_t), "block bytes");
++}
++
++void server_kv_tensor_layout::validate() const {
++    if (layers == 0 || kv_heads == 0 || head_dim == 0 || block_tokens == 0) {
++        throw std::invalid_argument("KV tensor layout dimensions must be positive");
++    }
++    if (element_type != server_kv_element_type::fp16 ||
++            memory_layout != server_kv_memory_layout::separate_k_v_planes) {
++        throw std::invalid_argument("unsupported KV tensor representation");
++    }
++    (void) bytes_per_block();
++}
++
++void server_kv_host_blocks::resize(
++        const server_kv_tensor_layout & value_layout,
++        size_t value_block_count) {
++    value_layout.validate();
++    layout = value_layout;
++    block_count = value_block_count;
++    const size_t elements = checked_multiply(
++            layout.elements_per_plane_block(), block_count, "host block buffer");
++    k.resize(elements);
++    v.resize(elements);
++}
++
++std::unique_ptr<server_kv_block_backend> server_kv_create_cpu_block_backend(
++        server_kv_tensor_layout layout,
++        size_t capacity_blocks) {
++    return std::make_unique<server_kv_cpu_block_backend>(layout, capacity_blocks);
++}
+diff --git a/tools/server/server-kv-block-backend.h b/tools/server/server-kv-block-backend.h
+new file mode 100644
+index 0000000..2a3a909
+--- /dev/null
++++ b/tools/server/server-kv-block-backend.h
+@@ -0,0 +1,104 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <vector>
++
++using server_kv_physical_block_id = uint32_t;
++
++enum class server_kv_element_type : uint8_t {
++    fp16,
++};
++
++enum class server_kv_memory_layout : uint8_t {
++    separate_k_v_planes,
++};
++
++struct server_kv_tensor_layout {
++    uint32_t layers = 0;
++    uint32_t kv_heads = 0;
++    uint32_t head_dim = 0;
++    uint32_t block_tokens = 0;
++    server_kv_element_type element_type = server_kv_element_type::fp16;
++    server_kv_memory_layout memory_layout = server_kv_memory_layout::separate_k_v_planes;
++
++    size_t elements_per_plane_block() const;
++    size_t bytes_per_block() const;
++    void validate() const;
++};
++
++struct server_kv_block_copy {
++    server_kv_physical_block_id source = 0;
++    server_kv_physical_block_id destination = 0;
++};
++
++struct server_kv_backend_event {
++    uint64_t value = 0;
++};
++
++struct server_kv_backend_stats {
++    uint64_t kernel_launches = 0;
++    uint64_t blocks_copied = 0;
++    uint64_t copy_bytes = 0;
++    uint64_t events_waited = 0;
++    uint64_t pinned_bytes_current = 0;
++    uint64_t pinned_bytes_peak = 0;
++    uint64_t backend_errors = 0;
++};
++
++// Host representation used by swap. K and V use separate dense planes in the
++// same block order as `blocks`/`destinations` passed to the operation.
++struct server_kv_host_blocks {
++    server_kv_tensor_layout layout;
++    size_t block_count = 0;
++    std::vector<uint16_t> k;
++    std::vector<uint16_t> v;
++
++    void resize(const server_kv_tensor_layout & value_layout, size_t value_block_count);
++};
++
++// Physical KV data mover. Policy, request state and logical reference counts
++// intentionally do not cross this interface.
++class server_kv_block_backend {
++public:
++    virtual ~server_kv_block_backend() = default;
++
++    virtual size_t capacity_blocks() const = 0;
++    virtual server_kv_backend_event copy_blocks(
++            const std::vector<server_kv_block_copy> & mapping,
++            const server_kv_tensor_layout & layout) = 0;
++    virtual server_kv_backend_event clone_shared_tail(
++            server_kv_physical_block_id source,
++            server_kv_physical_block_id destination,
++            const server_kv_tensor_layout & layout) = 0;
++    virtual server_kv_backend_event swap_out(
++            const std::vector<server_kv_physical_block_id> & blocks,
++            server_kv_host_blocks & destination) = 0;
++    virtual server_kv_backend_event swap_in(
++            const server_kv_host_blocks & source,
++            const std::vector<server_kv_physical_block_id> & destinations) = 0;
++    virtual void wait(server_kv_backend_event event) = 0;
++    virtual server_kv_backend_stats stats() const = 0;
++
++    // Explicit transfer methods keep tests and model adapters independent of
++    // backend allocation details. They are synchronous initialization/readback
++    // boundaries, never called by the scheduler hot path.
++    virtual void write_block(
++            server_kv_physical_block_id block,
++            const std::vector<uint16_t> & k,
++            const std::vector<uint16_t> & v) = 0;
++    virtual server_kv_host_blocks read_blocks(
++            const std::vector<server_kv_physical_block_id> & blocks) = 0;
++};
++
++std::unique_ptr<server_kv_block_backend> server_kv_create_cpu_block_backend(
++        server_kv_tensor_layout layout,
++        size_t capacity_blocks);
++
++#ifdef GGML_USE_CUDA
++std::unique_ptr<server_kv_block_backend> server_kv_create_cuda_block_backend(
++        server_kv_tensor_layout layout,
++        size_t capacity_blocks,
++        int device = 0);
++#endif
+diff --git a/tools/server/server-kv-block-cuda.cu b/tools/server/server-kv-block-cuda.cu
+new file mode 100644
+index 0000000..42e98a4
+--- /dev/null
++++ b/tools/server/server-kv-block-cuda.cu
+@@ -0,0 +1,469 @@
++#include "server-kv-block-backend.h"
++
++#include <cuda_runtime.h>
++
++#include <algorithm>
++#include <cstring>
++#include <memory>
++#include <mutex>
++#include <stdexcept>
++#include <string>
++#include <unordered_map>
++#include <unordered_set>
++#include <utility>
++
++namespace {
++
++void cuda_check(cudaError_t status, const char * operation) {
++    if (status != cudaSuccess) {
++        throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(status));
++    }
++}
++
++__global__ void gather_kv_blocks(
++        const uint16_t * src_k,
++        const uint16_t * src_v,
++        uint16_t * staged_k,
++        uint16_t * staged_v,
++        const server_kv_block_copy * mapping,
++        size_t mapping_count,
++        size_t elements_per_block) {
++    const size_t linear = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
++    const size_t total = mapping_count * elements_per_block;
++    if (linear >= total) return;
++    const size_t mapping_index = linear / elements_per_block;
++    const size_t element = linear % elements_per_block;
++    const size_t source = (size_t) mapping[mapping_index].source * elements_per_block + element;
++    staged_k[linear] = src_k[source];
++    staged_v[linear] = src_v[source];
++}
++
++__global__ void scatter_kv_blocks(
++        const uint16_t * staged_k,
++        const uint16_t * staged_v,
++        uint16_t * dst_k,
++        uint16_t * dst_v,
++        const server_kv_block_copy * mapping,
++        size_t mapping_count,
++        size_t elements_per_block) {
++    const size_t linear = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
++    const size_t total = mapping_count * elements_per_block;
++    if (linear >= total) return;
++    const size_t mapping_index = linear / elements_per_block;
++    const size_t element = linear % elements_per_block;
++    const size_t destination =
++            (size_t) mapping[mapping_index].destination * elements_per_block + element;
++    dst_k[destination] = staged_k[linear];
++    dst_v[destination] = staged_v[linear];
++}
++
++__global__ void clone_shared_tail_block(
++        const uint16_t * src_k,
++        const uint16_t * src_v,
++        uint16_t * dst_k,
++        uint16_t * dst_v,
++        server_kv_physical_block_id source_block,
++        server_kv_physical_block_id destination_block,
++        size_t elements_per_block) {
++    const size_t element = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (element >= elements_per_block) return;
++    const size_t source = (size_t) source_block * elements_per_block + element;
++    const size_t destination = (size_t) destination_block * elements_per_block + element;
++    dst_k[destination] = src_k[source];
++    dst_v[destination] = src_v[source];
++}
++
++class server_kv_cuda_block_backend final : public server_kv_block_backend {
++public:
++    server_kv_cuda_block_backend(
++            server_kv_tensor_layout layout,
++            size_t capacity_blocks,
++            int device) :
++            layout_(layout), capacity_blocks_(capacity_blocks), device_(device) {
++        layout_.validate();
++        if (capacity_blocks == 0) throw std::invalid_argument("KV backend capacity must be positive");
++        cuda_check(cudaSetDevice(device_), "cudaSetDevice");
++        cudaDeviceProp properties{};
++        cuda_check(cudaGetDeviceProperties(&properties, device_), "cudaGetDeviceProperties");
++        int pools_supported = 0;
++        cuda_check(cudaDeviceGetAttribute(
++                &pools_supported, cudaDevAttrMemoryPoolsSupported, device_),
++                "cudaDeviceGetAttribute(memory pools)");
++        if (!pools_supported) {
++            throw std::runtime_error("CUDA device does not support stream-ordered memory pools");
++        }
++        cuda_check(cudaStreamCreateWithFlags(&copy_stream_, cudaStreamNonBlocking),
++                "cudaStreamCreate(copy)");
++        cuda_check(cudaStreamCreateWithFlags(&swap_stream_, cudaStreamNonBlocking),
++                "cudaStreamCreate(swap)");
++        const size_t bytes = capacity_blocks_ * layout_.elements_per_plane_block() * sizeof(uint16_t);
++        try {
++            cuda_check(cudaMalloc((void **) &k_, bytes), "cudaMalloc(K plane)");
++            cuda_check(cudaMalloc((void **) &v_, bytes), "cudaMalloc(V plane)");
++            cuda_check(cudaMemset(k_, 0, bytes), "cudaMemset(K plane)");
++            cuda_check(cudaMemset(v_, 0, bytes), "cudaMemset(V plane)");
++        } catch (...) {
++            if (k_) cudaFree(k_);
++            if (v_) cudaFree(v_);
++            cudaStreamDestroy(copy_stream_);
++            cudaStreamDestroy(swap_stream_);
++            throw;
++        }
++    }
++
++    ~server_kv_cuda_block_backend() override {
++        // Destructors cannot report failures. Complete outstanding leases so
++        // pinned/device staging is never released while a stream still uses it.
++        std::vector<uint64_t> ids;
++        {
++            std::lock_guard<std::mutex> lock(mutex_);
++            for (const auto & item : pending_) ids.push_back(item.first);
++        }
++        for (uint64_t id : ids) {
++            try { wait({ id }); } catch (...) {}
++        }
++        cudaSetDevice(device_);
++        if (k_) cudaFree(k_);
++        if (v_) cudaFree(v_);
++        if (copy_stream_) cudaStreamDestroy(copy_stream_);
++        if (swap_stream_) cudaStreamDestroy(swap_stream_);
++    }
++
++    size_t capacity_blocks() const override { return capacity_blocks_; }
++
++    server_kv_backend_event copy_blocks(
++            const std::vector<server_kv_block_copy> & mapping,
++            const server_kv_tensor_layout & layout) override {
++        require_layout(layout);
++        validate_mapping(mapping);
++        cuda_check(cudaSetDevice(device_), "cudaSetDevice(copy)");
++        pending_operation operation;
++        allocate_pinned_mapping(operation, mapping);
++        const size_t elements = mapping.size() * layout_.elements_per_plane_block();
++        allocate_device_staging(operation, elements, copy_stream_);
++        enqueue_mapping(operation, copy_stream_);
++        launch_gather(operation, mapping.size(), copy_stream_);
++        launch_scatter(operation, mapping.size(), copy_stream_);
++        {
++            std::lock_guard<std::mutex> lock(mutex_);
++            stats_.kernel_launches += mapping.empty() ? 0 : 2;
++            stats_.blocks_copied += mapping.size();
++            stats_.copy_bytes += mapping.size() * layout_.bytes_per_block();
++        }
++        release_device_staging_async(operation, copy_stream_);
++        return record(std::move(operation), copy_stream_);
++    }
++
++    server_kv_backend_event clone_shared_tail(
++            server_kv_physical_block_id source,
++            server_kv_physical_block_id destination,
++            const server_kv_tensor_layout & layout) override {
++        require_layout(layout);
++        validate_block(source);
++        validate_block(destination);
++        cuda_check(cudaSetDevice(device_), "cudaSetDevice(COW)");
++        const size_t elements = layout_.elements_per_plane_block();
++        const int threads = 256;
++        clone_shared_tail_block<<<(unsigned) ((elements + threads - 1) / threads), threads, 0, copy_stream_>>>(
++                k_, v_, k_, v_, source, destination, elements);
++        cuda_check(cudaGetLastError(), "clone_shared_tail_block launch");
++        {
++            std::lock_guard<std::mutex> lock(mutex_);
++            stats_.kernel_launches++;
++            stats_.blocks_copied++;
++            stats_.copy_bytes += layout_.bytes_per_block();
++        }
++        return record({}, copy_stream_);
++    }
++
++    server_kv_backend_event swap_out(
++            const std::vector<server_kv_physical_block_id> & blocks,
++            server_kv_host_blocks & destination) override {
++        validate_blocks(blocks);
++        destination.resize(layout_, blocks.size());
++        cuda_check(cudaSetDevice(device_), "cudaSetDevice(swap out)");
++        pending_operation operation;
++        std::vector<server_kv_block_copy> mapping;
++        mapping.reserve(blocks.size());
++        for (size_t i = 0; i < blocks.size(); ++i) mapping.push_back({ blocks[i], (uint32_t) i });
++        allocate_pinned_mapping(operation, mapping);
++        const size_t elements = blocks.size() * layout_.elements_per_plane_block();
++        allocate_device_staging(operation, elements, swap_stream_);
++        allocate_pinned_planes(operation, elements);
++        operation.swap_out_destination = &destination;
++        enqueue_mapping(operation, swap_stream_);
++        launch_gather(operation, mapping.size(), swap_stream_);
++        {
++            std::lock_guard<std::mutex> lock(mutex_);
++            stats_.kernel_launches += mapping.empty() ? 0 : 1;
++            stats_.blocks_copied += blocks.size();
++            stats_.copy_bytes += blocks.size() * layout_.bytes_per_block();
++        }
++        const size_t bytes = elements * sizeof(uint16_t);
++        cuda_check(cudaMemcpyAsync(operation.pinned_k, operation.staged_k, bytes,
++                cudaMemcpyDeviceToHost, swap_stream_), "cudaMemcpyAsync(swap out K)");
++        cuda_check(cudaMemcpyAsync(operation.pinned_v, operation.staged_v, bytes,
++                cudaMemcpyDeviceToHost, swap_stream_), "cudaMemcpyAsync(swap out V)");
++        release_device_staging_async(operation, swap_stream_);
++        return record(std::move(operation), swap_stream_);
++    }
++
++    server_kv_backend_event swap_in(
++            const server_kv_host_blocks & source,
++            const std::vector<server_kv_physical_block_id> & destinations) override {
++        require_layout(source.layout);
++        validate_blocks(destinations);
++        if (source.block_count != destinations.size()) {
++            throw std::invalid_argument("swap-in source and destination counts differ");
++        }
++        const size_t elements = source.block_count * layout_.elements_per_plane_block();
++        if (source.k.size() != elements || source.v.size() != elements) {
++            throw std::invalid_argument("swap-in host buffer has invalid size");
++        }
++        cuda_check(cudaSetDevice(device_), "cudaSetDevice(swap in)");
++        pending_operation operation;
++        std::vector<server_kv_block_copy> mapping;
++        mapping.reserve(destinations.size());
++        for (size_t i = 0; i < destinations.size(); ++i) {
++            mapping.push_back({ (uint32_t) i, destinations[i] });
++        }
++        allocate_pinned_mapping(operation, mapping);
++        allocate_device_staging(operation, elements, swap_stream_);
++        allocate_pinned_planes(operation, elements);
++        const size_t bytes = elements * sizeof(uint16_t);
++        std::memcpy(operation.pinned_k, source.k.data(), bytes);
++        std::memcpy(operation.pinned_v, source.v.data(), bytes);
++        cuda_check(cudaMemcpyAsync(operation.staged_k, operation.pinned_k, bytes,
++                cudaMemcpyHostToDevice, swap_stream_), "cudaMemcpyAsync(swap in K)");
++        cuda_check(cudaMemcpyAsync(operation.staged_v, operation.pinned_v, bytes,
++                cudaMemcpyHostToDevice, swap_stream_), "cudaMemcpyAsync(swap in V)");
++        enqueue_mapping(operation, swap_stream_);
++        launch_scatter(operation, mapping.size(), swap_stream_);
++        {
++            std::lock_guard<std::mutex> lock(mutex_);
++            stats_.kernel_launches += mapping.empty() ? 0 : 1;
++            stats_.blocks_copied += destinations.size();
++            stats_.copy_bytes += destinations.size() * layout_.bytes_per_block();
++        }
++        release_device_staging_async(operation, swap_stream_);
++        return record(std::move(operation), swap_stream_);
++    }
++
++    void wait(server_kv_backend_event event) override {
++        pending_operation operation;
++        {
++            std::lock_guard<std::mutex> lock(mutex_);
++            const auto it = pending_.find(event.value);
++            if (it == pending_.end()) throw std::invalid_argument("unknown CUDA KV backend event");
++            operation = std::move(it->second);
++            pending_.erase(it);
++        }
++        cuda_check(cudaSetDevice(device_), "cudaSetDevice(wait)");
++        const cudaError_t status = cudaEventSynchronize(operation.event);
++        if (status == cudaSuccess && operation.swap_out_destination) {
++            const size_t elements = operation.swap_out_destination->k.size();
++            const size_t bytes = elements * sizeof(uint16_t);
++            std::memcpy(operation.swap_out_destination->k.data(), operation.pinned_k, bytes);
++            std::memcpy(operation.swap_out_destination->v.data(), operation.pinned_v, bytes);
++        }
++        cleanup(operation);
++        {
++            std::lock_guard<std::mutex> lock(mutex_);
++            stats_.events_waited++;
++            stats_.pinned_bytes_current -= operation.pinned_bytes;
++        }
++        cuda_check(status, "cudaEventSynchronize(KV backend)");
++    }
++
++    server_kv_backend_stats stats() const override {
++        std::lock_guard<std::mutex> lock(mutex_);
++        return stats_;
++    }
++
++    void write_block(
++            server_kv_physical_block_id block,
++            const std::vector<uint16_t> & k,
++            const std::vector<uint16_t> & v) override {
++        validate_block(block);
++        const size_t elements = layout_.elements_per_plane_block();
++        if (k.size() != elements || v.size() != elements) {
++            throw std::invalid_argument("block payload does not match KV layout");
++        }
++        cuda_check(cudaSetDevice(device_), "cudaSetDevice(write block)");
++        const size_t offset = (size_t) block * elements;
++        const size_t bytes = elements * sizeof(uint16_t);
++        cuda_check(cudaMemcpy(k_ + offset, k.data(), bytes, cudaMemcpyHostToDevice),
++                "cudaMemcpy(write K block)");
++        cuda_check(cudaMemcpy(v_ + offset, v.data(), bytes, cudaMemcpyHostToDevice),
++                "cudaMemcpy(write V block)");
++    }
++
++    server_kv_host_blocks read_blocks(
++            const std::vector<server_kv_physical_block_id> & blocks) override {
++        server_kv_host_blocks result;
++        wait(swap_out(blocks, result));
++        return result;
++    }
++
++private:
++    struct pending_operation {
++        cudaEvent_t event = nullptr;
++        server_kv_block_copy * pinned_mapping = nullptr;
++        server_kv_block_copy * device_mapping = nullptr;
++        uint16_t * staged_k = nullptr;
++        uint16_t * staged_v = nullptr;
++        uint16_t * pinned_k = nullptr;
++        uint16_t * pinned_v = nullptr;
++        server_kv_host_blocks * swap_out_destination = nullptr;
++        size_t mapping_count = 0;
++        size_t pinned_bytes = 0;
++    };
++
++    server_kv_tensor_layout layout_;
++    size_t capacity_blocks_;
++    int device_;
++    uint16_t * k_ = nullptr;
++    uint16_t * v_ = nullptr;
++    cudaStream_t copy_stream_ = nullptr;
++    cudaStream_t swap_stream_ = nullptr;
++    uint64_t next_event_ = 1;
++    mutable std::mutex mutex_;
++    std::unordered_map<uint64_t, pending_operation> pending_;
++    server_kv_backend_stats stats_;
++
++    void require_layout(const server_kv_tensor_layout & layout) const {
++        if (layout.layers != layout_.layers || layout.kv_heads != layout_.kv_heads ||
++                layout.head_dim != layout_.head_dim || layout.block_tokens != layout_.block_tokens ||
++                layout.element_type != layout_.element_type ||
++                layout.memory_layout != layout_.memory_layout) {
++            throw std::invalid_argument("KV tensor layout does not match CUDA allocation");
++        }
++    }
++
++    void validate_block(server_kv_physical_block_id block) const {
++        if (block >= capacity_blocks_) throw std::out_of_range("physical KV block is out of range");
++    }
++
++    void validate_blocks(const std::vector<server_kv_physical_block_id> & blocks) const {
++        for (auto block : blocks) validate_block(block);
++    }
++
++    void validate_mapping(const std::vector<server_kv_block_copy> & mapping) const {
++        std::unordered_set<server_kv_physical_block_id> destinations;
++        for (const auto & copy : mapping) {
++            validate_block(copy.source);
++            validate_block(copy.destination);
++            if (!destinations.insert(copy.destination).second) {
++                throw std::invalid_argument("KV block mapping contains duplicate destinations");
++            }
++        }
++    }
++
++    static void allocate_pinned_mapping(
++            pending_operation & operation,
++            const std::vector<server_kv_block_copy> & mapping) {
++        operation.mapping_count = mapping.size();
++        if (mapping.empty()) return;
++        const size_t bytes = mapping.size() * sizeof(server_kv_block_copy);
++        cuda_check(cudaMallocHost((void **) &operation.pinned_mapping, bytes),
++                "cudaMallocHost(block mapping)");
++        operation.pinned_bytes += bytes;
++        std::memcpy(operation.pinned_mapping, mapping.data(), bytes);
++    }
++
++    static void allocate_device_staging(
++            pending_operation & operation,
++            size_t elements,
++            cudaStream_t stream) {
++        if (operation.mapping_count > 0) {
++            cuda_check(cudaMallocAsync((void **) &operation.device_mapping,
++                    operation.mapping_count * sizeof(server_kv_block_copy), stream),
++                    "cudaMallocAsync(block mapping)");
++        }
++        if (elements > 0) {
++            cuda_check(cudaMallocAsync((void **) &operation.staged_k,
++                    elements * sizeof(uint16_t), stream), "cudaMallocAsync(staged K)");
++            cuda_check(cudaMallocAsync((void **) &operation.staged_v,
++                    elements * sizeof(uint16_t), stream), "cudaMallocAsync(staged V)");
++        }
++    }
++
++    static void allocate_pinned_planes(pending_operation & operation, size_t elements) {
++        if (elements == 0) return;
++        cuda_check(cudaMallocHost((void **) &operation.pinned_k, elements * sizeof(uint16_t)),
++                "cudaMallocHost(staged K)");
++        cuda_check(cudaMallocHost((void **) &operation.pinned_v, elements * sizeof(uint16_t)),
++                "cudaMallocHost(staged V)");
++        operation.pinned_bytes += 2 * elements * sizeof(uint16_t);
++    }
++
++    static void enqueue_mapping(pending_operation & operation, cudaStream_t stream) {
++        if (operation.mapping_count == 0) return;
++        cuda_check(cudaMemcpyAsync(operation.device_mapping, operation.pinned_mapping,
++                operation.mapping_count * sizeof(server_kv_block_copy),
++                cudaMemcpyHostToDevice, stream), "cudaMemcpyAsync(block mapping)");
++    }
++
++    void launch_gather(pending_operation & operation, size_t mapping_count, cudaStream_t stream) {
++        if (mapping_count == 0) return;
++        const size_t total = mapping_count * layout_.elements_per_plane_block();
++        const int threads = 256;
++        gather_kv_blocks<<<(unsigned) ((total + threads - 1) / threads), threads, 0, stream>>>(
++                k_, v_, operation.staged_k, operation.staged_v,
++                operation.device_mapping, mapping_count, layout_.elements_per_plane_block());
++        cuda_check(cudaGetLastError(), "gather_kv_blocks launch");
++    }
++
++    void launch_scatter(pending_operation & operation, size_t mapping_count, cudaStream_t stream) {
++        if (mapping_count == 0) return;
++        const size_t total = mapping_count * layout_.elements_per_plane_block();
++        const int threads = 256;
++        scatter_kv_blocks<<<(unsigned) ((total + threads - 1) / threads), threads, 0, stream>>>(
++                operation.staged_k, operation.staged_v, k_, v_,
++                operation.device_mapping, mapping_count, layout_.elements_per_plane_block());
++        cuda_check(cudaGetLastError(), "scatter_kv_blocks launch");
++    }
++
++    static void release_device_staging_async(
++            pending_operation & operation,
++            cudaStream_t stream) {
++        if (operation.device_mapping) cuda_check(cudaFreeAsync(operation.device_mapping, stream),
++                "cudaFreeAsync(block mapping)");
++        if (operation.staged_k) cuda_check(cudaFreeAsync(operation.staged_k, stream),
++                "cudaFreeAsync(staged K)");
++        if (operation.staged_v) cuda_check(cudaFreeAsync(operation.staged_v, stream),
++                "cudaFreeAsync(staged V)");
++        operation.device_mapping = nullptr;
++        operation.staged_k = nullptr;
++        operation.staged_v = nullptr;
++    }
++
++    server_kv_backend_event record(pending_operation operation, cudaStream_t stream) {
++        cuda_check(cudaEventCreateWithFlags(&operation.event, cudaEventDisableTiming),
++                "cudaEventCreate(KV backend)");
++        cuda_check(cudaEventRecord(operation.event, stream), "cudaEventRecord(KV backend)");
++        std::lock_guard<std::mutex> lock(mutex_);
++        const uint64_t id = next_event_++;
++        stats_.pinned_bytes_current += operation.pinned_bytes;
++        stats_.pinned_bytes_peak = std::max(
++                stats_.pinned_bytes_peak, stats_.pinned_bytes_current);
++        pending_.emplace(id, std::move(operation));
++        return { id };
++    }
++
++    static void cleanup(pending_operation & operation) {
++        if (operation.event) cudaEventDestroy(operation.event);
++        if (operation.pinned_mapping) cudaFreeHost(operation.pinned_mapping);
++        if (operation.pinned_k) cudaFreeHost(operation.pinned_k);
++        if (operation.pinned_v) cudaFreeHost(operation.pinned_v);
++    }
++};
++
++} // namespace
++
++std::unique_ptr<server_kv_block_backend> server_kv_create_cuda_block_backend(
++        server_kv_tensor_layout layout,
++        size_t capacity_blocks,
++        int device) {
++    return std::make_unique<server_kv_cuda_block_backend>(layout, capacity_blocks, device);
++}
+diff --git a/tools/server/server-kv-block-manager.cpp b/tools/server/server-kv-block-manager.cpp
+new file mode 100644
+index 0000000..8f7823a
+--- /dev/null
++++ b/tools/server/server-kv-block-manager.cpp
+@@ -0,0 +1,384 @@
++#include "server-kv-block-manager.h"
++
++#include <algorithm>
++#include <limits>
++#include <sstream>
++#include <stdexcept>
++
++server_kv_block_manager::server_kv_block_manager(size_t block_size, size_t capacity_blocks) :
++        block_size_(block_size), capacity_blocks_(capacity_blocks) {
++    if (block_size == 0 || capacity_blocks == 0) {
++        throw std::invalid_argument("KV block size and capacity must be positive");
++    }
++}
++
++size_t server_kv_block_manager::free_unreserved_blocks() const {
++    const size_t committed = blocks_.size() + reserved_blocks_;
++    return committed < capacity_blocks_ ? capacity_blocks_ - committed : 0;
++}
++
++uint64_t server_kv_block_manager::chain_hash(
++        server_kv_block_id parent,
++        const std::vector<server_kv_token> & tokens) const {
++    uint64_t hash = 1469598103934665603ULL;
++    const auto parent_it = blocks_.find(parent);
++    const uint64_t parent_hash = parent_it == blocks_.end() ? 0 : parent_it->second.hash;
++    hash ^= parent_hash;
++    hash *= 1099511628211ULL;
++    for (server_kv_token token : tokens) {
++        const uint32_t value = (uint32_t) token;
++        for (int shift = 0; shift < 32; shift += 8) {
++            hash ^= (value >> shift) & 0xffU;
++            hash *= 1099511628211ULL;
++        }
++    }
++    return hash;
++}
++
++server_kv_block_id server_kv_block_manager::find_prefix_block(
++        server_kv_block_id parent,
++        const std::vector<server_kv_token> & tokens) const {
++    const uint64_t hash = chain_hash(parent, tokens);
++    const auto index_it = prefix_index_.find(hash);
++    if (index_it == prefix_index_.end()) {
++        return 0;
++    }
++    for (server_kv_block_id id : index_it->second) {
++        const auto block_it = blocks_.find(id);
++        if (block_it != blocks_.end() && block_it->second.prefix_indexed &&
++                block_it->second.parent == parent && block_it->second.tokens == tokens) {
++            return id;
++        }
++    }
++    return 0;
++}
++
++server_kv_block_id server_kv_block_manager::allocate_block(
++        server_kv_block_id parent,
++        std::vector<server_kv_token> tokens,
++        bool prefix_indexed,
++        uint64_t now_us) {
++    const server_kv_block_id id = next_block_id_++;
++    block value;
++    value.id = id;
++    value.parent = parent;
++    value.hash = chain_hash(parent, tokens);
++    value.tokens = std::move(tokens);
++    value.ref_count = 1;
++    value.last_access_us = now_us;
++    // A prefix-indexed block must be reachable from the root through an
++    // entirely indexed chain. COW creates a deliberately private block; its
++    // descendants must remain private even after they become full.
++    const auto parent_it = blocks_.find(parent);
++    prefix_indexed = prefix_indexed &&
++            (parent == 0 || (parent_it != blocks_.end() && parent_it->second.prefix_indexed));
++    value.prefix_indexed = prefix_indexed;
++    blocks_.emplace(id, std::move(value));
++    if (prefix_indexed) {
++        index_block(id);
++    }
++    return id;
++}
++
++void server_kv_block_manager::index_block(server_kv_block_id id) {
++    auto & value = blocks_.at(id);
++    value.prefix_indexed = true;
++    prefix_index_[value.hash].push_back(id);
++}
++
++void server_kv_block_manager::unindex_block(server_kv_block_id id) {
++    auto block_it = blocks_.find(id);
++    if (block_it == blocks_.end() || !block_it->second.prefix_indexed) {
++        return;
++    }
++    auto index_it = prefix_index_.find(block_it->second.hash);
++    if (index_it != prefix_index_.end()) {
++        auto & ids = index_it->second;
++        ids.erase(std::remove(ids.begin(), ids.end(), id), ids.end());
++        if (ids.empty()) {
++            prefix_index_.erase(index_it);
++        }
++    }
++    block_it->second.prefix_indexed = false;
++}
++
++void server_kv_block_manager::release_block(server_kv_block_id id) {
++    auto it = blocks_.find(id);
++    if (it == blocks_.end() || it->second.ref_count == 0) {
++        throw std::logic_error("releasing unknown or unreferenced KV block");
++    }
++    if (--it->second.ref_count == 0) {
++        unindex_block(id);
++        blocks_.erase(id);
++    }
++}
++
++server_kv_attach_result server_kv_block_manager::attach(
++        server_kv_sequence_id sequence_id,
++        const std::vector<server_kv_token> & prompt,
++        size_t reserve_tokens,
++        uint64_t now_us) {
++    server_kv_attach_result result;
++    if (sequences_.count(sequence_id) != 0) {
++        result.reason = "sequence already attached";
++        return result;
++    }
++
++    const size_t prompt_blocks = (prompt.size() + block_size_ - 1) / block_size_;
++    std::vector<server_kv_block_id> shared;
++    shared.reserve(prompt_blocks);
++    server_kv_block_id parent = 0;
++    size_t offset = 0;
++    while (offset + block_size_ <= prompt.size()) {
++        std::vector<server_kv_token> chunk(
++                prompt.begin() + offset, prompt.begin() + offset + block_size_);
++        const server_kv_block_id found = find_prefix_block(parent, chunk);
++        if (found == 0) {
++            break;
++        }
++        shared.push_back(found);
++        parent = found;
++        offset += block_size_;
++    }
++
++    const size_t new_blocks = prompt_blocks - shared.size();
++    const size_t reserve_blocks = (reserve_tokens + block_size_ - 1) / block_size_;
++    if (new_blocks + reserve_blocks > free_unreserved_blocks()) {
++        result.reason = "insufficient KV block capacity";
++        return result;
++    }
++
++    sequence seq;
++    seq.id = sequence_id;
++    seq.prompt_tokens = prompt.size();
++    seq.reserved_blocks = reserve_blocks;
++    seq.blocks = shared;
++    for (server_kv_block_id id : shared) {
++        auto & value = blocks_.at(id);
++        value.ref_count++;
++        value.last_access_us = now_us;
++    }
++
++    while (offset < prompt.size()) {
++        const size_t count = std::min(block_size_, prompt.size() - offset);
++        std::vector<server_kv_token> chunk(prompt.begin() + offset, prompt.begin() + offset + count);
++        const bool full = count == block_size_;
++        const server_kv_block_id id = allocate_block(parent, std::move(chunk), full, now_us);
++        seq.blocks.push_back(id);
++        parent = id;
++        offset += count;
++    }
++
++    reserved_blocks_ += reserve_blocks;
++    sequences_.emplace(sequence_id, std::move(seq));
++    result.admitted = true;
++    result.shared_blocks = shared.size();
++    result.allocated_blocks = new_blocks;
++    result.reserved_blocks = reserve_blocks;
++    result.matched_tokens = shared.size() * block_size_;
++    return result;
++}
++
++bool server_kv_block_manager::append(
++        server_kv_sequence_id sequence_id,
++        const std::vector<server_kv_token> & tokens,
++        uint64_t now_us,
++        std::string * error) {
++    auto seq_it = sequences_.find(sequence_id);
++    if (seq_it == sequences_.end()) {
++        if (error) *error = "unknown sequence";
++        return false;
++    }
++    if (tokens.empty()) {
++        return true;
++    }
++    auto & seq = seq_it->second;
++    size_t tail_free = 0;
++    if (!seq.blocks.empty()) {
++        const auto & tail = blocks_.at(seq.blocks.back());
++        if (tail.tokens.size() < block_size_) {
++            tail_free = block_size_ - tail.tokens.size();
++        }
++    }
++    const size_t after_tail = tokens.size() > tail_free ? tokens.size() - tail_free : 0;
++    const size_t needed_blocks = (after_tail + block_size_ - 1) / block_size_;
++    const size_t from_reserve = std::min(needed_blocks, seq.reserved_blocks);
++    const size_t extra = needed_blocks - from_reserve;
++    if (extra > free_unreserved_blocks()) {
++        if (error) *error = "insufficient KV block capacity";
++        return false;
++    }
++
++    size_t offset = 0;
++    if (tail_free > 0) {
++        auto & tail = blocks_.at(seq.blocks.back());
++        const size_t count = std::min(tail_free, tokens.size());
++        tail.tokens.insert(tail.tokens.end(), tokens.begin(), tokens.begin() + count);
++        tail.last_access_us = now_us;
++        offset += count;
++        if (tail.tokens.size() == block_size_ &&
++                (tail.parent == 0 || blocks_.at(tail.parent).prefix_indexed)) {
++            tail.hash = chain_hash(tail.parent, tail.tokens);
++            index_block(tail.id);
++        }
++    }
++
++    server_kv_block_id parent = seq.blocks.empty() ? 0 : seq.blocks.back();
++    while (offset < tokens.size()) {
++        const size_t count = std::min(block_size_, tokens.size() - offset);
++        std::vector<server_kv_token> chunk(tokens.begin() + offset, tokens.begin() + offset + count);
++        const server_kv_block_id id = allocate_block(parent, std::move(chunk), count == block_size_, now_us);
++        seq.blocks.push_back(id);
++        parent = id;
++        offset += count;
++    }
++
++    seq.reserved_blocks -= from_reserve;
++    reserved_blocks_ -= from_reserve;
++    seq.prompt_tokens += tokens.size();
++    return true;
++}
++
++server_kv_write_result server_kv_block_manager::make_tail_writable(
++        server_kv_sequence_id sequence_id,
++        uint64_t now_us) {
++    server_kv_write_result result;
++    auto seq_it = sequences_.find(sequence_id);
++    if (seq_it == sequences_.end() || seq_it->second.blocks.empty()) {
++        result.reason = "sequence has no KV tail";
++        return result;
++    }
++    auto & seq = seq_it->second;
++    const server_kv_block_id old_id = seq.blocks.back();
++    const auto old_it = blocks_.find(old_id);
++    if (old_it->second.ref_count == 1) {
++        old_it->second.last_access_us = now_us;
++        result.writable = true;
++        result.block_id = old_id;
++        return result;
++    }
++
++    const bool consume_reserve = seq.reserved_blocks > 0;
++    if (!consume_reserve && free_unreserved_blocks() == 0) {
++        result.reason = "insufficient KV block capacity for copy-on-write";
++        return result;
++    }
++    // Copy metadata before insertion: unordered_map growth may rehash and
++    // invalidate references/iterators into blocks_.
++    const server_kv_block_id parent = old_it->second.parent;
++    const std::vector<server_kv_token> copied_tokens = old_it->second.tokens;
++    const server_kv_block_id new_id = allocate_block(
++            parent, copied_tokens, false, now_us);
++    blocks_.at(old_id).ref_count--;
++    seq.blocks.back() = new_id;
++    if (consume_reserve) {
++        seq.reserved_blocks--;
++        reserved_blocks_--;
++    }
++    result.writable = true;
++    result.copied = true;
++    result.block_id = new_id;
++    return result;
++}
++
++size_t server_kv_block_manager::longest_prefix_blocks(
++        const std::vector<server_kv_token> & prompt) const {
++    size_t matched = 0;
++    size_t offset = 0;
++    server_kv_block_id parent = 0;
++    while (offset + block_size_ <= prompt.size()) {
++        std::vector<server_kv_token> chunk(
++                prompt.begin() + offset, prompt.begin() + offset + block_size_);
++        const server_kv_block_id found = find_prefix_block(parent, chunk);
++        if (found == 0) {
++            break;
++        }
++        matched++;
++        parent = found;
++        offset += block_size_;
++    }
++    return matched;
++}
++
++bool server_kv_block_manager::release(server_kv_sequence_id sequence_id) {
++    auto it = sequences_.find(sequence_id);
++    if (it == sequences_.end()) {
++        return false;
++    }
++    for (server_kv_block_id id : it->second.blocks) {
++        release_block(id);
++    }
++    reserved_blocks_ -= it->second.reserved_blocks;
++    sequences_.erase(it);
++    return true;
++}
++
++server_kv_block_snapshot server_kv_block_manager::snapshot() const {
++    server_kv_block_snapshot result;
++    result.block_size = block_size_;
++    result.capacity_blocks = capacity_blocks_;
++    result.allocated_blocks = blocks_.size();
++    result.reserved_blocks = reserved_blocks_;
++    for (const auto & item : blocks_) {
++        const auto & value = item.second;
++        if (value.ref_count > 1) {
++            result.shared_blocks++;
++        }
++        result.blocks.push_back({
++            value.id, value.parent, value.tokens.size(), value.ref_count,
++            value.prefix_indexed, value.last_access_us,
++        });
++    }
++    for (const auto & item : sequences_) {
++        const auto & value = item.second;
++        result.sequences.push_back({
++            value.id, value.blocks, value.prompt_tokens, value.reserved_blocks,
++        });
++    }
++    std::sort(result.blocks.begin(), result.blocks.end(),
++            [](const auto & left, const auto & right) { return left.id < right.id; });
++    std::sort(result.sequences.begin(), result.sequences.end(),
++            [](const auto & left, const auto & right) { return left.id < right.id; });
++    return result;
++}
++
++std::string server_kv_block_manager::validate() const {
++    if (blocks_.size() + reserved_blocks_ > capacity_blocks_) {
++        return "allocated plus reserved blocks exceed capacity";
++    }
++    size_t sequence_reservations = 0;
++    std::unordered_map<server_kv_block_id, size_t> references;
++    for (const auto & item : sequences_) {
++        const auto & seq = item.second;
++        sequence_reservations += seq.reserved_blocks;
++        for (server_kv_block_id id : seq.blocks) {
++            if (blocks_.count(id) == 0) {
++                return "sequence references missing block";
++            }
++            references[id]++;
++        }
++    }
++    if (sequence_reservations != reserved_blocks_) {
++        return "reservation accounting mismatch";
++    }
++    for (const auto & item : blocks_) {
++        const auto & value = item.second;
++        if (value.tokens.empty() || value.tokens.size() > block_size_) {
++            return "invalid block token count";
++        }
++        if (references[value.id] != value.ref_count) {
++            return "block reference count mismatch";
++        }
++        if (value.prefix_indexed && value.tokens.size() != block_size_) {
++            return "partial block present in prefix index";
++        }
++        if (value.prefix_indexed && value.parent != 0 &&
++                !blocks_.at(value.parent).prefix_indexed) {
++            return "prefix index contains a block with a private parent";
++        }
++        if (value.parent != 0 && blocks_.count(value.parent) == 0) {
++            return "block references missing parent";
++        }
++    }
++    return {};
++}
+diff --git a/tools/server/server-kv-block-manager.h b/tools/server/server-kv-block-manager.h
+new file mode 100644
+index 0000000..eaec11a
+--- /dev/null
++++ b/tools/server/server-kv-block-manager.h
+@@ -0,0 +1,125 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++using server_kv_block_id = uint64_t;
++using server_kv_sequence_id = int64_t;
++using server_kv_token = int32_t;
++
++struct server_kv_attach_result {
++    bool admitted = false;
++    size_t shared_blocks = 0;
++    size_t allocated_blocks = 0;
++    size_t reserved_blocks = 0;
++    size_t matched_tokens = 0;
++    std::string reason;
++};
++
++struct server_kv_write_result {
++    bool writable = false;
++    bool copied = false;
++    server_kv_block_id block_id = 0;
++    std::string reason;
++};
++
++struct server_kv_block_view {
++    server_kv_block_id id = 0;
++    server_kv_block_id parent = 0;
++    size_t token_count = 0;
++    size_t ref_count = 0;
++    bool prefix_indexed = false;
++    uint64_t last_access_us = 0;
++};
++
++struct server_kv_sequence_view {
++    server_kv_sequence_id id = -1;
++    std::vector<server_kv_block_id> blocks;
++    size_t prompt_tokens = 0;
++    size_t reserved_blocks = 0;
++};
++
++struct server_kv_block_snapshot {
++    size_t block_size = 0;
++    size_t capacity_blocks = 0;
++    size_t allocated_blocks = 0;
++    size_t reserved_blocks = 0;
++    size_t shared_blocks = 0;
++    std::vector<server_kv_block_view> blocks;
++    std::vector<server_kv_sequence_view> sequences;
++};
++
++// Owns logical KV blocks, sequence Block Tables and the block-prefix index.
++// Full immutable blocks may be shared. Partial tail blocks stay private. A
++// shared final block must be cloned through make_tail_writable() before a
++// backend mutates it.
++class server_kv_block_manager {
++public:
++    server_kv_block_manager(size_t block_size, size_t capacity_blocks);
++
++    server_kv_attach_result attach(
++            server_kv_sequence_id sequence_id,
++            const std::vector<server_kv_token> & prompt,
++            size_t reserve_tokens,
++            uint64_t now_us);
++
++    bool append(
++            server_kv_sequence_id sequence_id,
++            const std::vector<server_kv_token> & tokens,
++            uint64_t now_us,
++            std::string * error = nullptr);
++
++    server_kv_write_result make_tail_writable(
++            server_kv_sequence_id sequence_id,
++            uint64_t now_us);
++
++    size_t longest_prefix_blocks(const std::vector<server_kv_token> & prompt) const;
++    bool release(server_kv_sequence_id sequence_id);
++    server_kv_block_snapshot snapshot() const;
++
++    // Returns an empty string when every ownership/capacity invariant holds.
++    std::string validate() const;
++
++private:
++    struct block {
++        server_kv_block_id id = 0;
++        server_kv_block_id parent = 0;
++        std::vector<server_kv_token> tokens;
++        size_t ref_count = 0;
++        uint64_t hash = 0;
++        uint64_t last_access_us = 0;
++        bool prefix_indexed = false;
++    };
++
++    struct sequence {
++        server_kv_sequence_id id = -1;
++        std::vector<server_kv_block_id> blocks;
++        size_t prompt_tokens = 0;
++        size_t reserved_blocks = 0;
++    };
++
++    size_t block_size_;
++    size_t capacity_blocks_;
++    server_kv_block_id next_block_id_ = 1;
++    size_t reserved_blocks_ = 0;
++    std::unordered_map<server_kv_block_id, block> blocks_;
++    std::unordered_map<server_kv_sequence_id, sequence> sequences_;
++    std::unordered_map<uint64_t, std::vector<server_kv_block_id>> prefix_index_;
++
++    size_t free_unreserved_blocks() const;
++    uint64_t chain_hash(server_kv_block_id parent, const std::vector<server_kv_token> & tokens) const;
++    server_kv_block_id find_prefix_block(
++            server_kv_block_id parent,
++            const std::vector<server_kv_token> & tokens) const;
++    server_kv_block_id allocate_block(
++            server_kv_block_id parent,
++            std::vector<server_kv_token> tokens,
++            bool prefix_indexed,
++            uint64_t now_us);
++    void index_block(server_kv_block_id id);
++    void unindex_block(server_kv_block_id id);
++    void release_block(server_kv_block_id id);
 +};
 diff --git a/tools/server/server-kv-capacity-planner.cpp b/tools/server/server-kv-capacity-planner.cpp
 new file mode 100644
@@ -1015,6 +3324,410 @@ index 0000000..ad1db6c
 +
 +private:
 +    double reuse_half_life_us_;
++};
+diff --git a/tools/server/server-kv-runtime.cpp b/tools/server/server-kv-runtime.cpp
+new file mode 100644
+index 0000000..d20d084
+--- /dev/null
++++ b/tools/server/server-kv-runtime.cpp
+@@ -0,0 +1,166 @@
++#include "server-kv-runtime.h"
++
++#include <algorithm>
++#include <sstream>
++#include <unordered_set>
++
++server_kv_runtime::server_kv_runtime(size_t block_size, size_t capacity_blocks) :
++        block_size_(block_size), blocks_(block_size, capacity_blocks) {}
++
++size_t server_kv_runtime::common_prefix(
++        const std::vector<server_kv_token> & left,
++        const std::vector<server_kv_token> & right) {
++    const size_t count = std::min(left.size(), right.size());
++    size_t index = 0;
++    while (index < count && left[index] == right[index]) index++;
++    return index;
++}
++
++bool server_kv_runtime::synchronize(
++        server_kv_sequence_id sequence_id,
++        const std::vector<server_kv_token> & committed_tokens,
++        size_t reserve_tokens,
++        uint64_t now_us,
++        std::string * error) {
++    const auto current = sequences_.find(sequence_id);
++    if (current != sequences_.end() &&
++            current->second.residency == server_kv_residency::resident &&
++            current->second.committed_tokens == committed_tokens &&
++            current->second.reserved_tokens == reserve_tokens) {
++        current->second.last_access_us = now_us;
++        return true;
++    }
++
++    if (committed_tokens.empty()) {
++        release(sequence_id);
++        return true;
++    }
++
++    // Mutate a complete candidate copy and commit only after admission. This
++    // preserves the old Block Table when a larger synchronization cannot fit.
++    server_kv_block_manager candidate = blocks_;
++    candidate.release(sequence_id);
++    const auto attached = candidate.attach(
++            sequence_id, committed_tokens, reserve_tokens, now_us);
++    if (!attached.admitted) {
++        if (error) *error = attached.reason;
++        return false;
++    }
++    const std::string invalid = candidate.validate();
++    if (!invalid.empty()) {
++        if (error) *error = invalid;
++        return false;
++    }
++    blocks_ = std::move(candidate);
++    sequences_[sequence_id] = {
++        sequence_id,
++        server_kv_residency::resident,
++        committed_tokens,
++        reserve_tokens,
++        now_us,
++    };
++    return true;
++}
++
++server_kv_prefix_share_plan server_kv_runtime::plan_prefix_share(
++        server_kv_sequence_id destination,
++        const std::vector<server_kv_token> & prompt,
++        const std::vector<server_kv_sequence_id> & eligible_donors) const {
++    std::unordered_set<server_kv_sequence_id> eligible(
++            eligible_donors.begin(), eligible_donors.end());
++    server_kv_prefix_share_plan best;
++    best.destination = destination;
++    for (const auto & item : sequences_) {
++        const auto & candidate = item.second;
++        if (candidate.id == destination || candidate.residency != server_kv_residency::resident) continue;
++        if (!eligible.empty() && eligible.count(candidate.id) == 0) continue;
++        const size_t matched = common_prefix(candidate.committed_tokens, prompt);
++        const size_t full_tokens = matched - matched % block_size_;
++        if (full_tokens > best.matched_tokens ||
++                (full_tokens == best.matched_tokens && full_tokens > 0 &&
++                 candidate.last_access_us < sequences_.at(best.donor).last_access_us)) {
++            best.donor = candidate.id;
++            best.matched_tokens = full_tokens;
++            best.matched_blocks = full_tokens / block_size_;
++        }
++    }
++    return best;
++}
++
++bool server_kv_runtime::preempt(server_kv_sequence_id sequence_id, uint64_t now_us) {
++    auto it = sequences_.find(sequence_id);
++    if (it == sequences_.end() || it->second.residency != server_kv_residency::resident) return false;
++    if (!blocks_.release(sequence_id)) return false;
++    it->second.residency = server_kv_residency::swapped;
++    it->second.last_access_us = now_us;
++    return true;
++}
++
++bool server_kv_runtime::restore(
++        server_kv_sequence_id sequence_id,
++        uint64_t now_us,
++        std::string * error) {
++    const auto it = sequences_.find(sequence_id);
++    if (it == sequences_.end() || it->second.residency != server_kv_residency::swapped) {
++        if (error) *error = "sequence is not swapped";
++        return false;
++    }
++    const auto tokens = it->second.committed_tokens;
++    const size_t reserve = it->second.reserved_tokens;
++    const auto attached = blocks_.attach(sequence_id, tokens, reserve, now_us);
++    if (!attached.admitted) {
++        if (error) *error = attached.reason;
++        return false;
++    }
++    it->second.residency = server_kv_residency::resident;
++    it->second.last_access_us = now_us;
++    return true;
++}
++
++bool server_kv_runtime::release(server_kv_sequence_id sequence_id) {
++    const auto it = sequences_.find(sequence_id);
++    if (it == sequences_.end()) return false;
++    if (it->second.residency == server_kv_residency::resident) {
++        blocks_.release(sequence_id);
++    }
++    sequences_.erase(it);
++    return true;
++}
++
++bool server_kv_runtime::is_swapped(server_kv_sequence_id sequence_id) const {
++    const auto it = sequences_.find(sequence_id);
++    return it != sequences_.end() && it->second.residency == server_kv_residency::swapped;
++}
++
++server_kv_runtime_snapshot server_kv_runtime::snapshot() const {
++    server_kv_runtime_snapshot result;
++    result.blocks = blocks_.snapshot();
++    for (const auto & item : sequences_) result.sequences.push_back(item.second);
++    std::sort(result.sequences.begin(), result.sequences.end(),
++            [](const auto & left, const auto & right) { return left.id < right.id; });
++    return result;
++}
++
++std::string server_kv_runtime::validate() const {
++    const std::string block_error = blocks_.validate();
++    if (!block_error.empty()) return block_error;
++    const auto block_snapshot = blocks_.snapshot();
++    std::unordered_set<server_kv_sequence_id> resident_block_tables;
++    for (const auto & sequence : block_snapshot.sequences) {
++        resident_block_tables.insert(sequence.id);
++    }
++    for (const auto & item : sequences_) {
++        const auto & sequence = item.second;
++        const bool has_table = resident_block_tables.count(sequence.id) != 0;
++        if ((sequence.residency == server_kv_residency::resident) != has_table) {
++            return "runtime residency and Block Table disagree";
++        }
++        if (sequence.committed_tokens.empty()) {
++            return "runtime retains an empty sequence";
++        }
++    }
++    if (resident_block_tables.size() > sequences_.size()) {
++        return "Block Table has no runtime sequence";
++    }
++    return {};
++}
+diff --git a/tools/server/server-kv-runtime.h b/tools/server/server-kv-runtime.h
+new file mode 100644
+index 0000000..ed288a0
+--- /dev/null
++++ b/tools/server/server-kv-runtime.h
+@@ -0,0 +1,73 @@
++#pragma once
++
++#include "server-kv-block-manager.h"
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++enum class server_kv_residency : uint8_t {
++    resident,
++    swapped,
++};
++
++struct server_kv_prefix_share_plan {
++    server_kv_sequence_id donor = -1;
++    server_kv_sequence_id destination = -1;
++    size_t matched_tokens = 0;
++    size_t matched_blocks = 0;
++
++    bool found() const { return donor >= 0 && matched_tokens > 0; }
++};
++
++struct server_kv_runtime_sequence {
++    server_kv_sequence_id id = -1;
++    server_kv_residency residency = server_kv_residency::resident;
++    std::vector<server_kv_token> committed_tokens;
++    size_t reserved_tokens = 0;
++    uint64_t last_access_us = 0;
++};
++
++struct server_kv_runtime_snapshot {
++    server_kv_block_snapshot blocks;
++    std::vector<server_kv_runtime_sequence> sequences;
++};
++
++// Transactional coordinator for logical block ownership, resident-prefix
++// discovery and preempt/restore state. Physical llama/CUDA mutations are
++// executed by the engine only after a returned plan succeeds.
++class server_kv_runtime {
++public:
++    server_kv_runtime(size_t block_size, size_t capacity_blocks);
++
++    bool synchronize(
++            server_kv_sequence_id sequence_id,
++            const std::vector<server_kv_token> & committed_tokens,
++            size_t reserve_tokens,
++            uint64_t now_us,
++            std::string * error = nullptr);
++
++    server_kv_prefix_share_plan plan_prefix_share(
++            server_kv_sequence_id destination,
++            const std::vector<server_kv_token> & prompt,
++            const std::vector<server_kv_sequence_id> & eligible_donors = {}) const;
++
++    bool preempt(server_kv_sequence_id sequence_id, uint64_t now_us);
++    bool restore(server_kv_sequence_id sequence_id, uint64_t now_us, std::string * error = nullptr);
++    bool release(server_kv_sequence_id sequence_id);
++    bool is_swapped(server_kv_sequence_id sequence_id) const;
++
++    server_kv_runtime_snapshot snapshot() const;
++    std::string validate() const;
++
++private:
++    size_t block_size_;
++    server_kv_block_manager blocks_;
++    std::unordered_map<server_kv_sequence_id, server_kv_runtime_sequence> sequences_;
++
++    static size_t common_prefix(
++            const std::vector<server_kv_token> & left,
++            const std::vector<server_kv_token> & right);
++};
+diff --git a/tools/server/server-speculation-controller.cpp b/tools/server/server-speculation-controller.cpp
+new file mode 100644
+index 0000000..ccd2068
+--- /dev/null
++++ b/tools/server/server-speculation-controller.cpp
+@@ -0,0 +1,88 @@
++#include "server-speculation-controller.h"
++
++#include <algorithm>
++#include <cmath>
++#include <stdexcept>
++
++server_speculation_controller::server_speculation_controller(server_speculation_config config) {
++    configure(config);
++}
++
++void server_speculation_controller::configure(server_speculation_config config) {
++    config.min_draft_tokens = std::max<size_t>(1, config.min_draft_tokens);
++    config.max_draft_tokens = std::max(config.min_draft_tokens, config.max_draft_tokens);
++    config.acceptance_alpha = std::clamp(config.acceptance_alpha, 0.01, 1.0);
++    config.disable_below_acceptance = std::clamp(config.disable_below_acceptance, 0.0, 1.0);
++    config.grow_above_acceptance = std::clamp(config.grow_above_acceptance, 0.0, 1.0);
++    config.kv_pressure_threshold = std::clamp(config.kv_pressure_threshold, 0.0, 1.0);
++    config_ = config;
++    states_.clear();
++}
++
++server_speculation_state & server_speculation_controller::get_or_create(int sequence_id) {
++    auto [it, inserted] = states_.emplace(sequence_id, server_speculation_state{});
++    if (inserted) it->second.draft_tokens = config_.max_draft_tokens;
++    return it->second;
++}
++
++size_t server_speculation_controller::recommend(
++        int sequence_id,
++        size_t configured_max,
++        double kv_pressure) {
++    if (configured_max == 0) return 0;
++    if (!config_.adaptive) return configured_max;
++    auto & value = get_or_create(sequence_id);
++    if (value.cooldown_remaining > 0) {
++        value.cooldown_remaining--;
++        value.disabled = true;
++        return 0;
++    }
++    value.disabled = false;
++    size_t result = std::min({value.draft_tokens, configured_max, config_.max_draft_tokens});
++    if (kv_pressure >= config_.kv_pressure_threshold) {
++        result = std::max(config_.min_draft_tokens, result / 2);
++    }
++    return result;
++}
++
++void server_speculation_controller::observe(
++        const server_speculation_observation & observation) {
++    if (observation.drafted_tokens == 0) return;
++    auto & value = get_or_create(observation.sequence_id);
++    const size_t accepted = std::min(observation.accepted_tokens, observation.drafted_tokens);
++    const double ratio = (double) accepted / observation.drafted_tokens;
++    value.acceptance_ewma = value.observations == 0
++            ? ratio
++            : config_.acceptance_alpha * ratio +
++                    (1.0 - config_.acceptance_alpha) * value.acceptance_ewma;
++    value.drafted_total += observation.drafted_tokens;
++    value.accepted_total += accepted;
++    value.observations++;
++    if (!config_.adaptive) return;
++
++    if (value.observations >= config_.warmup_observations &&
++            value.acceptance_ewma < config_.disable_below_acceptance) {
++        value.cooldown_remaining = config_.cooldown_iterations;
++        value.disabled = true;
++        value.draft_tokens = config_.min_draft_tokens;
++        return;
++    }
++    if (observation.kv_pressure >= config_.kv_pressure_threshold ||
++            value.acceptance_ewma < 0.40) {
++        value.draft_tokens = std::max(config_.min_draft_tokens, value.draft_tokens / 2);
++    } else if (value.acceptance_ewma >= config_.grow_above_acceptance) {
++        value.draft_tokens = std::min(config_.max_draft_tokens, value.draft_tokens + 1);
++    }
++}
++
++server_speculation_state server_speculation_controller::state(int sequence_id) const {
++    const auto it = states_.find(sequence_id);
++    if (it != states_.end()) return it->second;
++    server_speculation_state result;
++    result.draft_tokens = config_.max_draft_tokens;
++    return result;
++}
++
++void server_speculation_controller::reset(int sequence_id) {
++    states_.erase(sequence_id);
++}
+diff --git a/tools/server/server-speculation-controller.h b/tools/server/server-speculation-controller.h
+new file mode 100644
+index 0000000..08065a3
+--- /dev/null
++++ b/tools/server/server-speculation-controller.h
+@@ -0,0 +1,53 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <unordered_map>
++
++struct server_speculation_config {
++    bool adaptive = false;
++    size_t min_draft_tokens = 1;
++    size_t max_draft_tokens = 8;
++    double acceptance_alpha = 0.2;
++    double disable_below_acceptance = 0.20;
++    double grow_above_acceptance = 0.75;
++    double kv_pressure_threshold = 0.85;
++    size_t cooldown_iterations = 8;
++    size_t warmup_observations = 4;
++};
++
++struct server_speculation_observation {
++    int sequence_id = -1;
++    size_t drafted_tokens = 0;
++    size_t accepted_tokens = 0;
++    double kv_pressure = 0.0;
++};
++
++struct server_speculation_state {
++    size_t draft_tokens = 0;
++    double acceptance_ewma = 1.0;
++    uint64_t drafted_total = 0;
++    uint64_t accepted_total = 0;
++    size_t observations = 0;
++    size_t cooldown_remaining = 0;
++    bool disabled = false;
++};
++
++// Per-sequence feedback controller for speculative draft length. It owns no
++// model state; the engine supplies accepted/drafted counts and KV pressure.
++class server_speculation_controller {
++public:
++    explicit server_speculation_controller(server_speculation_config config = {});
++
++    void configure(server_speculation_config config);
++    size_t recommend(int sequence_id, size_t configured_max, double kv_pressure);
++    void observe(const server_speculation_observation & observation);
++    server_speculation_state state(int sequence_id) const;
++    void reset(int sequence_id);
++
++private:
++    server_speculation_config config_;
++    std::unordered_map<int, server_speculation_state> states_;
++
++    server_speculation_state & get_or_create(int sequence_id);
 +};
 diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
 index 72a4bd0..66e2dce 100644
