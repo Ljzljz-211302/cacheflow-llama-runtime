@@ -35,6 +35,14 @@ try {
     }
 
     if ($Full) {
+        powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_patched_server.ps1
+        if ($LASTEXITCODE -ne 0) { throw "patched server build failed" }
+        python scripts\run_engine_ab.py
+        if ($LASTEXITCODE -ne 0) { throw "engine scheduler A/B failed" }
+        python scripts\run_prefill_ab.py
+        if ($LASTEXITCODE -ne 0) { throw "chunked prefill A/B failed" }
+        python scripts\run_scheduler_trace.py
+        if ($LASTEXITCODE -ne 0) { throw "scheduler trace simulation failed" }
         python scripts\run_benchmarks.py
         if ($LASTEXITCODE -ne 0) { throw "offline benchmark failed" }
         python scripts\run_server_benchmark.py

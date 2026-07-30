@@ -1,8 +1,8 @@
-# llama.cpp 量化与推理性能实验台
+# Cache-aware llama.cpp 推理实验台
 
-这是一个面向推免面试的可复现 AI Infra 项目。它在同一台机器、同一模型 revision 和同一输入配置下，对 Q4、Q8、F16 的模型体积、实测 VRAM、离线吞吐、在线 TTFT/TPOT、并发扩展和最小质量护栏进行比较，并提供一个基于权重与 KV Cache 的显存预算推荐器。
+这是一个面向推免面试的可复现 AI Infra 项目。项目不只调用上游二进制：它直接修改 `llama-server` 的 C++ slot 调度和 metrics 数据路径，实现 eviction-cost-aware KV Cache 调度，再用可控冲突 workload 与上游策略做 A/B。量化、CUDA/CPU、TTFT/TPOT 和质量实验作为完整验证底座。
 
-项目不是聊天 UI。可展示的个人工作包括：固定制品和校验和、统一实验配置、`llama-bench` 结构化归一化、OpenAI SSE 流式计时、并发负载、质量规则、KV Cache 估算、自动报告和测试。
+个人核心贡献集中在 [engine patch](patches/0001-cache-aware-slot-scheduler.patch)：新增独立 C++ 调度模块、CLI 参数、原生测试，以及 KV/内存/缓存复用指标。完整上游源码继续放在 `vendor/`，个人 patch 单独提交，避免用第三方代码体量冒充本人工作。
 
 ## 当前复现结果
 
@@ -11,6 +11,7 @@
 - Q4_K_M 权重约为 F16 的 38.5%，实测峰值显存为 625 MiB（Q8 753 MiB、F16 1241 MiB），CUDA decode 速度约为 F16 的 1.97 倍。
 - Q4 CUDA decode 速度约为 12 线程 CPU-only 的 4.66 倍。
 - 并发从 1 增至 4 时，聚合输出吞吐约提高至 2.37 倍，但单请求 TPOT 和尾延迟变差。
+- 在 5 次 cache-conflict A/B 中，新调度减少 91.6% 的重复 prefill、减少 97.5% 的缓存淘汰，使两请求序列中位延迟从 1372.28 ms 降至 138.85 ms（9.88 倍）。
 - 0.5B 模型在简单专业题上仍会产生事实错误；量化性能提升不能替代质量评测。
 
 完整数值见 [results/report.md](results/report.md)。结果只代表固定环境，不能直接外推到其他模型和硬件。
@@ -20,22 +21,26 @@
 ```mermaid
 flowchart LR
     A[artifacts.json] --> B[bootstrap.ps1]
-    B --> C[固定 llama.cpp 二进制/源码]
+    B --> C[固定 llama.cpp 源码]
+    K[个人 C++ engine patch] --> C
     B --> D[同源 Q4/Q8/F16 GGUF]
     C --> E[离线 llama-bench]
     D --> E
-    C --> F[llama-server]
+    C --> F[patched llama-server]
     D --> F
     E --> G[baseline.csv]
     F --> H[SSE TTFT/TPOT 与质量护栏]
     G --> I[自动报告]
     H --> I
     D --> J[KV Cache 内存推荐器]
+    F --> L[Cache-aware slot scheduler]
+    L --> M[冲突 workload A/B]
+    M --> I
 ```
 
 ## 一键复现
 
-项目首次初始化约下载 3GB 模型和 650MB Windows CUDA 运行包。所有制品都固定 URL、revision、大小和 SHA-256；下载中断可继续，错误文件会被保留为 `.invalid-*`。
+项目首次初始化约下载 3GB 模型和 650MB Windows CUDA 运行包。构建 patched server 需要 Visual Studio 2022 C++ workload 和 CMake。所有制品都固定 URL、revision、大小和 SHA-256；bootstrap 会把个人 patch 幂等应用到固定上游提交。
 
 ```powershell
 cd D:\llama
@@ -46,10 +51,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 `-Full` 将依次运行：
 
 1. Python 单元测试与语法编译；
-2. 制品 SHA-256 和 GPU 后端检查；
-3. Q4/Q8/F16、CPU/GPU 离线 benchmark；
-4. 并发 1/2/4 的在线流式 benchmark；
-5. 五道固定题的最小质量护栏；
+2. 编译 patched C++ server 并运行原生调度测试；
+3. 运行上游策略/新策略的 KV Cache 冲突 A/B；
+4. 制品 SHA-256、Q4/Q8/F16 和 CPU/GPU benchmark；
+5. 并发 1/2/4 在线测试与质量护栏；
 6. 自动生成 Markdown 报告。
 
 只验证环境和测试：
@@ -61,6 +66,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 ## 分步运行
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build_patched_server.ps1
+python .\scripts\run_engine_ab.py
 python .\scripts\run_benchmarks.py
 python .\scripts\run_server_benchmark.py
 python .\scripts\run_quality.py
@@ -77,6 +84,18 @@ python .\scripts\memory_advisor.py `
 ```
 
 ## 实验设计
+
+### C++ Cache-aware slot 调度
+
+上游策略在空闲 slot 中选择与新 prompt 最相似的缓存。它只最大化当前请求复用，可能为了多复用少量 token 而破坏一个长会话。新增策略使用：
+
+```text
+score = reusable_prefix_tokens - eviction_penalty × discarded_cached_tokens
+```
+
+`--slot-cache-eviction-penalty 0` 严格保留最长公共前缀行为；正值考虑缓存机会成本，得分非正时回退 LRU。相同得分使用 LRU 打破平局。纯函数调度模块有原生 C++ 边界测试，metrics 同时暴露选择次数、估计复用/淘汰 token、KV 占用和 llama.cpp 内部分配内存。
+
+`config/engine_ab.json` 固定两个 slot：一个保存 480-token 长会话，一个保存 70-token 短会话。冲突请求在“当前多复用 20 token”和“保护 400 token 长缓存”之间选择，随后立即访问长会话，从而测量整个序列而非只挑单请求指标。
 
 ### 离线吞吐
 
@@ -106,6 +125,7 @@ Windows 预编译包即使使用 `-ngl 0` 也会加载 CUDA backend 并创建上
 
 ```text
 config/       固定制品、离线、在线和质量配置
+patches/      可审查、可重放的个人 llama.cpp C++ 改动
 docs/         架构与面试追问
 models/       下载的 GGUF，Git 忽略
 runtime/      官方预编译运行包，Git 忽略
@@ -114,11 +134,12 @@ src/          指标、SSE、benchmark、质量和推荐器实现
 tests/        无外部依赖的单元测试
 results/      可提交的汇总结果；raw 日志被忽略
 vendor/       固定版本 llama.cpp 源码，Git 忽略
+build/        本机构建的 patched server，Git 忽略
 ```
 
 ## 面试演示建议
 
-三分钟演示顺序：先展示固定版本与实验矩阵，再展示 Q4/F16 和 CPU/GPU 数值，随后把并发从 1 提升到 4，最后展示错误样例并解释为什么性能与质量必须同时报告。不要把“运行了 llama.cpp”说成自己实现了推理框架；应明确个人贡献位于实验基础设施、指标语义、质量护栏和内存规划。
+三分钟演示顺序：先展示独立 C++ 调度函数和原生测试，再用日志解释惩罚 0 为什么淘汰 400 token、惩罚 0.5 为什么只淘汰 10 token，随后展示 5 次 A/B 的累计延迟与 prefill 差异。最后再用 CUDA/量化数据说明实验底座如何验证改动。应表述为“修改 llama.cpp slot 调度与可观测性”，而不是“实现了整个 llama.cpp”。
 
 进一步追问与回答框架见 [docs/interview-notes.md](docs/interview-notes.md)。
 

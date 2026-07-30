@@ -23,6 +23,12 @@ def render_report(results_dir: Path, output_path: Path) -> None:
         encoding="utf-8-sig", newline=""
     ) as handle:
         quality = list(csv.DictReader(handle))
+    engine_ab_path = results_dir / "engine_ab.csv"
+    if engine_ab_path.exists():
+        with engine_ab_path.open(encoding="utf-8-sig", newline="") as handle:
+            engine_ab = list(csv.DictReader(handle))
+    else:
+        engine_ab = []
     environment = json.loads(
         (results_dir / "environment.json").read_text(encoding="utf-8")
     )
@@ -73,6 +79,21 @@ def render_report(results_dir: Path, output_path: Path) -> None:
     observations.append(
         f"- 并发从 {lowest_concurrency} 增至 {highest_concurrency} 时，聚合输出吞吐提高到 {aggregate_scaling:.2f} 倍；同时应结合 TTFT/TPOT 尾延迟判断交互体验。"
     )
+    if len(engine_ab) >= 2:
+        upstream = min(engine_ab, key=lambda row: float(row["eviction_penalty"]))
+        cache_aware = max(engine_ab, key=lambda row: float(row["eviction_penalty"]))
+        sequence_speedup = float(upstream["sequence_wall_ms_median"]) / float(
+            cache_aware["sequence_wall_ms_median"]
+        )
+        prefill_reduction = 1.0 - float(
+            cache_aware["sequence_prompt_processed_tokens_median"]
+        ) / float(upstream["sequence_prompt_processed_tokens_median"])
+        eviction_reduction = 1.0 - float(
+            cache_aware["selection_evicted_tokens_median"]
+        ) / float(upstream["selection_evicted_tokens_median"])
+        observations.append(
+            f"- Cache-aware 调度在冲突序列中减少 {prefill_reduction:.1%} 的重复 prefill token、减少 {eviction_reduction:.1%} 的缓存淘汰，中位序列延迟提升 {sequence_speedup:.2f} 倍。"
+        )
     quality_scores = [float(row["accuracy"]) for row in quality]
     quality_total = max((int(row["total"]) for row in quality), default=0)
 
@@ -133,6 +154,34 @@ def render_report(results_dir: Path, output_path: Path) -> None:
                 peak=_fmt(row.get("gpu_memory_peak_mib", ""), 0),
                 increment=_fmt(row.get("gpu_memory_increment_mib", ""), 0),
             )
+        )
+    if engine_ab:
+        lines.extend(
+            [
+                "",
+                "## C++ KV Cache 调度 A/B",
+                "",
+                "| 淘汰惩罚 | trials | 当前请求 ms | 后续长会话 ms | 序列总延迟 ms | 重复 prefill tokens | 选择淘汰 tokens |",
+                "|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for row in engine_ab:
+            lines.append(
+                "| {penalty} | {trials} | {target} | {followup} | {sequence} | {tokens} | {evicted} |".format(
+                    penalty=_fmt(row["eviction_penalty"]),
+                    trials=row["trials"],
+                    target=_fmt(row["target_wall_ms_median"]),
+                    followup=_fmt(row["followup_wall_ms_median"]),
+                    sequence=_fmt(row["sequence_wall_ms_median"]),
+                    tokens=_fmt(row["sequence_prompt_processed_tokens_median"], 0),
+                    evicted=_fmt(row["selection_evicted_tokens_median"], 0),
+                )
+            )
+        lines.extend(
+            [
+                "",
+                "惩罚 0 等价于上游最长公共前缀选择；正惩罚使用本项目新增的净收益评分。当前请求可能少复用 token，但能避免破坏更有价值的长会话缓存，因此必须比较请求序列而非单请求。",
+            ]
         )
     lines.extend(
         [

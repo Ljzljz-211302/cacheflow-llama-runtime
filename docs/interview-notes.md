@@ -2,7 +2,19 @@
 
 ## 30 秒项目介绍
 
-我基于固定版本的 llama.cpp 和同一 Qwen2.5-0.5B 模型构建了可复现推理实验台，对 Q4、Q8、F16 的内存、prefill/decode、CPU/GPU 和在线并发进行受控比较。我没有只搭服务页面，而是实现了 SSE 级 TTFT/TPOT、结构化实验、KV Cache 预算推荐、正负规则质量护栏和 SHA-256 制品复现。实验显示量化显著改善速度与体积，但小模型事实错误仍是主要瓶颈。
+我修改了 llama.cpp 的 C++ slot scheduler，实现带缓存淘汰成本的 KV-cache-aware 调度。上游只最大化当前 prompt 的前缀复用，可能破坏更有价值的长会话缓存；我的策略用“复用 token−惩罚×淘汰 token”评分，并增加引擎原生 KV、内存和 cache-hit metrics。5 次冲突 workload 中，重复 prefill 减少 91.6%，两请求序列中位延迟提升 9.88 倍。外围实验台负责可复现构建、CUDA/CPU/量化对照和结果校验。
+
+## 为什么这不是只包装 llama.cpp
+
+个人 C++ patch 修改了任务调度的决策结果，包含新的 CLI 参数、纯函数策略模块、原生 C++ 测试和 Prometheus 指标。`vendor/` 是未计入个人代码量的固定上游；`patches/` 才是可审查的本人引擎贡献。Python 只负责构造 workload 和分析结果，不决定 slot 选择。
+
+## 调度目标函数与取舍
+
+上游最长公共前缀策略等价于淘汰惩罚为 0。新策略的正惩罚保护长缓存，但可能让当前请求少复用 token，所以不能只看当前 TTFT。实验必须加入后续会话请求并统计累计 prefill 与序列延迟。惩罚系数不是普适常数，应根据会话回访概率、SLO 和缓存压力调参；生产系统可进一步在线学习该参数。
+
+## 正确性与复杂度
+
+对每个空闲 slot 计算一次 LCP，上游已经承担这部分开销；新增评分是 O(number_of_slots) 的常数运算。零惩罚保持原行为，负收益时回退 LRU，相同得分由最久未使用 slot 打破平局。测试覆盖兼容模式、保护长缓存、阈值/负收益回退和 LRU tie-break。
 
 ## 为什么 Q4 更小但不保证快四倍
 
@@ -39,4 +51,5 @@ continuous batching 让多个请求共享 GPU 执行，提高利用率和聚合�
 1. 用标准语料运行 perplexity，对比 Q4/Q8/F16，而不是扩大自制题库。
 2. 加入固定功耗/温度和 VRAM 时间序列，解释 laptop GPU 的频率波动。
 3. 对 batch、context、GPU offload 做 Pareto 前沿，而不是只找单点最快参数。
-4. 阅读 `llama-bench`、slot scheduler 和 KV Cache 代码，选择一个上游可接受的小改动并补 C++ 测试。
+4. 用真实多轮会话 trace 学习 eviction penalty，并与 LRU、LCP、Belady oracle 比较命中率和 SLO。
+5. 安装 CUDA Toolkit，构建同一 patch 的 CUDA server，验证 CPU 结论是否在 GPU prefill/continuous batching 下保持。
