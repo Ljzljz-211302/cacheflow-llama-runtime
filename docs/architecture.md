@@ -1,0 +1,923 @@
+# CacheFlow Runtime 整体架构设计
+
+状态：Draft for implementation  
+目标仓库：`D:\llama`  
+上游基线：llama.cpp `acd79d603cb2e1c84c0886137b80f1ad649b6857`  
+主实现语言：C++17；Python 仅用于实验编排和结果分析
+
+## 1. 文档目的
+
+本项目不是在 llama.cpp 外增加一层 HTTP 包装，也不是为了代码行数机械重写整个上游仓库。目标是在保持 GGUF、模型实现和硬件 Backend 可用的前提下，重构推理运行时的核心热路径，并形成一个能够独立解释、测试和验证的 LLM Serving Runtime。
+
+项目最终回答一个明确的问题：
+
+> 在显存和 KV Cache 容量有限的单机环境中，如何联合优化 Prefix 复用、Continuous Batching、Chunked Prefill、抢占恢复和 Speculative Decoding，使吞吐、TTFT、TPOT 与尾延迟取得可解释的平衡？
+
+本文冻结后续重构的模块划分、Interface、状态所有权、迁移顺序和验收标准。没有在本文中定义的外围功能，不得优先于推理热路径实施。
+
+## 2. 项目定位
+
+项目名称：**CacheFlow Runtime**
+
+一句话定位：
+
+> 基于 llama.cpp fork 重构的缓存感知 LLM 推理运行时，核心实现 Token-level Continuous Batching、KV Block 管理、Prefix 共享、资源抢占和自适应 Speculative Decoding。
+
+项目面向：
+
+- LLM Serving / AI Infra 面试；
+- C++ 推理引擎与系统优化面试；
+- 模型部署、量化和性能工程面试；
+- 可复现的个人系统项目展示。
+
+## 3. 核心原则
+
+### 3.1 推理热路径优先
+
+个人核心工作必须进入以下真实调用链：
+
+```text
+Request
+  -> tokenize / template
+  -> admission
+  -> KV prepare
+  -> schedule iteration
+  -> build llama_batch
+  -> llama_decode
+  -> sample / verify draft
+  -> update KV and runtime state
+  -> stream result
+```
+
+HTTP、配置、日志和脚本是必要配套，但不计为主要 AI Infra 创新。
+
+### 3.2 深模块与小 Interface
+
+每个核心 Module 必须隐藏复杂状态和算法，调用者只学习少量 Interface。测试与生产调用通过同一个 Seam，不为测试暴露内部数据结构。
+
+### 3.3 默认兼容，策略可切换
+
+- 默认配置必须保持上游语义和输出正确性；
+- 每项新策略都必须能单独开关；
+- A/B 必须使用同一模型、同一请求轨迹和同一硬件；
+- 负结果必须保留，不得只报告有利样本。
+
+### 3.4 第三方代码不冒充个人贡献
+
+- GGML 算子、CUDA/Metal/Vulkan Backend、GGUF 基础格式和既有模型定义保留上游来源；
+- 重构后的运行时、调度、KV 策略、控制算法、测试和实验属于个人贡献；
+- Patch、Git commit 和代码统计分别报告继承、修改和新增代码。
+
+## 4. 范围与非目标
+
+### 4.1 本期必须覆盖
+
+- 推理请求和 Sequence 状态所有权重构；
+- Token-level Continuous Batching；
+- Decode 优先与 Chunked Prefill；
+- KV Block Table 与容量账本；
+- Prefix Block 共享和 Copy-on-Write；
+- KV 成本感知淘汰；
+- 请求抢占、换出和恢复；
+- 自适应 Speculative Decoding；
+- 模型结构、量化、KV 和性能成本建模；
+- TTFT、TPOT、吞吐、P95/P99、KV 利用率等原生指标；
+- 真实模型端到端 A/B 和故障注入。
+
+### 4.2 明确非目标
+
+- 从零重写 CUDA、Metal、Vulkan、BLAS 等全部算子；
+- 从零重写所有已支持模型的 Graph 定义；
+- 自创 GGUF 文件格式；
+- 分布式训练；
+- 多机 Tensor Parallel 作为第一阶段目标；
+- 用 Python 模拟结果代替真实 C++ 热路径验证。
+
+## 5. 代码所有权与仓库策略
+
+当前存在两个 Git 层级：
+
+```text
+D:\llama                         实验、配置、报告和可重放 patch
+D:\llama\vendor\llama.cpp       实际 C++ fork，保留上游历史
+```
+
+最终交付遵循以下规则：
+
+1. `vendor/llama.cpp` 的 `codex/cacheflow-runtime` 分支是 C++ 主实现；
+2. 外层仓库保存固定上游 revision、可重放 patch、模型清单、实验和报告；
+3. 个人 C++ commit 必须保持可二分，每个 commit 都可构建和测试；
+4. Python `src/cacheflow` 仅作为早期控制面原型，不作为最终运行时核心；
+5. 完成 C++ 替代后，原型移入 `prototypes/` 或删除，避免双实现长期漂移。
+
+## 6. 目标架构
+
+```mermaid
+flowchart TD
+    Client["OpenAI / Native Client"] --> Gateway["Serving Adapter"]
+    Gateway --> Engine["InferenceEngine"]
+    Engine --> Admission["AdmissionController"]
+    Admission --> Cost["ModelCostModel"]
+    Admission --> KV["KvCacheManager"]
+    Engine --> Scheduler["InferenceScheduler"]
+    Scheduler --> Batch["BatchPlanner"]
+    Scheduler --> Spec["SpeculationController"]
+    KV --> Prefix["PrefixIndex"]
+    KV --> Swap["KvSwapStore"]
+    Batch --> Runtime["LlamaRuntime Adapter"]
+    Spec --> Runtime
+    Runtime --> Memory["llama_memory / KV Backend"]
+    Runtime --> Backend["GGML CPU/CUDA/Metal/Vulkan"]
+    Engine --> Metrics["RuntimeMetrics"]
+    KV --> Metrics
+    Scheduler --> Metrics
+    Spec --> Metrics
+```
+
+### 6.1 目标目录
+
+重构采用渐进迁移，目标逻辑目录如下；在迁移完成前可暂时位于 `tools/server`，但 Interface 和依赖方向必须与目标一致。
+
+```text
+runtime/
+  inference-engine.*
+  llama-runtime-adapter.*
+  runtime-state.*
+
+scheduler/
+  inference-scheduler.*
+  batch-planner.*
+  admission-controller.*
+  preemption-policy.*
+
+memory/
+  kv-cache-manager.*
+  kv-block-table.*
+  prefix-index.*
+  kv-eviction-policy.*
+  kv-swap-store.*
+
+speculation/
+  speculation-controller.*
+  acceptance-model.*
+
+model/
+  model-profile.*
+  model-cost-model.*
+
+serving/
+  request-adapter.*
+  stream-writer.*
+  runtime-metrics.*
+
+backends/
+  llama-runtime-adapter.*
+
+tests/
+benchmarks/
+```
+
+## 7. 核心领域对象
+
+### 7.1 Request 与 Sequence 分离
+
+`Request` 表示外部调用；`Sequence` 表示一次可调度的模型生成序列。一个 Request 可以产生多个 Sequence，例如 `n > 1`、Beam 或父子共享 Prompt。
+
+```cpp
+enum class SequencePhase {
+    WAITING,
+    PREFILL,
+    DECODE,
+    PREEMPTED,
+    SWAPPED,
+    FINISHED,
+    FAILED,
+};
+
+struct SequenceState {
+    SequenceId id;
+    RequestId request_id;
+    SequencePhase phase;
+    uint32_t prompt_cursor;
+    uint32_t generated_tokens;
+    uint32_t reserved_decode_tokens;
+    uint64_t arrival_us;
+    uint64_t deadline_us;
+    BlockTable block_table;
+    SamplingState sampling;
+};
+```
+
+状态迁移：
+
+```text
+WAITING -> PREFILL -> DECODE -> FINISHED
+              |          |
+              +-> PREEMPTED <-+
+                       |
+                       +-> SWAPPED -> PREFILL/DECODE
+
+任意非终态 -> FAILED
+```
+
+不变量：
+
+- 只有 `InferenceEngine` 修改 Sequence Phase；
+- `InferenceScheduler` 返回计划，不直接修改 Sequence；
+- `KvCacheManager` 拥有 Block Table，Sequence 只持稳定句柄；
+- Runtime Adapter 不拥有请求生命周期。
+
+### 7.2 IterationPlan
+
+每次 `llama_decode()` 前生成一个不可变计划：
+
+```cpp
+struct IterationPlan {
+    std::vector<DecodeItem> decode;
+    std::vector<PrefillChunk> prefill;
+    std::vector<Preemption> preemptions;
+    std::vector<Restore> restores;
+    std::vector<SpeculationPlan> speculation;
+    uint32_t token_budget;
+    uint32_t kv_blocks_required;
+};
+```
+
+计划生成后到执行完成前不得改变；取消请求在下一迭代生效，避免 Batch 与状态不一致。
+
+## 8. Module 设计
+
+### 8.1 InferenceEngine
+
+职责：统一拥有请求生命周期和一次推理迭代的事务边界。
+
+Interface：
+
+```cpp
+class InferenceEngine {
+public:
+    SubmitResult submit(Request request);
+    bool cancel(RequestId id);
+    IterationResult step();
+    EngineSnapshot snapshot() const;
+};
+```
+
+`step()` 内部顺序固定：
+
+1. 接收新请求与取消；
+2. Admission；
+3. 生成 KV PreparePlan；
+4. Scheduler 生成 IterationPlan；
+5. 应用抢占、恢复和 Block Table 变更；
+6. Runtime 构造并执行 Batch；
+7. Sampling / Draft Verification；
+8. 提交状态与 Metrics；
+9. 发布流式结果。
+
+失败原则：执行失败时只提交已确认完成的 Token；未提交计划必须回滚或重新计算。
+
+### 8.2 InferenceScheduler
+
+职责：在 Token、时间和 KV 预算下决定本轮运行哪些 Sequence。
+
+Interface：
+
+```cpp
+class InferenceScheduler {
+public:
+    IterationPlan plan(const SchedulerSnapshot &, const ResourceBudget &);
+    void observe(const IterationFeedback &);
+};
+```
+
+调度优先级：
+
+1. 已处于 Decode 的延迟敏感 Sequence；
+2. 距离 Deadline 最近的请求；
+3. 等待超过阈值的 Prefill；
+4. 高 Prefix 命中、低 Prefill 成本请求；
+5. 普通 FCFS 请求。
+
+请求级评分：
+
+```text
+priority =
+    deadline_bonus
+  + waiting_age_weight * waiting_ms
+  + prefix_reuse_tokens * predicted_prefill_cost
+  - kv_blocks_required * kv_pressure_price
+  - preemption_risk
+```
+
+Slot 选择评分：
+
+```text
+slot_score =
+    reusable_prefix_tokens * prefill_cost_per_token
+  - evicted_tokens * future_reuse_probability * prefill_cost_per_token
+  - restore_cost
+```
+
+当前 `server-inference-scheduler.*` 是此 Module 的第一阶段实现。
+
+### 8.3 BatchPlanner
+
+职责：将已选 Sequence 转换为一次物理 `llama_batch`，处理 Decode、Prefill 和 Draft Verification 的 Token 布局。
+
+核心规则：
+
+- Decode 首先占用预算；
+- Speculative Verification 与普通 Decode 共享 Decode 预算；
+- 剩余预算用于 Chunked Prefill；
+- 单个长 Prompt 不得耗尽所有 Prefill 预算；
+- LoRA、Embedding、Multimodal 等不兼容请求不得错误合批；
+- 每个 active Sequence 至少产生正确的 logits 位置。
+
+Chunk 大小不采用全局固定常数。控制目标为：
+
+```text
+minimize:
+    decode_stall_ms
+  + prefill_kernel_overhead_ms
+  + fairness_penalty
+```
+
+控制器候选动作：`{0/upstream, 64, 128, 256, 512}`。根据 Backend、模型、并发和最近迭代耗时选择。当前 CPU 实验已证明固定 32/128/256 并不自动优于上游，因此自适应是必须项。
+
+### 8.4 KvCacheManager
+
+职责：拥有逻辑 KV Block、物理页映射、Prefix 共享、容量准入和淘汰。
+
+Interface：
+
+```cpp
+class KvCacheManager {
+public:
+    KvPreparePlan prepare(const SequenceSnapshot &, uint32_t reserve_tokens);
+    void commit(const KvPreparePlan &, const DecodeResult &);
+    void release(SequenceId);
+    KvSnapshot snapshot() const;
+};
+```
+
+核心数据结构：
+
+```cpp
+struct KvBlock {
+    BlockId id;
+    uint32_t token_count;
+    uint32_t ref_count;
+    uint64_t content_hash;
+    uint64_t last_access_us;
+    BlockLocation location; // DEVICE, HOST, DISK
+};
+
+struct BlockTable {
+    SequenceId sequence;
+    std::vector<BlockId> blocks;
+    uint32_t tail_tokens;
+};
+```
+
+Block Size 初始默认 16 Token，可配置并通过实验比较。
+
+### Prefix 共享
+
+1. Token 序列按完整 Block 计算增量 Hash；
+2. `PrefixIndex` 查找最长完整 Block Prefix；
+3. 命中 Block 增加引用计数；
+4. 不完整尾 Block 不跨 Sequence 共享；
+5. 任一共享 Block 被修改时执行 Copy-on-Write；
+6. 只有 `ref_count == 0` 的 Block 才能物理回收。
+
+### 容量准入
+
+```text
+required_blocks =
+    uncached_prompt_blocks
+  + reserved_decode_blocks
+  + speculative_extra_blocks
+```
+
+准入结果只能是：
+
+- `ADMIT`：容量足够；
+- `EVICT_AND_ADMIT`：淘汰空闲 Prefix 后足够；
+- `PREEMPT_AND_ADMIT`：需要抢占低优先级活跃序列；
+- `QUEUE`：暂不准入；
+- `REJECT`：请求本身超过模型或物理限制。
+
+### 淘汰价值
+
+```text
+eviction_cost =
+    reuse_probability * recompute_prefill_ms
+  + swap_restore_ms
+  + shared_reference_penalty
+  + deadline_penalty
+```
+
+不能只用 LRU；LRU 仅作为信息不足时的兼容策略。
+
+### 与 llama.cpp Memory 的迁移
+
+第一阶段使用 `llama_memory_seq_*` 作为 Adapter，建立逻辑 Block Table 和指标；第二阶段在以下实现中增加稳定 Block 操作：
+
+- `src/llama-memory.*`
+- `src/llama-kv-cache.*`
+- `src/llama-kv-cells.h`
+- Hybrid / Recurrent Memory 对应实现
+
+Paged KV 优化仅对支持随机 Sequence Remove/Copy 的 Attention KV Backend 开启；Recurrent、SWA 和 Hybrid Memory 必须通过能力查询降级，不得假设所有模型均可分页。
+
+### 8.5 PrefixIndex
+
+职责：从 Token Block Prefix 映射到共享 KV Block Chain。
+
+可选实现对比：
+
+- Radix Tree：支持最长前缀和自然共享；
+- Hash Chain：实现简单，按 Block 查询；
+- Radix + Block Hash：目标实现。
+
+Interface：
+
+```cpp
+class PrefixIndex {
+public:
+    PrefixMatch match(TokenSpan tokens) const;
+    PrefixHandle insert(TokenSpan tokens, BlockSpan blocks);
+    void erase(PrefixHandle);
+};
+```
+
+复杂度目标：查询 `O(number_of_prompt_blocks)`，不得逐 Slot 重复比较全部 Token。
+
+### 8.6 PreemptionPolicy 与 KvSwapStore
+
+抢占粒度为 Sequence，不在任意 Token 中间破坏状态。
+
+优先策略：
+
+1. 淘汰无人引用的 idle Prefix；
+2. 换出低复用概率的 idle Sequence；
+3. 抢占低优先级 Prefill；
+4. 最后才抢占正在 Decode 的 Sequence。
+
+`KvSwapStore` 提供两个 Adapter：
+
+- In-memory Host Store：测试与高速恢复；
+- File Store：容量扩展与故障注入。
+
+Interface：
+
+```cpp
+class KvSwapStore {
+public:
+    SwapHandle save(SequenceId, const BlockTable &);
+    RestoreResult restore(SwapHandle, MutableBlockTable &);
+    void erase(SwapHandle);
+};
+```
+
+保存失败必须退化为重计算，不得导致其他 Sequence 状态损坏。
+
+### 8.7 SpeculationController
+
+职责：决定是否推测以及本轮 Draft 长度，不负责生成 Draft Token。
+
+Interface：
+
+```cpp
+class SpeculationController {
+public:
+    SpeculationPlan choose(const SequenceSnapshot &, const RuntimeSnapshot &);
+    void observe(const SpeculationFeedback &);
+};
+```
+
+输入：
+
+- 每个 Sequence 的 EWMA 接受率；
+- Draft 与 Target 每 Token 耗时；
+- 当前 Batch 并发；
+- KV Block 压力；
+- 剩余输出 Token；
+- Context 剩余空间。
+
+收益估算：
+
+```text
+expected_gain_ms =
+    expected_accepted_tokens * target_decode_ms
+  - draft_generation_ms
+  - target_verification_overhead_ms
+  - kv_pressure_price * extra_blocks
+```
+
+仅当 `expected_gain_ms > hysteresis_margin` 时启用，避免在阈值附近频繁开关。
+
+控制动作：`draft_length in [0, configured_max]`。低接受率、KV 高压或高并发时缩短；高接受率且 Decode 成为瓶颈时增大。
+
+### 8.8 ModelCostModel
+
+职责：把模型结构和在线观测转换为调度可使用的成本。
+
+静态输入：
+
+- Layer、Attention Head、KV Head、Head Dimension；
+- Context Limit；
+- KV 数据类型；
+- 权重量化类型和大小；
+- Backend 类型。
+
+KV 理论成本：
+
+```text
+KV bytes =
+    2 * layers * kv_heads * head_dim
+      * sequence_tokens * bytes_per_element
+```
+
+动态模型按 `(model, backend, context_bucket, concurrency_bucket)` 保存 EWMA：
+
+- Prefill ms/token；
+- Decode ms/token；
+- Draft ms/token；
+- Verification ms/token；
+- Swap save/restore 带宽。
+
+成本模型只提供估算与置信度；Scheduler 决定策略。
+
+### 8.9 LlamaRuntime Adapter
+
+职责：隔离上层运行时与 llama.cpp 低层 Context/Batch/Memory 调用。
+
+Interface：
+
+```cpp
+class LlamaRuntime {
+public:
+    RuntimeCapabilities capabilities() const;
+    DecodeResult decode(const PhysicalBatch &);
+    void remove_kv(SequenceId, PositionRange);
+    void copy_kv(SequenceId from, SequenceId to, PositionRange);
+    MemorySnapshot memory_snapshot() const;
+};
+```
+
+必须存在两个 Adapter 才建立真实 Seam：
+
+- 生产 `LlamaCppRuntime`；
+- 测试 `DeterministicRuntime`，可注入 OOM、延迟和部分失败。
+
+## 9. 一次推理迭代的数据流
+
+```mermaid
+sequenceDiagram
+    participant Q as RequestQueue
+    participant E as InferenceEngine
+    participant A as AdmissionController
+    participant K as KvCacheManager
+    participant S as InferenceScheduler
+    participant P as SpeculationController
+    participant R as LlamaRuntime
+
+    Q->>E: new/cancel requests
+    E->>A: evaluate waiting sequences
+    A->>K: required blocks and prefix lookup
+    K-->>A: admit/evict/preempt/queue
+    A-->>E: admission decisions
+    E->>S: scheduler snapshot + budget
+    S->>P: draft decision candidates
+    P-->>S: per-sequence draft length
+    S-->>E: immutable IterationPlan
+    E->>K: apply prepare/preemption
+    E->>R: decode PhysicalBatch
+    R-->>E: logits + runtime timing
+    E->>P: acceptance feedback
+    E->>K: commit generated KV
+    E->>S: latency/resource feedback
+    E-->>Q: stream committed tokens
+```
+
+## 10. 并发与一致性模型
+
+- 一个 Engine Loop 线程拥有调度状态和 Sequence 状态；
+- HTTP/网络线程只投递 Command，不直接修改 Slot/KV；
+- Backend Decode 可异步，但计划提交由 Engine Loop 串行完成；
+- Metrics 使用快照或原子计数，不持有 Engine 主锁执行 I/O；
+- Swap I/O 通过工作线程完成，Sequence 保持 `SWAPPED/PREEMPTED`；
+- 同一 Sequence 同时最多存在一个未提交 IterationPlan。
+
+必须保持：
+
+- Block 引用计数不为负；
+- Free Block 不得出现在任何 Block Table；
+- 每个物理 KV Position 最多归属允许共享的 Sequence 集合；
+- 输出 Token 只有在 Target 验证并提交后才能发送；
+- 取消不回收仍被正在执行 Batch 引用的 KV；
+- 失败回滚后 Scheduler Snapshot 与 Runtime Snapshot 一致。
+
+## 11. 配置设计
+
+配置分为兼容参数与实验策略参数。
+
+```text
+--scheduler-policy upstream|cacheflow
+--slot-cache-eviction-penalty FLOAT
+--prefill-policy greedy|fixed|adaptive
+--prefill-chunk-size N
+--prefill-token-budget N
+--kv-block-size N
+--kv-admission-reserve-tokens N
+--kv-eviction-policy lru|cost
+--kv-swap-path PATH
+--kv-swap-budget-mib N
+--spec-policy fixed|adaptive
+--spec-target-acceptance FLOAT
+--spec-ewma-alpha FLOAT
+```
+
+规则：
+
+- `upstream` 必须关闭全部行为变化；
+- 非法组合在启动时失败，不在运行中静默忽略；
+- Metrics 必须导出最终生效配置；
+- 实验文件固定所有策略参数。
+
+## 12. 可观测性
+
+### 12.1 请求指标
+
+- `time_to_first_token_seconds`
+- `time_per_output_token_seconds`
+- `request_latency_seconds`
+- `request_queue_seconds`
+- `requests_preempted_total`
+- `requests_swapped_total`
+- `requests_recomputed_total`
+
+### 12.2 Scheduler 指标
+
+- `scheduler_iterations_total`
+- `decode_tokens_scheduled_total`
+- `prefill_tokens_scheduled_total`
+- `prefill_chunks_scheduled_total`
+- `batch_tokens`
+- `batch_sequences`
+- `prefill_starvation_ms`
+
+### 12.3 KV 指标
+
+- `kv_blocks_used`
+- `kv_blocks_free`
+- `kv_prefix_hit_ratio`
+- `kv_shared_blocks`
+- `kv_copy_on_write_total`
+- `kv_evicted_blocks_total`
+- `kv_swap_bytes_total`
+- `kv_restore_seconds`
+- `kv_admission_failures_total`
+
+### 12.4 Speculation 指标
+
+- `draft_tokens_total`
+- `draft_tokens_accepted_total`
+- `draft_acceptance_ratio`
+- `adaptive_draft_length`
+- `speculation_disabled_total{reason}`
+- `speculation_net_saved_ms`
+
+指标必须区分累计值、当前 Gauge 和 Histogram；不得把所有 Prometheus 样本都标记成 Gauge。
+
+## 13. 测试策略
+
+### 13.1 纯模块测试
+
+- Scheduler：预算、公平性、Deadline、默认兼容；
+- Block Table：分配、释放、引用计数、COW；
+- PrefixIndex：最长匹配、删除、Hash 冲突保护；
+- Admission：容量边界、Victim 选择、不可准入；
+- Speculation：EWMA、迟滞、压力降级；
+- CostModel：KV 公式和 Bucket 更新。
+
+### 13.2 状态机/属性测试
+
+随机生成请求、取消、抢占和恢复序列，持续检查：
+
+- Block 总量守恒；
+- 无悬空引用；
+- 已完成请求不会再次调度；
+- 相同 Seed 输出确定；
+- 上游模式行为一致。
+
+### 13.3 Runtime 集成测试
+
+使用 `DeterministicRuntime`：
+
+- 注入固定 Decode 延迟；
+- 注入 KV OOM；
+- 注入 Swap 保存/恢复失败；
+- 注入 Draft 低接受率；
+- 验证 Engine 的回滚和降级。
+
+### 13.4 真实模型测试
+
+至少覆盖：
+
+- Qwen2.5-0.5B Q4/Q8/F16；
+- CPU 与 CUDA；
+- 单请求与 2/4/8 并发；
+- 128/512/2K/长 Context；
+- 多轮对话与共享 System Prompt；
+- 混合短 Decode、长 Prefill 负载。
+
+## 14. Benchmark 设计
+
+所有实验至少三次 fresh-process trial，报告 Median、P95 和原始数据。
+
+| 实验 | Baseline | Variant | 主要指标 |
+|---|---|---|---|
+| Slot 选择 | LCP/LRU | Cost-aware | 重复 Prefill、淘汰 Token、序列延迟 |
+| Prefix Cache | Slot Cache | Block Prefix | Hit Ratio、共享 Block、显存 |
+| Prefill | Greedy | Fixed/Adaptive Chunk | TTFT、Decode TPOT、Prefill TPS |
+| Batching | FCFS | Token-level | Throughput、P95、Fairness |
+| KV 压力 | 被动失败清理 | Admission/Preemption | OOM、抢占、恢复时间 |
+| Speculation | Fixed Draft | Adaptive Draft | 接受率、TPS、额外 KV、净收益 |
+| Swap | Recompute | Host/Disk Restore | 恢复延迟、总吞吐 |
+
+负结果策略：
+
+- 保留所有参数点；
+- 解释机制，不只报百分比；
+- 若 CPU 与 GPU 结论相反，分别建模；
+- 不用单个对抗样本宣称生产平均收益。
+
+## 15. 迁移路线
+
+每一阶段都必须保持 `llama-server` 可构建、可运行；采用替换旧逻辑，而不是在旧逻辑外重复叠层。
+
+### Phase 0：基线与可复现性——已完成
+
+- 固定 llama.cpp commit、模型 revision 和 SHA-256；
+- 固定 Q4/Q8/F16 与 CPU/CUDA benchmark；
+- 建立真实请求指标与质量护栏。
+
+### Phase 1：Scheduler Seam——进行中
+
+- 从 `server-context.cpp` 提取 `InferenceScheduler`；
+- Slot 选择和 Prefill Budget 通过同一 Interface；
+- 默认模式保持上游行为；
+- 原生 C++ 测试覆盖公平性与兼容。
+
+### Phase 2：KV 资源模型——进行中
+
+- 当前完成逻辑容量规划与 Value-aware Victim；
+- 下一步建立 Block Table 和 PrefixIndex；
+- 接入统一 KV Memory Capability；
+- 替换 decode 失败后临时清理逻辑。
+
+### Phase 3：Engine Loop 拆分
+
+- 将 `update_slots()` 拆为 prepare、plan、execute、commit；
+- `server_context` 降为组合根和 Adapter；
+- 建立 DeterministicRuntime 集成测试。
+
+### Phase 4：Paged Prefix KV
+
+- 实现 Block 分配、共享、COW 和回收；
+- Attention KV Backend 物理接入；
+- Hybrid/Recurrent 能力降级；
+- Prefix A/B。
+
+### Phase 5：Preemption 与 Swap
+
+- Sequence 抢占；
+- Host/Disk 两种 Swap Adapter；
+- 保存失败退化重计算；
+- KV 压力故障注入。
+
+### Phase 6：Adaptive Prefill
+
+- 收集每轮 Batch 与 Kernel 时间；
+- Backend/Context/Concurrency Bucket；
+- 在线选择 Chunk；
+- 与 Greedy 和固定 Chunk 对比。
+
+### Phase 7：Adaptive Speculation
+
+- 提取 SpeculationController；
+- 接受率 EWMA、迟滞与 KV 压力反馈；
+- Draft/Target 成本建模；
+- 真实 Draft 模型或 N-gram Spec A/B。
+
+### Phase 8：Serving 收口
+
+- C++ OpenAI Streaming Adapter；
+- 完整取消、Deadline 和背压；
+- 移除或归档 Python 控制面原型；
+- 统一 Metrics 和 Debug Snapshot。
+
+### Phase 9：面试交付
+
+- 一键构建、测试和 benchmark；
+- 架构图、火焰图、结果报告；
+- 个人贡献统计和上游边界；
+- 三分钟演示与深挖问题手册。
+
+## 16. 当前代码到目标 Module 的映射
+
+| 当前位置 | 目标 Module | 处理方式 |
+|---|---|---|
+| `tools/server/server-context.cpp` | Engine、Scheduler、Batch、Runtime Adapter | 持续拆分，最终仅保留组合与协议适配 |
+| `tools/server/server-inference-scheduler.*` | InferenceScheduler / BatchPlanner | 扩展后移动到目标目录 |
+| `tools/server/server-kv-capacity-planner.*` | Admission / KV Eviction | 与 Block Manager 合并形成深模块 |
+| `src/llama-kv-cache.*` | Physical KV Backend | 保留核心并增加 Block Interface |
+| `src/llama-memory.*` | Runtime Memory Adapter | 增加 Capability 与稳定 Block 操作 |
+| `common/speculative.*` | Draft Executor | 保留生成实现，控制策略移出 |
+| `src/cacheflow/*` | 控制面原型 | C++ 替代后移入 prototypes 或删除 |
+| `src/llama_lab/*` | Benchmark / Report | 保留为实验工具，不计运行时核心 |
+
+## 17. 验收标准
+
+只有同时满足以下条件，项目才能标记为“可用于面试”：
+
+### 架构
+
+- `server-context.cpp` 不再独自拥有调度、KV 和 Spec 策略；
+- Scheduler、KV、Speculation 均有独立深模块和小 Interface；
+- 生产与测试 Runtime Adapter 通过同一 Seam；
+- 依赖方向无循环。
+
+### 功能
+
+- Token-level Continuous Batching 真实运行；
+- Prefix Block 共享和 COW 真实运行；
+- KV 准入、抢占和恢复真实运行；
+- Adaptive Prefill 与 Adaptive Speculation 可开关；
+- OpenAI 非流式与流式请求可用。
+
+### 正确性
+
+- 全部 C++/Python 测试通过；
+- 随机状态序列无 Block 泄漏；
+- 上游兼容模式输出一致；
+- 故障注入无死锁、悬空请求或 KV 引用错误；
+- 质量测试未因优化静默下降。
+
+### 性能证据
+
+- 至少一个真实多轮场景减少重复 Prefill；
+- 至少一个高并发场景改善 TTFT/TPOT/P95 中的明确目标；
+- Adaptive 策略不劣于其固定候选的错误参数点；
+- CPU 与 CUDA 分别报告；
+- 原始 Trial 数据可复查。
+
+### 工程交付
+
+- 新环境可一键构建；
+- Patch 可应用到固定上游；
+- Git 历史可以按阶段审查；
+- README 不把第三方代码计入个人工作量；
+- 文档能够回答算法、状态、复杂度、失败模式和实验限制。
+
+## 18. 主要风险与处理
+
+| 风险 | 影响 | 处理 |
+|---|---|---|
+| llama.cpp 上游快速变化 | Patch 冲突 | 固定基线，阶段性 rebase，不追逐每日上游 |
+| 不同 Memory 类型能力不一致 | Paged KV 不通用 | Capability 查询，Attention 优先，明确降级 |
+| Chunk 过小降低 GEMM 效率 | 负优化 | 在线成本模型，保留 Greedy 动作 |
+| 抢占导致重计算放大 | 尾延迟恶化 | Deadline/重计算成本进入策略 |
+| Spec 接受率不稳定 | 额外 Draft 成本 | EWMA、迟滞、低收益关闭 |
+| 指标测量扰动 | Benchmark 偏差 | 低开销计数、fresh process、多 Trial |
+| 全库重构范围失控 | 长期不可交付 | 按 Phase 替换，每阶段真实可运行 |
+
+## 19. 架构决策摘要
+
+1. 采用 llama.cpp fork，而不是外围 Wrapper 作为项目主体；
+2. 保留成熟 Backend/模型实现，不做无价值逐行重写；
+3. 重构重点是 Engine Loop、Scheduler、KV Memory 和 Speculation；
+4. Scheduler 返回不可变计划，不直接修改 Runtime；
+5. KV Block Manager 是 KV 状态唯一所有者；
+6. Prefix 共享使用完整 Block，尾 Block 使用 COW；
+7. Decode 优先，但通过 Aging 保证 Prefill 不饥饿；
+8. Chunk 和 Draft 长度必须硬件/模型感知，固定参数仅作 Baseline；
+9. 任何优化必须有上游兼容开关和真实模型 A/B；
+10. 负结果属于设计输入，不从报告中删除。
+
+## 20. 下一实现切片
+
+架构文档确认后，下一个 tracer bullet 是：
+
+1. 新增 `KvBlockTable` 与 `PrefixIndex` 纯 C++ Module；
+2. 使用固定 Block Size 管理逻辑 Token Block；
+3. 实现引用计数、最长 Prefix 命中和 COW；
+4. 通过 `llama_memory_seq_*` Adapter 接入一个 Attention KV 路径；
+5. 原生测试验证共享、释放、抢占和容量守恒；
+6. 真实多轮请求验证 Prefix Block 指标；
+7. 然后拆分 `update_slots()` 的 plan/execute/commit 阶段。
+
+该切片完成前，不开始扩展 HTTP 功能或美化外围界面。
