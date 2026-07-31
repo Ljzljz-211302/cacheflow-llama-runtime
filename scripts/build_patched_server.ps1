@@ -7,6 +7,7 @@ $serverExe = Join-Path $buildRoot "bin\Release\llama-server.exe"
 $nativeTests = @(
     "test-inference-scheduler",
     "test-inference-iteration",
+    "test-inference-engine",
     "test-kv-capacity-planner",
     "test-kv-block-manager",
     "test-kv-runtime",
