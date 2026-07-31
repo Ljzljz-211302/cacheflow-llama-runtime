@@ -6,11 +6,15 @@ $buildRoot = Join-Path $projectRoot "build\patched-cpu-noui"
 $serverExe = Join-Path $buildRoot "bin\Release\llama-server.exe"
 $nativeTests = @(
     "test-inference-scheduler",
+    "test-inference-iteration",
     "test-kv-capacity-planner",
     "test-kv-block-manager",
     "test-kv-runtime",
     "test-kv-block-backend",
-    "test-speculation-controller"
+    "test-kv-swap-store",
+    "test-speculation-controller",
+    "test-runtime-adapter",
+    "test-model-cost-model"
 )
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot ".git"))) {

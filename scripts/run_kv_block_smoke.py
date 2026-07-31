@@ -49,6 +49,7 @@ def main() -> None:
     )
     parser.add_argument("--port", type=int, default=8107)
     parser.add_argument("--mode", choices=("share", "preempt"), default="share")
+    parser.add_argument("--gpu-layers", type=int, default=0)
     args = parser.parse_args()
 
     raw = ROOT / "results/raw"
@@ -59,7 +60,7 @@ def main() -> None:
         str(args.server.resolve()),
         "-m", str(args.model.resolve()),
         "--host", "127.0.0.1", "--port", str(args.port),
-        "-c", "2048", "-np", "2", "-t", "8", "-ngl", "0",
+        "-c", "2048", "-np", "2", "-t", "8", "-ngl", str(args.gpu_layers),
         "--metrics", "--slots", "--kv-unified",
         "--kv-block-runtime", "--kv-block-size", "16",
         "--no-warmup",

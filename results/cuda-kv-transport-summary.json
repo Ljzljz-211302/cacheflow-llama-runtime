@@ -1,0 +1,61 @@
+{
+  "device": "NVIDIA GeForce RTX 4050 Laptop GPU",
+  "layout": {
+    "layers": 32,
+    "kv_heads": 8,
+    "head_dim": 128,
+    "block_tokens": 16,
+    "dtype": "fp16"
+  },
+  "trials_per_case": 5,
+  "cases": [
+    {
+      "method": "batched_gather_scatter",
+      "blocks": 1,
+      "median_gpu_ms": 0.03584,
+      "median_end_to_end_ms": 0.0446
+    },
+    {
+      "method": "per_block_memcpy",
+      "blocks": 1,
+      "median_gpu_ms": 0.029568,
+      "median_end_to_end_ms": 0.0357
+    },
+    {
+      "method": "batched_gather_scatter",
+      "blocks": 4,
+      "median_gpu_ms": 0.08688,
+      "median_end_to_end_ms": 0.096
+    },
+    {
+      "method": "per_block_memcpy",
+      "blocks": 4,
+      "median_gpu_ms": 0.068608,
+      "median_end_to_end_ms": 0.0756
+    },
+    {
+      "method": "batched_gather_scatter",
+      "blocks": 16,
+      "median_gpu_ms": 0.888832,
+      "median_end_to_end_ms": 0.902
+    },
+    {
+      "method": "per_block_memcpy",
+      "blocks": 16,
+      "median_gpu_ms": 0.484352,
+      "median_end_to_end_ms": 0.4943
+    },
+    {
+      "method": "batched_gather_scatter",
+      "blocks": 32,
+      "median_gpu_ms": 1.766304,
+      "median_end_to_end_ms": 1.7818
+    },
+    {
+      "method": "per_block_memcpy",
+      "blocks": 32,
+      "median_gpu_ms": 0.948,
+      "median_end_to_end_ms": 0.9592
+    }
+  ]
+}

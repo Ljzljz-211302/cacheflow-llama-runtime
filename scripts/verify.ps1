@@ -37,12 +37,36 @@ try {
     if ($Full) {
         powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_patched_server.ps1
         if ($LASTEXITCODE -ne 0) { throw "patched server build failed" }
+        powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_upstream_baseline.ps1
+        if ($LASTEXITCODE -ne 0) { throw "same-toolchain upstream baseline build failed" }
         powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_cuda_kv.ps1
         if ($LASTEXITCODE -ne 0) { throw "CUDA KV backend build failed" }
         python scripts\run_kv_block_smoke.py --mode share
         if ($LASTEXITCODE -ne 0) { throw "resident prefix sharing smoke failed" }
         python scripts\run_kv_block_smoke.py --mode preempt --port 8108
         if ($LASTEXITCODE -ne 0) { throw "preempt/restore smoke failed" }
+        python scripts\run_cuda_tensor_adapter_smoke.py
+        if ($LASTEXITCODE -ne 0) { throw "real CUDA tensor adapter smoke failed" }
+        python scripts\run_cuda_swap_server_smoke.py
+        if ($LASTEXITCODE -ne 0) { throw "real CUDA server swap smoke failed" }
+        python scripts\run_runtime_fault_injection.py
+        if ($LASTEXITCODE -ne 0) { throw "runtime fault injection failed" }
+        python scripts\run_openai_compat_smoke.py
+        if ($LASTEXITCODE -ne 0) { throw "OpenAI stream/non-stream compatibility failed" }
+        python scripts\run_serving_control_smoke.py
+        if ($LASTEXITCODE -ne 0) { throw "cancel/deadline/backpressure smoke failed" }
+        python scripts\run_upstream_compat.py
+        if ($LASTEXITCODE -ne 0) { throw "same-toolchain upstream compatibility failed" }
+        python scripts\run_model_acceptance_matrix.py
+        if ($LASTEXITCODE -ne 0) { throw "real model/backend/concurrency/context matrix failed" }
+        python scripts\run_cuda_kv_benchmark.py
+        if ($LASTEXITCODE -ne 0) { throw "CUDA KV transport benchmark failed" }
+        python scripts\run_cuda_cow_benchmark.py
+        if ($LASTEXITCODE -ne 0) { throw "CUDA COW P95 benchmark failed" }
+        python scripts\run_adaptive_prefill_ab.py
+        if ($LASTEXITCODE -ne 0) { throw "adaptive prefill CPU/CUDA A/B failed" }
+        python scripts\run_adaptive_speculation_ab.py
+        if ($LASTEXITCODE -ne 0) { throw "adaptive speculation CPU/CUDA A/B failed" }
         python scripts\run_engine_ab.py
         if ($LASTEXITCODE -ne 0) { throw "engine scheduler A/B failed" }
         python scripts\run_prefill_ab.py
