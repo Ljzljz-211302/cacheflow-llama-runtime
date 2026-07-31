@@ -270,10 +270,10 @@ index 0b284cb..1189199 100644
      // batched-bench params
      bool is_pp_shared   = false;
 diff --git a/include/llama.h b/include/llama.h
-index 27e4806..3a609a5 100644
+index 27e4806..49eae1f 100644
 --- a/include/llama.h
 +++ b/include/llama.h
-@@ -730,6 +730,33 @@ extern "C" {
+@@ -730,6 +730,35 @@ extern "C" {
                   llama_pos p0,
                   llama_pos p1);
  
@@ -284,6 +284,7 @@ index 27e4806..3a609a5 100644
 +    LLAMA_API bool llama_memory_seq_swap_out_cuda(llama_memory_t mem, llama_seq_id seq_id);
 +    LLAMA_API bool llama_memory_seq_swap_in_cuda(llama_memory_t mem, llama_seq_id seq_id);
 +    LLAMA_API void llama_memory_seq_swap_erase_cuda(llama_memory_t mem, llama_seq_id seq_id);
++    LLAMA_API bool llama_memory_cacheflow_set_block_size(llama_memory_t mem, uint32_t block_tokens);
 +
 +    struct llama_cacheflow_cuda_stats {
 +        uint64_t kernel_launches;
@@ -297,6 +298,7 @@ index 27e4806..3a609a5 100644
 +        uint64_t pinned_bytes_current;
 +        uint64_t pinned_bytes_peak;
 +        uint64_t backend_errors;
++        uint64_t copy_on_write;
 +    };
 +
 +    // Returns false for memory implementations without the CacheFlow CUDA
@@ -326,10 +328,10 @@ index d15ccfd..eb17aab 100644
      set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
      target_compile_definitions(llama PRIVATE LLAMA_BUILD)
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 168dbab..0b9de81 100644
+index 168dbab..24b25ec 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -3849,6 +3849,27 @@ void llama_memory_seq_cp(
+@@ -3849,6 +3849,31 @@ void llama_memory_seq_cp(
      mem->seq_cp(seq_id_src, seq_id_dst, p0, p1);
  }
  
@@ -349,6 +351,10 @@ index 168dbab..0b9de81 100644
 +    if (mem) mem->seq_swap_erase_cuda(seq_id);
 +}
 +
++bool llama_memory_cacheflow_set_block_size(llama_memory_t mem, uint32_t block_tokens) {
++    return mem && mem->cacheflow_set_block_size(block_tokens);
++}
++
 +bool llama_memory_cacheflow_cuda_stats(
 +        llama_memory_t mem, llama_cacheflow_cuda_stats * stats) {
 +    return mem && stats && mem->cacheflow_cuda_stats(*stats);
@@ -359,10 +365,10 @@ index 168dbab..0b9de81 100644
            llama_seq_id seq_id) {
 diff --git a/src/llama-kv-cache-paged.cu b/src/llama-kv-cache-paged.cu
 new file mode 100644
-index 0000000..81ea6db
+index 0000000..20111ef
 --- /dev/null
 +++ b/src/llama-kv-cache-paged.cu
-@@ -0,0 +1,361 @@
+@@ -0,0 +1,396 @@
 +#include "llama-kv-cache.h"
 +
 +#include "ggml.h"
@@ -382,6 +388,7 @@ index 0000000..81ea6db
 +struct cacheflow_tensor_copy {
 +    const uint16_t * source;
 +    uint16_t * destination;
++    size_t staging_offset;
 +    size_t elements;
 +};
 +
@@ -422,15 +429,28 @@ index 0000000..81ea6db
 +    return result;
 +}
 +
-+__global__ void cacheflow_copy_real_kv_tensors(
++__global__ void cacheflow_gather_real_kv_tensors(
 +        const cacheflow_tensor_copy * copies,
++        uint16_t * staging,
 +        size_t copy_count,
 +        size_t max_elements) {
 +    const size_t element = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
 +    const size_t copy_index = blockIdx.y;
 +    if (copy_index >= copy_count || element >= max_elements) return;
 +    const auto copy = copies[copy_index];
-+    if (element < copy.elements) copy.destination[element] = copy.source[element];
++    if (element < copy.elements) staging[copy.staging_offset + element] = copy.source[element];
++}
++
++__global__ void cacheflow_scatter_real_kv_tensors(
++        const cacheflow_tensor_copy * copies,
++        const uint16_t * staging,
++        size_t copy_count,
++        size_t max_elements) {
++    const size_t element = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
++    const size_t copy_index = blockIdx.y;
++    if (copy_index >= copy_count || element >= max_elements) return;
++    const auto copy = copies[copy_index];
++    if (element < copy.elements) copy.destination[element] = staging[copy.staging_offset + element];
 +}
 +
 +bool cuda_ok(cudaError_t status, const char * operation, llama_cacheflow_cuda_stats * stats = nullptr) {
@@ -618,13 +638,19 @@ index 0000000..81ea6db
 +    if (info.empty()) return true;
 +    std::vector<cacheflow_tensor_copy> copies;
 +    size_t max_elements = 0;
++    size_t total_elements = 0;
 +    int device = -1;
++    size_t partial_tail_clones = 0;
 +    for (size_t mapping = 0; mapping < info.ssrc.size(); ++mapping) {
 +        const uint32_t source_stream = info.ssrc[mapping];
 +        const uint32_t destination_stream = info.sdst[mapping];
 +        if (source_stream >= n_stream || destination_stream >= n_stream ||
 +                source_stream == destination_stream) {
 +            return false;
++        }
++        if (cacheflow_block_tokens_ > 0 &&
++                info.copied_tokens[mapping] % cacheflow_block_tokens_ != 0) {
++            partial_tail_clones++;
 +        }
 +        const auto ranges = occupied_ranges(v_cells[destination_stream]);
 +        if (ranges.empty()) return false;
@@ -668,8 +694,10 @@ index 0000000..81ea6db
 +                                static_cast<const uint8_t *>(source->data) + byte_offset),
 +                        reinterpret_cast<uint16_t *>(
 +                                static_cast<uint8_t *>(destination->data) + byte_offset),
++                        total_elements,
 +                        elements,
 +                    });
++                    total_elements += elements;
 +                    max_elements = std::max(max_elements, elements);
 +                }
 +            }
@@ -680,6 +708,7 @@ index 0000000..81ea6db
 +
 +    cudaStream_t stream = nullptr;
 +    cacheflow_tensor_copy * device_copies = nullptr;
++    uint16_t * device_staging = nullptr;
 +    cudaEvent_t complete = nullptr;
 +    bool success = false;
 +    cudaEvent_t started = nullptr;
@@ -688,6 +717,8 @@ index 0000000..81ea6db
 +            !cuda_ok(cudaEventRecord(started, stream), "copy start event record", &cuda_stats_)) goto cleanup;
 +    if (!cuda_ok(cudaMallocAsync((void **) &device_copies,
 +            copies.size() * sizeof(cacheflow_tensor_copy), stream), "descriptor allocation", &cuda_stats_)) goto cleanup;
++    if (!cuda_ok(cudaMallocAsync((void **) &device_staging,
++            total_elements * sizeof(uint16_t), stream), "staging allocation", &cuda_stats_)) goto cleanup;
 +    if (!cuda_ok(cudaMemcpyAsync(device_copies, copies.data(),
 +            copies.size() * sizeof(cacheflow_tensor_copy), cudaMemcpyHostToDevice, stream),
 +            "descriptor upload", &cuda_stats_)) goto cleanup;
@@ -695,15 +726,20 @@ index 0000000..81ea6db
 +        constexpr int threads = 256;
 +        const dim3 grid((unsigned) ((max_elements + threads - 1) / threads),
 +                (unsigned) copies.size());
-+        cacheflow_copy_real_kv_tensors<<<grid, threads, 0, stream>>>(
-+                device_copies, copies.size(), max_elements);
++        cacheflow_gather_real_kv_tensors<<<grid, threads, 0, stream>>>(
++                device_copies, device_staging, copies.size(), max_elements);
++        cacheflow_scatter_real_kv_tensors<<<grid, threads, 0, stream>>>(
++                device_copies, device_staging, copies.size(), max_elements);
 +    }
 +    if (!cuda_ok(cudaGetLastError(), "real KV tensor kernel launch", &cuda_stats_)) goto cleanup;
-+    cuda_stats_.kernel_launches++;
++    cuda_stats_.kernel_launches += 2;
++    cuda_stats_.copy_on_write += partial_tail_clones;
 +    cuda_stats_.blocks_copied += copies.size();
 +    for (const auto & copy : copies) cuda_stats_.copy_bytes += copy.elements * sizeof(uint16_t);
 +    if (!cuda_ok(cudaFreeAsync(device_copies, stream), "descriptor release", &cuda_stats_)) goto cleanup;
 +    device_copies = nullptr;
++    if (!cuda_ok(cudaFreeAsync(device_staging, stream), "staging release", &cuda_stats_)) goto cleanup;
++    device_staging = nullptr;
 +    if (!cuda_ok(cudaEventCreate(&complete), "event create", &cuda_stats_)) goto cleanup;
 +    if (!cuda_ok(cudaEventRecord(complete, stream), "event record", &cuda_stats_)) goto cleanup;
 +    if (!cuda_ok(cudaEventSynchronize(complete), "event wait", &cuda_stats_)) goto cleanup;
@@ -716,19 +752,24 @@ index 0000000..81ea6db
 +        }
 +    }
 +    success = true;
++    if (partial_tail_clones > 0) {
++        LLAMA_LOG_INFO("CacheFlow CUDA eagerly cloned %zu partial shared KV tails before append\n",
++                partial_tail_clones);
++    }
 +
 +cleanup:
 +    if (device_copies) cudaFree(device_copies);
++    if (device_staging) cudaFree(device_staging);
 +    if (complete) cudaEventDestroy(complete);
 +    if (started) cudaEventDestroy(started);
 +    if (stream) cudaStreamDestroy(stream);
 +    return success;
 +}
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 2802103..383c75f 100644
+index 2802103..c74d73f 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
-@@ -376,6 +376,57 @@ llama_kv_cache::llama_kv_cache(
+@@ -376,6 +376,63 @@ llama_kv_cache::llama_kv_cache(
      debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
  }
  
@@ -783,10 +824,16 @@ index 2802103..383c75f 100644
 +#endif
 +}
 +
++bool llama_kv_cache::cacheflow_set_block_size(uint32_t block_tokens) {
++    if (block_tokens == 0) return false;
++    cacheflow_block_tokens_ = block_tokens;
++    return true;
++}
++
  void llama_kv_cache::clear(bool data) {
      for (uint32_t s = 0; s < n_stream; ++s) {
          v_cells[s].reset();
-@@ -502,17 +553,15 @@ void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, ll
+@@ -502,25 +559,25 @@ void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, ll
  
      // cross-stream sequence copies require to copy the actual buffer data
  
@@ -811,16 +858,26 @@ index 2802103..383c75f 100644
  
      // enqueue the copy operation - the buffer copy will be performed during the next update
      sc_info.ssrc.push_back(s0);
-@@ -520,7 +569,7 @@ void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, ll
+     sc_info.sdst.push_back(s1);
++    uint32_t copied_tokens = 0;
  
      v_cells[s1].reset();
      for (uint32_t i = 0; i < v_cells[s0].size(); ++i) {
 -        if (v_cells[s0].seq_has(i, seq_id_src)) {
 +        if (v_cells[s0].seq_has(i, seq_id_src) && v_cells[s0].pos_in(i, p0, p1)) {
++            copied_tokens++;
              llama_pos pos   = v_cells[s0].pos_get(i);
              llama_pos shift = v_cells[s0].get_shift(i);
  
-@@ -840,6 +889,18 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
+@@ -541,6 +598,7 @@ void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, ll
+             v_cells[s1].ext_set(i, ext);
+         }
+     }
++    sc_info.copied_tokens.push_back(copied_tokens);
+ 
+     v_heads[s1] = v_heads[s0];
+ 
+@@ -840,6 +898,18 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
  
          const size_t n_copy = sc_info.ssrc.size();
  
@@ -839,19 +896,35 @@ index 2802103..383c75f 100644
          for (size_t i = 0; i < n_copy; ++i) {
              const auto ssrc = sc_info.ssrc[i];
              const auto sdst = sc_info.sdst[i];
-@@ -861,6 +922,7 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
+@@ -861,8 +931,8 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
                  }
              }
          }
 +        }
      }
- 
+-
      if (do_shift) {
+         if (!get_can_shift()) {
+             GGML_ABORT("The current KV cache / model configuration does not support K-shift");
 diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
-index 3d68f98..c9df6d1 100644
+index 3d68f98..757fa0b 100644
 --- a/src/llama-kv-cache.h
 +++ b/src/llama-kv-cache.h
-@@ -114,7 +114,7 @@ public:
+@@ -22,11 +22,13 @@ public:
+     struct stream_copy_info {
+         bool empty() const {
+             assert(ssrc.size() == sdst.size());
++            assert(ssrc.size() == copied_tokens.size());
+             return ssrc.empty();
+         }
+ 
+         std::vector<uint32_t> ssrc;
+         std::vector<uint32_t> sdst;
++        std::vector<uint32_t> copied_tokens;
+     };
+ 
+     // for each ubatch, create a slot_info that contains information about where the ubatch should be inserted in the
+@@ -114,7 +116,7 @@ public:
          const  layer_reuse_cb & reuse,
          const  layer_share_cb & share);
  
@@ -860,7 +933,7 @@ index 3d68f98..c9df6d1 100644
  
      //
      // llama_memory_i
-@@ -142,6 +142,12 @@ public:
+@@ -142,6 +144,13 @@ public:
      llama_pos seq_pos_min(llama_seq_id seq_id) const override;
      llama_pos seq_pos_max(llama_seq_id seq_id) const override;
  
@@ -869,11 +942,12 @@ index 3d68f98..c9df6d1 100644
 +    bool seq_swap_in_cuda(llama_seq_id seq_id) override;
 +    void seq_swap_erase_cuda(llama_seq_id seq_id) override;
 +    bool cacheflow_cuda_stats(llama_cacheflow_cuda_stats & stats) const override;
++    bool cacheflow_set_block_size(uint32_t block_tokens) override;
 +
      std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const override;
  
      // state write/load
-@@ -185,6 +191,17 @@ public:
+@@ -185,6 +194,17 @@ public:
  
      bool update(llama_context * lctx, bool do_shift, const stream_copy_info & sc_info);
  
@@ -891,20 +965,21 @@ index 3d68f98..c9df6d1 100644
      // find a slot of kv cells that can hold the ubatch
      // if cont == true, then the slot must be continuous
      // return empty slot_info on failure
-@@ -215,6 +232,8 @@ public:
+@@ -215,6 +235,9 @@ public:
      void set_input_v_rot(ggml_tensor * dst) const;
  
  private:
 +    void * paged_cuda_swap_store_ = nullptr;
 +    mutable llama_cacheflow_cuda_stats cuda_stats_{};
++    uint32_t cacheflow_block_tokens_ = 16;
      const llama_model & model;
      const llama_hparams & hparams;
  
 diff --git a/src/llama-memory.h b/src/llama-memory.h
-index db82539..1187875 100644
+index db82539..e749164 100644
 --- a/src/llama-memory.h
 +++ b/src/llama-memory.h
-@@ -116,6 +116,14 @@ struct llama_memory_i {
+@@ -116,6 +116,15 @@ struct llama_memory_i {
      virtual llama_pos seq_pos_min(llama_seq_id seq_id) const = 0;
      virtual llama_pos seq_pos_max(llama_seq_id seq_id) const = 0;
  
@@ -915,6 +990,7 @@ index db82539..1187875 100644
 +    virtual bool seq_swap_in_cuda(llama_seq_id) { return false; }
 +    virtual void seq_swap_erase_cuda(llama_seq_id) {}
 +    virtual bool cacheflow_cuda_stats(llama_cacheflow_cuda_stats &) const { return false; }
++    virtual bool cacheflow_set_block_size(uint32_t) { return false; }
 +
      virtual std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const = 0;
  
@@ -1739,10 +1815,10 @@ index 0000000..914774f
 +}
 diff --git a/tests/test-kv-block-manager.cpp b/tests/test-kv-block-manager.cpp
 new file mode 100644
-index 0000000..9aa3710
+index 0000000..076f747
 --- /dev/null
 +++ b/tests/test-kv-block-manager.cpp
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,168 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -1761,18 +1837,18 @@ index 0000000..9aa3710
 +    return result;
 +}
 +
-+static void test_prefix_blocks_are_shared_but_partial_tail_is_private() {
++static void test_prefix_blocks_and_partial_tail_are_shared() {
 +    server_kv_block_manager manager(4, 16);
 +    const auto first = manager.attach(1, tokens(0, 10), 0, 10);
 +    const auto second = manager.attach(2, tokens(0, 10), 0, 20);
 +    assert(first.admitted && second.admitted);
 +    assert(first.allocated_blocks == 3);
-+    assert(second.shared_blocks == 2);
-+    assert(second.allocated_blocks == 1);
-+    assert(second.matched_tokens == 8);
++    assert(second.shared_blocks == 3);
++    assert(second.allocated_blocks == 0);
++    assert(second.matched_tokens == 10);
 +    const auto snapshot = manager.snapshot();
-+    assert(snapshot.allocated_blocks == 4);
-+    assert(snapshot.shared_blocks == 2);
++    assert(snapshot.allocated_blocks == 3);
++    assert(snapshot.shared_blocks == 3);
 +    assert(manager.validate().empty());
 +}
 +
@@ -1786,6 +1862,18 @@ index 0000000..9aa3710
 +    assert(writable.writable && writable.copied);
 +    const auto after = manager.snapshot();
 +    assert(after.allocated_blocks == 3);
++    assert(after.copy_on_write_total == 1);
++    assert(after.sequences[0].blocks.back() != after.sequences[1].blocks.back());
++    assert(manager.validate().empty());
++}
++
++static void test_append_automatically_cows_shared_partial_tail() {
++    server_kv_block_manager manager(4, 8);
++    assert(manager.attach(1, tokens(0, 6), 0, 10).admitted);
++    assert(manager.attach(2, tokens(0, 6), 0, 20).admitted);
++    std::string error;
++    assert(manager.append(2, tokens(6, 1), 30, &error));
++    const auto after = manager.snapshot();
 +    assert(after.copy_on_write_total == 1);
 +    assert(after.sequences[0].blocks.back() != after.sequences[1].blocks.back());
 +    assert(manager.validate().empty());
@@ -1889,8 +1977,9 @@ index 0000000..9aa3710
 +}
 +
 +int main() {
-+    test_prefix_blocks_are_shared_but_partial_tail_is_private();
++    test_prefix_blocks_and_partial_tail_are_shared();
 +    test_copy_on_write_clones_shared_tail();
++    test_append_automatically_cows_shared_partial_tail();
 +    test_reservation_enforces_admission_and_is_consumed_by_append();
 +    test_release_preserves_shared_prefix_until_last_owner();
 +    test_failed_attach_is_atomic();
@@ -2049,10 +2138,10 @@ index 0000000..b448bf4
 +}
 diff --git a/tests/test-kv-runtime.cpp b/tests/test-kv-runtime.cpp
 new file mode 100644
-index 0000000..41b5719
+index 0000000..46a6ddb
 --- /dev/null
 +++ b/tests/test-kv-runtime.cpp
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,100 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -2071,17 +2160,17 @@ index 0000000..41b5719
 +    return result;
 +}
 +
-+static void test_prefix_plan_uses_only_full_resident_blocks() {
++static void test_prefix_plan_includes_shared_partial_tail() {
 +    server_kv_runtime runtime(4, 16);
 +    assert(runtime.synchronize(1, tokens(0, 10), 0, 10));
 +    auto plan = runtime.plan_prefix_share(2, tokens(0, 9));
-+    assert(plan.donor == 1 && plan.matched_tokens == 8 && plan.matched_blocks == 2);
++    assert(plan.donor == 1 && plan.matched_tokens == 9 && plan.matched_blocks == 3);
 +    assert(runtime.preempt(1, 20));
 +    assert(runtime.is_swapped(1));
 +    assert(!runtime.plan_prefix_share(2, tokens(0, 9)).found());
 +    assert(runtime.restore(1, 30));
 +    assert(!runtime.is_swapped(1));
-+    assert(runtime.plan_prefix_share(2, tokens(0, 9)).matched_tokens == 8);
++    assert(runtime.plan_prefix_share(2, tokens(0, 9)).matched_tokens == 9);
 +    assert(runtime.validate().empty());
 +}
 +
@@ -2096,6 +2185,18 @@ index 0000000..41b5719
 +    assert(after.sequences[0].committed_tokens == before.sequences[0].committed_tokens);
 +    assert(after.blocks.allocated_blocks == before.blocks.allocated_blocks);
 +    assert(after.blocks.reserved_blocks == before.blocks.reserved_blocks);
++    assert(runtime.validate().empty());
++}
++
++static void test_incremental_growth_cows_shared_physical_tail() {
++    server_kv_runtime runtime(4, 16);
++    assert(runtime.synchronize(1, tokens(0, 6), 0, 1));
++    assert(runtime.synchronize(2, tokens(0, 6), 0, 2));
++    assert(runtime.snapshot().blocks.shared_blocks == 2);
++    assert(runtime.synchronize(2, tokens(0, 7), 0, 3));
++    const auto after = runtime.snapshot();
++    assert(after.blocks.copy_on_write_total == 1);
++    assert(after.blocks.sequences[0].blocks.back() != after.blocks.sequences[1].blocks.back());
 +    assert(runtime.validate().empty());
 +}
 +
@@ -2134,8 +2235,9 @@ index 0000000..41b5719
 +}
 +
 +int main() {
-+    test_prefix_plan_uses_only_full_resident_blocks();
++    test_prefix_plan_includes_shared_partial_tail();
 +    test_failed_growth_preserves_old_table_atomically();
++    test_incremental_growth_cows_shared_physical_tail();
 +    test_eligible_donor_filter_and_release();
 +    test_randomized_residency_transitions_preserve_invariants();
 +    return 0;
@@ -2422,7 +2524,7 @@ index 7d42743..a18ab1b 100644
  
  set(TARGET llama-server-impl)
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..4f8fc04 100644
+index 986b2f1..f5d6e33 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -4,6 +4,14 @@
@@ -2583,7 +2685,7 @@ index 986b2f1..4f8fc04 100644
  
      std::string model_name; // name of the loaded model, to be used by API
      std::set<std::string> model_aliases; // additional names for the model
-@@ -1114,8 +1210,58 @@ private:
+@@ -1114,8 +1210,59 @@ private:
  
          n_swa = params_base.swa_full ? 0 : llama_model_n_swa(model_tgt);
  
@@ -2617,6 +2719,7 @@ index 986b2f1..4f8fc04 100644
 +            const size_t block_size = (size_t) params_base.kv_block_size;
 +            const size_t capacity_blocks = ((size_t) n_ctx + block_size - 1) / block_size;
 +            inference_engine.set_kv_runtime(std::make_unique<server_kv_runtime>(block_size, capacity_blocks));
++            llama_memory_cacheflow_set_block_size(llama_get_memory(ctx_tgt), (uint32_t) block_size);
 +            SRV_INF("block KV runtime enabled: block_size = %zu, capacity_blocks = %zu\n",
 +                    block_size, capacity_blocks);
 +        } else {
@@ -2644,7 +2747,7 @@ index 986b2f1..4f8fc04 100644
  
          // setup slots
          SRV_INF("initializing slots, n_slots = %d\n", params_base.n_parallel);
-@@ -1383,9 +1529,10 @@ private:
+@@ -1383,9 +1530,10 @@ private:
  
          bool update_cache = false;
  
@@ -2658,7 +2761,7 @@ index 986b2f1..4f8fc04 100644
  
              for (server_slot & slot : slots) {
                  // skip the slot if it is not available
-@@ -1393,29 +1540,41 @@ private:
+@@ -1393,29 +1541,41 @@ private:
                      continue;
                  }
  
@@ -2720,7 +2823,7 @@ index 986b2f1..4f8fc04 100644
  
                  // if we are about to lose a large portion of the existing context - save it in the prompt cache
                  if (f_keep < 0.5f) {
-@@ -1443,12 +1602,16 @@ private:
+@@ -1443,12 +1603,16 @@ private:
  
              if (ret != nullptr) {
                  SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
@@ -2737,7 +2840,7 @@ index 986b2f1..4f8fc04 100644
              update_cache = update_cache && prompt_cache;
  
              // cache prompts only for completion tasks
-@@ -1469,41 +1632,114 @@ private:
+@@ -1469,41 +1633,114 @@ private:
  
                  SRV_INF("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
              }
@@ -2873,7 +2976,7 @@ index 986b2f1..4f8fc04 100644
      }
  
      std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
-@@ -1519,7 +1755,234 @@ private:
+@@ -1519,7 +1756,234 @@ private:
          return output;
      }
  
@@ -3108,7 +3211,7 @@ index 986b2f1..4f8fc04 100644
          // process per-request lora adapters
          if (!task.params.lora.empty()) {
              auto task_loras = construct_lora_list(task.params.lora);
-@@ -1590,6 +2053,8 @@ private:
+@@ -1590,6 +2054,8 @@ private:
              return false;
          }
  
@@ -3117,7 +3220,7 @@ index 986b2f1..4f8fc04 100644
          SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
  
          // initialize samplers
-@@ -1966,6 +2431,7 @@ private:
+@@ -1966,6 +2432,7 @@ private:
  
          res->generation_params = slot.task->params; // copy the parameters
  
@@ -3125,7 +3228,7 @@ index 986b2f1..4f8fc04 100644
          queue_results.send(std::move(res));
      }
  
-@@ -2214,12 +2680,14 @@ private:
+@@ -2214,12 +2681,14 @@ private:
                              if (!slot.is_processing()) {
                                  SLT_INF(slot, "%s", "saving idle slot to prompt cache\n");
  
@@ -3142,7 +3245,7 @@ index 986b2f1..4f8fc04 100644
                                      // [TAG_IDLE_SLOT_CLEAR]
                                      slot.prompt_clear(false);
                                  }
-@@ -2301,6 +2769,7 @@ private:
+@@ -2301,6 +2770,7 @@ private:
                      res->t_start             = metrics.t_start;
  
                      res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
@@ -3150,7 +3253,7 @@ index 986b2f1..4f8fc04 100644
                      res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
                      res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
                      res->t_tokens_generation_total       = metrics.t_tokens_generation_total;
-@@ -2308,12 +2777,95 @@ private:
+@@ -2308,12 +2778,95 @@ private:
                      res->n_tokens_max = metrics.n_tokens_max;
  
                      res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
@@ -3246,7 +3349,7 @@ index 986b2f1..4f8fc04 100644
  
                      if (task.metrics_reset_bucket) {
                          metrics.reset_bucket();
-@@ -2479,7 +3031,7 @@ private:
+@@ -2479,7 +3032,7 @@ private:
          }
      }
  
@@ -3255,7 +3358,7 @@ index 986b2f1..4f8fc04 100644
          // check if all slots are idle
          {
              bool all_idle = true;
-@@ -2494,7 +3046,7 @@ private:
+@@ -2494,7 +3047,7 @@ private:
              if (all_idle) {
                  SRV_INF("%s", "all slots are idle\n");
  
@@ -3264,7 +3367,7 @@ index 986b2f1..4f8fc04 100644
              }
          }
  
-@@ -2572,6 +3124,10 @@ private:
+@@ -2572,6 +3125,10 @@ private:
              }
          }
  
@@ -3275,7 +3378,7 @@ index 986b2f1..4f8fc04 100644
          // start populating the batch for this iteration
          common_batch_clear(batch);
  
-@@ -2602,7 +3158,9 @@ private:
+@@ -2602,7 +3159,9 @@ private:
                  const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                  const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
  
@@ -3286,7 +3389,7 @@ index 986b2f1..4f8fc04 100644
  
                  if (n_draft_max > 0) {
                      GGML_ASSERT(slot.can_speculate());
-@@ -2643,7 +3201,12 @@ private:
+@@ -2643,7 +3202,12 @@ private:
  
          // generate the actual drafts (if any)
          {
@@ -3299,7 +3402,7 @@ index 986b2f1..4f8fc04 100644
          }
  
          // make checkpoints if needed
-@@ -2705,6 +3268,54 @@ private:
+@@ -2705,6 +3269,54 @@ private:
          int32_t n_batch  = llama_n_batch(ctx_tgt);
          int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
  
@@ -3354,7 +3457,7 @@ index 986b2f1..4f8fc04 100644
          float  alora_scale       = -1.0f;
          size_t alora_disabled_id = 0;
  
-@@ -2730,6 +3341,13 @@ private:
+@@ -2730,6 +3342,13 @@ private:
                  if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
                      const auto & input_tokens = slot.task->tokens;
  
@@ -3368,7 +3471,7 @@ index 986b2f1..4f8fc04 100644
                      // used to determine the number of tokens added to the batch for the current slot
                      const auto n_tokens_prev = batch.n_tokens;
  
-@@ -3110,7 +3728,9 @@ private:
+@@ -3110,7 +3729,9 @@ private:
                      const bool n_before_user_known = n_before_user > 0;
  
                      // add prompt tokens for processing in the current batch
@@ -3379,7 +3482,7 @@ index 986b2f1..4f8fc04 100644
                          // get next token to process
                          llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                          if (cur_tok == LLAMA_TOKEN_NULL) {
-@@ -3249,6 +3869,13 @@ private:
+@@ -3249,6 +3870,13 @@ private:
  
          SRV_DBG("decoding batch, n_tokens = %d\n", batch.n_tokens);
  
@@ -3393,7 +3496,7 @@ index 986b2f1..4f8fc04 100644
          auto accept_special_token = [&](server_slot & slot, llama_token token) {
              return params_base.special ||
                  slot.task->params.sampling.preserved_tokens.find(token) != slot.task->params.sampling.preserved_tokens.end();
-@@ -3294,7 +3921,8 @@ private:
+@@ -3294,7 +3922,8 @@ private:
                  batch.logits   + i,
              };
  
@@ -3403,7 +3506,7 @@ index 986b2f1..4f8fc04 100644
  
              metrics.on_decoded(slots);
  
-@@ -3320,6 +3948,7 @@ private:
+@@ -3320,6 +3949,7 @@ private:
                      // TODO: handle ret == 2 (abort) when we start aborting
  
                      if (!err.empty()) {
@@ -3411,7 +3514,7 @@ index 986b2f1..4f8fc04 100644
                          SRV_ERR("%s i = %d, n_batch = %d, ret = %d\n", err.c_str(), i, n_batch, ret);
  
                          for (auto & slot : slots) {
-@@ -3394,6 +4023,7 @@ private:
+@@ -3394,6 +4024,7 @@ private:
              //}
              if (!common_speculative_process(spec.get(), batch_view)) {
                  SRV_ERR("%s", "failed to process speculative batch\n");
@@ -3419,7 +3522,7 @@ index 986b2f1..4f8fc04 100644
  
                  // TODO: handle error
                  break;
-@@ -3593,6 +4223,13 @@ private:
+@@ -3593,6 +4224,13 @@ private:
  
                  // update how many tokens out of those tested were accepted
                  slot.n_draft_accepted += ids.size() - 1;
@@ -3433,7 +3536,7 @@ index 986b2f1..4f8fc04 100644
  
                  // add accepted tokens to the prompt
                  slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - n_draft);
-@@ -3631,11 +4268,38 @@ private:
+@@ -3631,11 +4269,38 @@ private:
  
                  SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) ids.size() - 1, (int) n_draft, slot.prompt.n_tokens());
              }
@@ -3472,7 +3575,7 @@ index 986b2f1..4f8fc04 100644
      int get_slot_n_ctx() {
          return slots.back().n_ctx;
      }
-@@ -4127,6 +4791,147 @@ void server_routes::init_routes() {
+@@ -4127,6 +4792,151 @@ void server_routes::init_routes() {
                      {"name",  "prompt_tokens_total"},
                      {"help",  "Number of prompt tokens processed."},
                      {"value",  (uint64_t) res_task->n_prompt_tokens_processed_total}
@@ -3594,6 +3697,10 @@ index 986b2f1..4f8fc04 100644
 +                    {"help",  "Real KV tensor ranges copied by CacheFlow CUDA kernels."},
 +                    {"value",  res_task->cuda_kv.blocks_copied}
 +            }, {
++                    {"name",  "cuda_kv_copy_on_write_total"},
++                    {"help",  "Partial shared KV tails eagerly cloned by the production CUDA adapter."},
++                    {"value",  res_task->cuda_kv.copy_on_write}
++            }, {
 +                    {"name",  "cuda_kv_copy_bytes_total"},
 +                    {"help",  "Real KV bytes transported by CUDA copy and swap operations."},
 +                    {"value",  res_task->cuda_kv.copy_bytes}
@@ -3620,7 +3727,7 @@ index 986b2f1..4f8fc04 100644
              }, {
                      {"name",  "prompt_seconds_total"},
                      {"help",  "Prompt process time"},
-@@ -4149,6 +4954,18 @@ void server_routes::init_routes() {
+@@ -4149,6 +4959,18 @@ void server_routes::init_routes() {
                      {"value",  res_task->n_tokens_max}
              }}},
              {"gauge", {{
@@ -3639,7 +3746,7 @@ index 986b2f1..4f8fc04 100644
                      {"name",  "prompt_tokens_seconds"},
                      {"help",  "Average prompt throughput in tokens/s."},
                      {"value",  res_task->n_prompt_tokens_processed ? 1.e3 / res_task->t_prompt_processing * res_task->n_prompt_tokens_processed : 0.}
-@@ -4156,6 +4973,115 @@ void server_routes::init_routes() {
+@@ -4156,6 +4978,115 @@ void server_routes::init_routes() {
                      {"name",  "predicted_tokens_seconds"},
                      {"help",  "Average generation throughput in tokens/s."},
                      {"value",  res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}
@@ -3755,7 +3862,7 @@ index 986b2f1..4f8fc04 100644
              },{
                      {"name",  "requests_processing"},
                      {"help",  "Number of requests processing."},
-@@ -4188,6 +5114,38 @@ void server_routes::init_routes() {
+@@ -4188,6 +5119,38 @@ void server_routes::init_routes() {
              }
          }
  
@@ -5262,10 +5369,10 @@ index 0000000..c6d6ce0
 +}
 diff --git a/tools/server/server-kv-block-manager.cpp b/tools/server/server-kv-block-manager.cpp
 new file mode 100644
-index 0000000..3c79c16
+index 0000000..00aca39
 --- /dev/null
 +++ b/tools/server/server-kv-block-manager.cpp
-@@ -0,0 +1,386 @@
+@@ -0,0 +1,405 @@
 +#include "server-kv-block-manager.h"
 +
 +#include <algorithm>
@@ -5409,6 +5516,18 @@ index 0000000..3c79c16
 +        offset += block_size_;
 +    }
 +
++    // An exact partial tail is reusable too. It is indexed as an immutable
++    // prefix and cloned on the first append by either owner.
++    if (offset < prompt.size()) {
++        std::vector<server_kv_token> chunk(prompt.begin() + offset, prompt.end());
++        const server_kv_block_id found = find_prefix_block(parent, chunk);
++        if (found != 0) {
++            shared.push_back(found);
++            parent = found;
++            offset = prompt.size();
++        }
++    }
++
 +    const size_t new_blocks = prompt_blocks - shared.size();
 +    const size_t reserve_blocks = (reserve_tokens + block_size_ - 1) / block_size_;
 +    if (new_blocks + reserve_blocks > free_unreserved_blocks()) {
@@ -5430,8 +5549,7 @@ index 0000000..3c79c16
 +    while (offset < prompt.size()) {
 +        const size_t count = std::min(block_size_, prompt.size() - offset);
 +        std::vector<server_kv_token> chunk(prompt.begin() + offset, prompt.begin() + offset + count);
-+        const bool full = count == block_size_;
-+        const server_kv_block_id id = allocate_block(parent, std::move(chunk), full, now_us);
++        const server_kv_block_id id = allocate_block(parent, std::move(chunk), true, now_us);
 +        seq.blocks.push_back(id);
 +        parent = id;
 +        offset += count;
@@ -5443,7 +5561,8 @@ index 0000000..3c79c16
 +    result.shared_blocks = shared.size();
 +    result.allocated_blocks = new_blocks;
 +    result.reserved_blocks = reserve_blocks;
-+    result.matched_tokens = shared.size() * block_size_;
++    result.matched_tokens = 0;
++    for (server_kv_block_id id : shared) result.matched_tokens += blocks_.at(id).tokens.size();
 +    return result;
 +}
 +
@@ -5470,8 +5589,10 @@ index 0000000..3c79c16
 +    }
 +    const size_t after_tail = tokens.size() > tail_free ? tokens.size() - tail_free : 0;
 +    const size_t needed_blocks = (after_tail + block_size_ - 1) / block_size_;
-+    const size_t from_reserve = std::min(needed_blocks, seq.reserved_blocks);
-+    const size_t extra = needed_blocks - from_reserve;
++    const bool cow_needed = tail_free > 0 && blocks_.at(seq.blocks.back()).ref_count > 1;
++    const size_t total_allocations = needed_blocks + (cow_needed ? 1 : 0);
++    const size_t reserved_for_all = std::min(total_allocations, seq.reserved_blocks);
++    const size_t extra = total_allocations - reserved_for_all;
 +    if (extra > free_unreserved_blocks()) {
 +        if (error) *error = "insufficient KV block capacity";
 +        return false;
@@ -5479,18 +5600,26 @@ index 0000000..3c79c16
 +
 +    size_t offset = 0;
 +    if (tail_free > 0) {
++        const auto writable = make_tail_writable(sequence_id, now_us);
++        if (!writable.writable) {
++            if (error) *error = writable.reason;
++            return false;
++        }
 +        auto & tail = blocks_.at(seq.blocks.back());
++        const bool keep_canonical = tail.prefix_indexed;
++        unindex_block(tail.id);
 +        const size_t count = std::min(tail_free, tokens.size());
 +        tail.tokens.insert(tail.tokens.end(), tokens.begin(), tokens.begin() + count);
 +        tail.last_access_us = now_us;
 +        offset += count;
-+        if (tail.tokens.size() == block_size_ &&
++        if (keep_canonical &&
 +                (tail.parent == 0 || blocks_.at(tail.parent).prefix_indexed)) {
 +            tail.hash = chain_hash(tail.parent, tail.tokens);
 +            index_block(tail.id);
 +        }
 +    }
 +
++    const size_t from_reserve = std::min(needed_blocks, seq.reserved_blocks);
 +    server_kv_block_id parent = seq.blocks.empty() ? 0 : seq.blocks.back();
 +    while (offset < tokens.size()) {
 +        const size_t count = std::min(block_size_, tokens.size() - offset);
@@ -5638,9 +5767,6 @@ index 0000000..3c79c16
 +        }
 +        if (references[value.id] != value.ref_count) {
 +            return "block reference count mismatch";
-+        }
-+        if (value.prefix_indexed && value.tokens.size() != block_size_) {
-+            return "partial block present in prefix index";
 +        }
 +        if (value.prefix_indexed && value.parent != 0 &&
 +                !blocks_.at(value.parent).prefix_indexed) {
@@ -5891,10 +6017,10 @@ index 0000000..ad1db6c
 +};
 diff --git a/tools/server/server-kv-runtime.cpp b/tools/server/server-kv-runtime.cpp
 new file mode 100644
-index 0000000..d20d084
+index 0000000..79ae1c2
 --- /dev/null
 +++ b/tools/server/server-kv-runtime.cpp
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,179 @@
 +#include "server-kv-runtime.h"
 +
 +#include <algorithm>
@@ -5936,12 +6062,26 @@ index 0000000..d20d084
 +    // Mutate a complete candidate copy and commit only after admission. This
 +    // preserves the old Block Table when a larger synchronization cannot fit.
 +    server_kv_block_manager candidate = blocks_;
-+    candidate.release(sequence_id);
-+    const auto attached = candidate.attach(
-+            sequence_id, committed_tokens, reserve_tokens, now_us);
-+    if (!attached.admitted) {
-+        if (error) *error = attached.reason;
-+        return false;
++    const bool extends_current = current != sequences_.end() &&
++            current->second.residency == server_kv_residency::resident &&
++            current->second.reserved_tokens == reserve_tokens &&
++            reserve_tokens == 0 &&
++            committed_tokens.size() > current->second.committed_tokens.size() &&
++            std::equal(current->second.committed_tokens.begin(),
++                    current->second.committed_tokens.end(), committed_tokens.begin());
++    if (extends_current) {
++        const std::vector<server_kv_token> appended(
++                committed_tokens.begin() + current->second.committed_tokens.size(),
++                committed_tokens.end());
++        if (!candidate.append(sequence_id, appended, now_us, error)) return false;
++    } else {
++        candidate.release(sequence_id);
++        const auto attached = candidate.attach(
++                sequence_id, committed_tokens, reserve_tokens, now_us);
++        if (!attached.admitted) {
++            if (error) *error = attached.reason;
++            return false;
++        }
 +    }
 +    const std::string invalid = candidate.validate();
 +    if (!invalid.empty()) {
@@ -5972,13 +6112,12 @@ index 0000000..d20d084
 +        if (candidate.id == destination || candidate.residency != server_kv_residency::resident) continue;
 +        if (!eligible.empty() && eligible.count(candidate.id) == 0) continue;
 +        const size_t matched = common_prefix(candidate.committed_tokens, prompt);
-+        const size_t full_tokens = matched - matched % block_size_;
-+        if (full_tokens > best.matched_tokens ||
-+                (full_tokens == best.matched_tokens && full_tokens > 0 &&
++        if (matched > best.matched_tokens ||
++                (matched == best.matched_tokens && matched > 0 &&
 +                 candidate.last_access_us < sequences_.at(best.donor).last_access_us)) {
 +            best.donor = candidate.id;
-+            best.matched_tokens = full_tokens;
-+            best.matched_blocks = full_tokens / block_size_;
++            best.matched_tokens = matched;
++            best.matched_blocks = (matched + block_size_ - 1) / block_size_;
 +        }
 +    }
 +    return best;

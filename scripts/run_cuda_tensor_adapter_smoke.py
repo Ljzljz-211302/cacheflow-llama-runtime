@@ -30,7 +30,7 @@ def main() -> None:
         "--host", "127.0.0.1", "--port", str(args.port),
         "-c", "2048", "-np", "2", "-t", "8", "-ngl", "99",
         "--no-kv-unified", "--no-cache-idle-slots", "--no-warmup", "-lv", "4",
-        "--kv-block-runtime", "--kv-block-size", "16",
+        "--kv-block-runtime", "--kv-block-size", "16", "--metrics",
     ]
     environment = os.environ.copy()
     cuda_bin = ROOT / "runtime/cuda-dev/Library/bin"
@@ -56,7 +56,9 @@ def main() -> None:
             else:
                 raise TimeoutError(f"CUDA server did not become ready; inspect {log_path}")
 
-            prefix = "real CUDA block prefix " * 80
+            # 81 repetitions produce a deliberately partial 16-token tail,
+            # exercising eager physical COW before the destination appends.
+            prefix = "real CUDA block prefix " * 81
             results = []
             for payload in (
                 {"prompt": prefix + "donor", "id_slot": 0},
@@ -81,6 +83,8 @@ def main() -> None:
                 headers={"Content-Type": "application/json"}, method="POST")
             with urllib.request.urlopen(cold_request, timeout=120) as response:
                 cold_result = json.load(response)
+            with urllib.request.urlopen(f"{url}/metrics", timeout=30) as response:
+                prometheus = response.read().decode()
             time.sleep(0.5)
         finally:
             process.terminate()
@@ -94,15 +98,24 @@ def main() -> None:
     evidence = [line for line in text.splitlines()
                 if "CacheFlow CUDA adapter copied" in line]
     prefix_evidence = [line for line in text.splitlines() if "shared " in line and "prefix KV blocks" in line]
+    cow_evidence = [line for line in text.splitlines()
+                    if "eagerly cloned" in line and "partial shared KV tails" in line]
     if not evidence:
         raise AssertionError(f"real llama KV tensor adapter did not run; inspect {log_path}")
     if not prefix_evidence:
         raise AssertionError(f"partial cross-stream prefix share did not run; inspect {log_path}")
+    if not cow_evidence:
+        raise AssertionError(f"production CUDA partial-tail COW did not run; inspect {log_path}")
+    cow_metrics = [line for line in prometheus.splitlines()
+                   if line.startswith("llamacpp:cuda_kv_copy_on_write_total ")]
+    if not cow_metrics or float(cow_metrics[-1].split()[-1]) <= 0:
+        raise AssertionError("production CUDA COW metric did not advance")
     if not results[-1].get("content"):
         raise AssertionError("destination response is empty")
     if results[-1].get("content") != cold_result.get("content"):
         raise AssertionError("shared-prefix CUDA output differs from cold deterministic decode")
     print(json.dumps({"evidence_log": evidence[-1], "prefix_log": prefix_evidence[-1],
+        "cow_log": cow_evidence[-1],
         "log": str(log_path)}, ensure_ascii=False))
 
 
