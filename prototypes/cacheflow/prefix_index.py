@@ -1,3 +1,5 @@
+"""Archived prototype prefix index; production ownership is in KV Block Manager."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

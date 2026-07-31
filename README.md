@@ -2,7 +2,7 @@
 
 CacheFlow Runtime 是一个直接重构 llama.cpp 推理热路径的单机 LLM Serving / AI Infra 项目。它不是 Python 包装层，也不把 `vendor/` 中的上游源码算作个人工作量：个人实现以固定上游 `acd79d603` 为基线，通过可重放 patch 进入真实 `llama-server -> llama_decode -> KV memory -> CUDA` 调用链。
 
-当前 fork 相对上游涉及 50 个文件，新增 5,798 行、删除 54 行 C/C++/CUDA；外层 Python 仅负责固定实验、故障注入和报告。
+当前 fork 相对固定上游涉及 53 个文件，新增 6,635 行、删除 99 行 C/C++/CUDA；这是 `c2843ef` 的差异快照，最终以可重放 patch 的 `git diff --stat` 为准。外层 Python 仅负责固定实验、故障注入和报告。
 
 ## 实现了什么
 
@@ -36,15 +36,17 @@ flowchart LR
 
 固定环境：Windows 11、RTX 4050 Laptop 6 GiB、i5-13500H、CUDA sm_89、Qwen2.5-0.5B-Instruct Q4/Q8/F16。
 
-- 真实 Tail COW：64 个 Block 的整序列复制替换为单 Tail Block，P95 从 0.999 ms 降至 0.024 ms；复制量/额外显存从 12,582,912 B 降至 196,608 B，launch 从 128 降至 1。
+- 真实 Tail COW：64 个 Block 的整序列复制替换为单 Tail Block，最终轮 P95 从 0.998 ms 降至 0.026 ms；复制量/额外显存从 12,582,912 B 降至 196,608 B，launch 从 128 降至 1。
 - 真实 CUDA Swap：Qwen KV 经 D2H/H2D Pinned Memory 往返后序列状态逐字节一致，Event 时间和 319,488 B Pinned 峰值来自实际运行。
 - 上游兼容：固定相同 MSVC 工具链、模型和 seed，`upstream` policy 5/5 输出 SHA-256 一致。
 - 模型矩阵：Q4/Q8/F16 × CPU/CUDA、并发 1/2/4/8、约 128/512/2K/4K 上下文共 14 个真实服务 case 通过。
 - Adaptive Speculation：当前 CUDA trace 的 wall-time 中位数 196.18 ms，fixed 为 202.58 ms；CPU adaptive 中位数也略优于 fixed。
-- Adaptive Prefill：避免了错误 fixed-64 参数，但没有稳定击败 CUDA greedy / fixed-256；这是保留的负结果，不宣称普遍收益。
+- Adaptive Prefill：CUDA 在线 cost model 在最终轮避开错误 fixed-64，但略劣于 greedy/fixed-256；CPU 历史在线动作曾劣于所有候选，现按 backend bucket 选择 `chunk=0` greedy 安全动作，并由 2% 回归门槛阻止再次静默退化。
 - Gather/Scatter：完全不重叠时 per-block memcpy 更快，因此生产实现只在重叠/重复映射需要 snapshot 语义时使用 staging kernel。
+- Mixed prefill/decode：CPU 在两轮 3-trial 验收中都改善尾延迟/吞吐；CUDA 两轮的 latency/吞吐结论反号，虽然 TTFT P95 均改善，但样本不足以声称稳定端到端收益，因此当前不应对所有 CUDA workload 默认启用。
+- Production Engine trace：最终 CPU mixed workload 中 execute 占 99.9145%，plan 仅 0.0148%；`results/engine-flame.svg` 是 phase-duration 图，不是 sampled-stack flame graph。
 
-所有结论至少 3 次 fresh-process trial；汇总位于 `results/`，原始 trial 位于 `results/raw/`。硬件、模型和负结果边界见 [实验限制](docs/experiment-limitations.md)。
+所有性能 A/B 结论至少 3 次 fresh-process trial；功能 smoke 和 Engine trace 不冒充多 trial 性能结论。汇总位于 `results/`，原始 trial 位于 `results/raw/`。硬件、模型和负结果边界见 [实验限制](docs/experiment-limitations.md)。
 
 ## 一键复现
 
@@ -60,12 +62,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 
 1. Python 测试、语法检查、制品 SHA-256 和设备检查；
 2. CPU fork、同工具链 upstream、CUDA sm_89 全部目标构建；
-3. 10 个个人 C++ 原生测试与随机状态/映射性质测试；
+3. 个人 C++ 原生测试与随机状态/映射性质测试；
 4. Prefix 分享、抢占恢复、真实 CUDA Tensor/Swap、OOM/Compute/Store 故障注入；
 5. OpenAI/SSE、取消、Deadline、背压和恢复；
 6. 上游输出兼容、模型/后端/并发/上下文矩阵；
-7. CUDA Transport/COW、Adaptive Prefill/Spec、Scheduler、在线/离线/质量 A/B；
-8. 从原始数据重新生成报告。
+7. Compute Sanitizer memcheck/racecheck（硬门槛）；
+8. CUDA Transport/COW、Adaptive Prefill/Spec、mixed workload、Scheduler、在线/离线/质量 A/B；
+9. production Engine trace/flame chart，并从原始数据重新生成报告。
 
 只做快速环境与 Python 验证：
 
@@ -79,7 +82,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 .\scripts\build_cuda_kv.ps1 -Sanitize
 ```
 
-Windows WDDM 首次运行前需要以管理员身份执行 CUDA Toolkit 的 `EnableDebuggerInterface.bat`。当前机器已完成该配置；Compute Sanitizer memcheck 报告 0 errors，racecheck 报告 0 hazards、0 errors、0 warnings。常规全量验收仍会额外运行 canary、随机映射、逐元素对照和 allocation failpoint。
+Windows WDDM 首次运行前需要以管理员身份执行 CUDA Toolkit 的 `EnableDebuggerInterface.bat`。`verify.ps1 -Full` 会直接执行 memcheck/racecheck，未通过即整体验收失败，并额外运行 canary、随机映射、逐元素对照和 allocation failpoint。
 
 ## 策略开关
 
@@ -102,7 +105,7 @@ patches/0001-*.patch              相对固定上游的完整个人可重放差�
 scripts/                         构建、真实服务测试、A/B 和报告编排
 results/                         可提交汇总；raw/ 保存 fresh-process 原始数据
 docs/                            架构、验收、实验限制和面试深挖
-src/cacheflow/                   早期 Python 控制面原型，不计最终 Runtime 核心
+prototypes/cacheflow/            已归档的早期 Python 控制面原型，不计最终 Runtime 核心
 models/ runtime/ build/          下载模型、工具链和本机构建产物，均不计个人源码
 ```
 

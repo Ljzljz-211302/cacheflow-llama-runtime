@@ -1,3 +1,5 @@
+"""Archived prototype metrics; production metrics are emitted by llama-server."""
+
 from __future__ import annotations
 
 import threading

@@ -2,7 +2,7 @@ param([switch]$Full)
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$env:PYTHONPATH = Join-Path $projectRoot "src"
+$env:PYTHONPATH = ((Join-Path $projectRoot "src"), (Join-Path $projectRoot "prototypes")) -join ";"
 
 Push-Location $projectRoot
 try {
@@ -11,9 +11,14 @@ try {
         throw "unit tests failed"
     }
 
-    python -m compileall -q src scripts tests
+    python -m compileall -q src prototypes scripts tests
     if ($LASTEXITCODE -ne 0) {
         throw "compileall failed"
+    }
+
+    python scripts\audit_architecture.py
+    if ($LASTEXITCODE -ne 0) {
+        throw "architecture ownership audit failed"
     }
 
     $manifest = Get-Content -Raw -Encoding utf8 "config\artifacts.json" | ConvertFrom-Json
@@ -29,6 +34,14 @@ try {
     }
     Write-Host "Artifact checksums passed."
 
+    if ($Full) {
+        & git -C "vendor\llama.cpp" apply --reverse --check "..\..\patches\0001-cache-aware-slot-scheduler.patch"
+        if ($LASTEXITCODE -ne 0) {
+            throw "engine patch is not the exact reversible diff for the pinned fork"
+        }
+        Write-Host "Pinned upstream patch reversibility passed."
+    }
+
     & "runtime\bin\llama-bench.exe" --list-devices
     if ($LASTEXITCODE -ne 0) {
         throw "llama-bench device check failed"
@@ -39,8 +52,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "patched server build failed" }
         powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_upstream_baseline.ps1
         if ($LASTEXITCODE -ne 0) { throw "same-toolchain upstream baseline build failed" }
-        powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_cuda_kv.ps1
-        if ($LASTEXITCODE -ne 0) { throw "CUDA KV backend build failed" }
+        powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_cuda_kv.ps1 -Sanitize
+        if ($LASTEXITCODE -ne 0) { throw "CUDA KV backend build or Compute Sanitizer failed" }
         python scripts\run_kv_block_smoke.py --mode share
         if ($LASTEXITCODE -ne 0) { throw "resident prefix sharing smoke failed" }
         python scripts\run_kv_block_smoke.py --mode preempt --port 8108
@@ -71,6 +84,10 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "adaptive speculation CPU/CUDA A/B failed" }
         python scripts\run_engine_ab.py
         if ($LASTEXITCODE -ne 0) { throw "engine scheduler A/B failed" }
+        python scripts\run_mixed_workload.py --backend both --trials 3
+        if ($LASTEXITCODE -ne 0) { throw "mixed prefill/decode CPU/CUDA workload failed" }
+        powershell -NoProfile -ExecutionPolicy Bypass -File scripts\profile_engine.ps1
+        if ($LASTEXITCODE -ne 0) { throw "production engine trace/flame chart failed" }
         python scripts\run_prefill_ab.py
         if ($LASTEXITCODE -ne 0) { throw "chunked prefill A/B failed" }
         python scripts\run_scheduler_trace.py

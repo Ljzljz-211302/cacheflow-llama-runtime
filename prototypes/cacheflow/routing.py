@@ -1,3 +1,5 @@
+"""Archived prototype model router; it is outside the production runtime."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

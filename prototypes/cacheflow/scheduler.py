@@ -1,3 +1,5 @@
+"""Archived prototype scheduler; production scheduling is implemented in C++."""
+
 from __future__ import annotations
 
 from .domain import (

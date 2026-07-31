@@ -41,6 +41,15 @@ def render_report(results_dir: Path, output_path: Path) -> None:
         encoding="utf-8-sig", newline=""
     ) as handle:
         adaptive_speculation = list(csv.DictReader(handle))
+    mixed_path = results_dir / "mixed_workload_summary.csv"
+    with mixed_path.open(encoding="utf-8-sig", newline="") as handle:
+        mixed_workload = list(csv.DictReader(handle))
+    repeated_mixed_path = results_dir / "mixed_workload_repeated_runs.csv"
+    with repeated_mixed_path.open(encoding="utf-8-sig", newline="") as handle:
+        repeated_mixed = list(csv.DictReader(handle))
+    profile = json.loads(
+        (results_dir / "engine-profile-summary.json").read_text(encoding="utf-8")
+    )
     build_commit = baseline[0].get("build_commit", "unknown") if baseline else "unknown"
     build_number = baseline[0].get("build_number", "unknown") if baseline else "unknown"
 
@@ -242,6 +251,72 @@ def render_report(results_dir: Path, output_path: Path) -> None:
             f"| {row['backend']} | {row['mode']} | {float(row['wall_ms_median']):.2f} | "
             f"{float(row['wall_ms_p95']):.2f} | {float(row['acceptance_ratio_median']):.1%} |"
         )
+    lines.extend(
+        [
+            "",
+            "## Mixed Prefill / Decode",
+            "",
+            "| Backend | Policy | Trials | TTFT median / P95 ms | TPOT P95 ms | Latency P95 ms | Aggregate output TPS |",
+            "|---|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in mixed_workload:
+        lines.append(
+            f"| {row['backend']} | {row['policy']} | {row['trials']} | "
+            f"{float(row['ttft_median_ms']):.2f} / {float(row['ttft_p95_ms']):.2f} | "
+            f"{float(row['tpot_p95_ms']):.2f} | {float(row['latency_p95_ms']):.2f} | "
+            f"{float(row['aggregate_output_tps']):.2f} |"
+        )
+    latest_by_key = {(row["backend"], row["policy"]): row for row in mixed_workload}
+    latest_comparisons = []
+    for backend in ("cpu", "cuda"):
+        upstream = latest_by_key[(backend, "upstream")]
+        cacheflow = latest_by_key[(backend, "cacheflow")]
+        latency_delta = float(cacheflow["latency_p95_ms"]) / float(upstream["latency_p95_ms"]) - 1
+        throughput_delta = float(cacheflow["aggregate_output_tps"]) / float(upstream["aggregate_output_tps"]) - 1
+        latest_comparisons.append(
+            f"{backend.upper()} 本轮 latency P95 {latency_delta:+.1%}、aggregate TPS {throughput_delta:+.1%}"
+        )
+    lines.extend(
+        [
+            "",
+            "；".join(latest_comparisons) + "。这是当前轮结果，不外推为稳定收益。",
+            "",
+            "### 跨验收轮重复性",
+            "",
+            "| Run | Backend | Policy | Trials | Latency P95 ms | Aggregate output TPS |",
+            "|---|---|---|---:|---:|---:|",
+        ]
+    )
+    for row in repeated_mixed:
+        lines.append(
+            f"| {row['run']} | {row['backend']} | {row['policy']} | {row['trials']} | "
+            f"{float(row['latency_p95_ms']):.2f} | {float(row['aggregate_output_tps']):.2f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "两轮 CUDA latency/throughput 结论反号，因此当前 3-trial laptop GPU 证据不足以声称稳定端到端提升；"
+            "production 应保留 upstream fallback，并增加 backend/workload-aware gating。",
+            "",
+            "## Production Engine Phase Trace",
+            "",
+            "| Phase | Duration us | Share |",
+            "|---|---:|---:|",
+        ]
+    )
+    for phase in profile["phases"]:
+        lines.append(
+            f"| {phase['name']} | {float(phase['duration_us']):.0f} | "
+            f"{float(phase['share']):.4%} |"
+        )
+    lines.extend(
+        [
+            "",
+            f"共 {profile['events']} 个 production Engine spans。该数据来自 "
+            f"`{profile['method']}`；它是 phase-duration trace，不是 sampled-stack CPU flame graph。",
+        ]
+    )
     lines.extend(
         [
             "",

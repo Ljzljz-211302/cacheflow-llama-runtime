@@ -142,6 +142,20 @@ def main() -> None:
         writer = csv.DictWriter(handle, fieldnames=list(summaries[0]))
         writer.writeheader()
         writer.writerows(summaries)
+    for backend in backends:
+        by_mode = {
+            str(row["mode"]): row for row in summaries if row["backend"] == backend
+        }
+        adaptive = float(by_mode["adaptive"]["decode_wall_ms_median"])
+        wrong_fixed = max(
+            float(by_mode["fixed64"]["decode_wall_ms_median"]),
+            float(by_mode["fixed256"]["decode_wall_ms_median"]),
+        )
+        if adaptive > wrong_fixed * 1.02:
+            raise RuntimeError(
+                f"{backend} adaptive prefill regressed beyond the 2% noise guard: "
+                f"adaptive={adaptive:.3f} ms, wrong-fixed={wrong_fixed:.3f} ms"
+            )
     print(json.dumps(summaries, indent=2))
 
 

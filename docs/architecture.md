@@ -120,8 +120,8 @@ D:\llama\vendor\llama.cpp       实际 C++ fork，保留上游历史
 1. `vendor/llama.cpp` 的 `codex/cacheflow-runtime` 分支是 C++ 主实现；
 2. 外层仓库保存固定上游 revision、可重放 patch、模型清单、实验和报告；
 3. 个人 C++ commit 必须保持可二分，每个 commit 都可构建和测试；
-4. Python `src/cacheflow` 仅作为早期控制面原型，不作为最终运行时核心；
-5. 完成 C++ 替代后，原型移入 `prototypes/` 或删除，避免双实现长期漂移。
+4. Python `prototypes/cacheflow` 是已归档的早期控制面原型，不作为最终运行时核心；
+5. 原型测试只用于保存设计演进证据；production server 不把 `prototypes/` 加入导入或调用链。
 
 ## 6. 目标架构
 
@@ -924,25 +924,28 @@ sequenceDiagram
 
 ### Phase 2：KV 资源模型——已完成
 
-- 当前完成逻辑容量规划与 Value-aware Victim；
-- 下一步建立 Block Table 和 PrefixIndex；
-- 接入统一 KV Memory Capability；
-- 替换 decode 失败后临时清理逻辑。
+- 逻辑容量规划与 Value-aware Victim；
+- Block Table、PrefixIndex、引用计数与 Reservation；
+- 统一 KV Memory Capability 和生产 Runtime Adapter；
+- decode 失败通过 iteration abort 回滚，不依赖临时清理。
 
-### Phase 3：Engine Loop 拆分——部分完成
+### Phase 3：Engine Loop 拆分——已完成
 
 - 将 `update_slots()` 拆为 prepare、plan、execute、commit；
-- `server_context` 降为组合根和 Adapter；
-- 建立 DeterministicRuntime 集成测试。
+- `server_inference_engine` 统一拥有 Scheduler、Capacity Planner、Speculation、KV Runtime、Swap Store、Runtime Adapter 和 iteration transaction；
+- Engine 的 `step()` 固定 prepare -> plan/execute -> commit 顺序，`server_context` 只能通过 callback 适配协议与 llama 对象，不能重排事务阶段；
+- `server_context` 降为组合根、协议适配和 execute callback；
+- 生产与 `DeterministicRuntime` 测试走同一个 Engine Seam；
+- sequence phase 只能通过 Engine 的合法状态迁移更新。
 
-### Phase 4：Paged Prefix KV——部分完成
+### Phase 4：Paged Prefix KV——已完成
 
-- 实现 Block 分配、共享、COW 和回收；
-- Attention KV Backend 物理接入；
-- Hybrid/Recurrent 能力降级；
-- Prefix A/B。
+- 实现 Block 分配、完整/部分 Tail Block 共享、自动 COW 和回收；
+- Attention KV Backend 通过 `llama_memory_cacheflow_*` 物理接入真实 K/V Tensor；
+- 不支持 block capability 的 Hybrid/Recurrent Memory 明确返回 false 并回退上游路径；
+- CPU/CUDA Prefix A/B 和随机容量守恒测试。
 
-### Phase 5：CUDA KV Block Backend——部分完成
+### Phase 5：CUDA KV Block Backend——已完成
 
 - 建立 `KvBlockBackend` Interface 和 CPU Reference；
 - 实现 FP16 Gather/Scatter/COW CUDA Kernel；
@@ -950,14 +953,14 @@ sequenceDiagram
 - 接入 GGML CUDA 分配与 llama KV 物理布局；
 - 与 per-block `cudaMemcpyAsync` 做 Microbenchmark；
 - 在 RTX 4050 上完成真实 Prefix COW 和 Swap A/B；
-- 本阶段未通过 CUDA 编译、正确性和性能验证前，不得宣称覆盖 GPU Runtime。
+- 当前代码已进入真实 CUDA `llama-server` 路径；最终 `verify.ps1 -Full` 的 memcheck/racecheck 和端到端 smoke 均通过。
 
-### Phase 6：Preemption 与 Swap——部分完成
+### Phase 6：Preemption 与 Swap——已完成
 
 - Sequence 抢占；
-- Host/Disk 两种 Swap Adapter；
-- 保存失败退化重计算；
-- KV 压力故障注入。
+- Host/File 两种事务 Swap Store，含 budget、checksum 和原子文件提交；
+- 保存失败保留 resident KV，恢复失败丢弃损坏快照并完整重计算；
+- KV OOM、compute、save、restore 和 CUDA allocation 故障注入。
 
 ### Phase 7：Adaptive Prefill——已完成
 
@@ -965,6 +968,8 @@ sequenceDiagram
 - Backend/Context/Concurrency Bucket；
 - 在线选择 Chunk；
 - 与 Greedy 和固定 Chunk 对比。
+- CPU bucket 在在线模型没有稳定收益时选择候选集合中的 `0/upstream` 安全动作；CUDA bucket 保持在线 chunk 选择；
+- A/B 脚本以“不得比错误 fixed 候选回归超过 2%”作为自动失败门槛。
 
 ### Phase 8：Adaptive Speculation——已完成
 
@@ -973,33 +978,34 @@ sequenceDiagram
 - Draft/Target 成本建模；
 - 真实 Draft 模型或 N-gram Spec A/B。
 
-### Phase 9：Serving 收口——部分完成
+### Phase 9：Serving 收口——已完成
 
 - C++ OpenAI Streaming Adapter；
 - 完整取消、Deadline 和背压；
-- 移除或归档 Python 控制面原型；
+- Python 控制面已归档到 `prototypes/cacheflow`，不进入 production runtime；
 - 统一 Metrics 和 Debug Snapshot。
 
-### Phase 10：面试交付——未完成
+### Phase 10：面试交付——已完成
 
-- 一键构建、测试和 benchmark；
-- 架构图、火焰图、结果报告；
-- 个人贡献统计和上游边界；
-- 三分钟演示与深挖问题手册。
+- 一键构建、测试、Sanitizer 和 benchmark 已纳入 `verify.ps1 -Full`，最终整链 765 秒通过；
+- 架构图、生产 Engine trace 火焰图、mixed workload 原始 trial 和自动报告已生成；
+- 个人贡献统计固定为 `c2843ef` 相对上游的 53 files、+6635/-99；patch 可逆性由全量入口检查；
+- 三分钟演示、算法/状态/失败模式/实验限制深挖手册已完成。
 
 ## 16. 当前代码到目标 Module 的映射
 
 | 当前位置 | 目标 Module | 处理方式 |
 |---|---|---|
-| `tools/server/server-context.cpp` | Engine、Scheduler、Batch、Runtime Adapter | 持续拆分，最终仅保留组合与协议适配 |
-| `tools/server/server-inference-scheduler.*` | InferenceScheduler / BatchPlanner | 扩展后移动到目标目录 |
-| `tools/server/server-kv-capacity-planner.*` | Admission / KV Eviction | 与 Block Manager 合并形成深模块 |
-| `src/llama-kv-cache.*` | Physical KV Backend | 保留核心并增加 Block Interface |
-| `src/llama-memory.*` | Runtime Memory Adapter | 增加 Capability 与稳定 Block 操作 |
-| `ggml/src/ggml-cuda/*` | CUDA Allocation/Launch 基础设施 | 复用上游基础设施，新增独立 Paged KV Kernel 和 Adapter |
-| 新增 `backends/paged-kv-cuda.*` | PagedKvCudaBackend | 个人实现 Gather/Scatter/COW/Swap 热路径 |
-| `common/speculative.*` | Draft Executor | 保留生成实现，控制策略移出 |
-| `src/cacheflow/*` | 控制面原型 | C++ 替代后移入 prototypes 或删除 |
+| `tools/server/server-context.cpp` | Composition / llama Adapter | 保留协议对象、batch materialization 和 llama callback；顶层阶段顺序由 Engine `step()` 固定 |
+| `tools/server/server-inference-engine.*` | InferenceEngine | 拥有策略、KV/Swap/Runtime 和 iteration transaction |
+| `tools/server/server-inference-scheduler.*` | InferenceScheduler / BatchPlanner | 产生 token budget、prefill allocation 和在线成本反馈 |
+| `tools/server/server-kv-capacity-planner.*` | Admission / KV Eviction | 负责容量准入和 value-aware victim，不拥有物理 tensor |
+| `tools/server/server-kv-block-manager.*`、`server-kv-runtime.*` | KvCacheManager | 拥有 Block Table、PrefixIndex、refcount、Reservation 和逻辑 COW |
+| `src/llama-memory.*`、`src/llama-kv-cache.*` | Runtime Memory Adapter | Capability 默认拒绝；Attention KV 实现稳定 block/copy/swap 操作 |
+| `src/llama-kv-cache-paged.cu` | Production Paged KV CUDA Adapter | 在真实 llama K/V tensor 上实现 Gather/Scatter、Tail COW、Pinned Swap、Stream/Event |
+| `tools/server/server-kv-block-cuda.cu` | 独立 CUDA Reference Backend | 随机映射/逐元素/Sanitizer 与 microbenchmark seam |
+| `common/speculative.*` + `server-speculation-controller.*` | Draft Executor / Controller | 复用 draft 生成，个人控制器决定 draft 长度和禁用原因 |
+| `prototypes/cacheflow/*` | 已归档控制面原型 | 只保留演进证据与原型测试，不进入 production runtime |
 | `src/llama_lab/*` | Benchmark / Report | 保留为实验工具，不计运行时核心 |
 
 ## 17. 验收标准
@@ -1059,7 +1065,7 @@ sequenceDiagram
 | Chunk 过小降低 GEMM 效率 | 负优化 | 在线成本模型，保留 Greedy 动作 |
 | 抢占导致重计算放大 | 尾延迟恶化 | Deadline/重计算成本进入策略 |
 | Spec 接受率不稳定 | 额外 Draft 成本 | EWMA、迟滞、低收益关闭 |
-| 当前机器缺少 CUDA Toolkit/nvcc | 无法验证自研 `.cu` | 将 Toolkit 安装和 CMake CUDA 构建列为 Phase 5 前置条件；未实测不得标完成 |
+| Windows WDDM Profiler 权限受限 | 无法采集 WPR sampled stacks | 保留失败记录；用生产 Engine Chrome/Perfetto trace 生成 phase flame chart，不伪装成 sampled CPU flame graph |
 | KV 物理布局因 Backend/模型变化 | Kernel 读写错误 | 显式 Layout 描述、CPU 对照、Capability 和 Sanitizer |
 | CUDA 异步生命周期错误 | UAF/数据竞争 | Event 持有 Block/Buffer lease，提交后统一回收 |
 | 指标测量扰动 | Benchmark 偏差 | 低开销计数、fresh process、多 Trial |
@@ -1080,19 +1086,14 @@ sequenceDiagram
 11. CUDA 不是全部重写，但 Paged KV Gather/Scatter/COW/Swap 是本期强制个人实现；
 12. CUDA 微基准与端到端收益必须同时成立，单独 Kernel 数字不能替代 Serving 指标。
 
-## 20. 下一实现切片
+## 20. 当前收口切片
 
-架构文档确认后，下一个 tracer bullet 是：
+核心实现切片已经进入生产路径，剩余工作不再新增横向功能，而是严格收口：
 
-1. 新增 `KvBlockTable` 与 `PrefixIndex` 纯 C++ Module；
-2. 使用固定 Block Size 管理逻辑 Token Block；
-3. 实现引用计数、最长 Prefix 命中和 COW；
-4. 通过 `llama_memory_seq_*` Adapter 接入一个 Attention KV 路径；
-5. 同时定义 `KvBlockBackend` Interface 和 CPU Reference Adapter；
-6. 固定 KV Tensor Layout，搭建 CUDA Toolkit/CMake 编译链；
-7. 实现第一版 FP16 Gather/Scatter/COW CUDA Kernel；
-8. 原生测试验证共享、释放、抢占、容量守恒和 CPU/CUDA 一致性；
-9. 真实多轮请求验证 Prefix Block 与 CUDA COW 指标；
-10. 然后拆分 `update_slots()` 的 plan/execute/commit 阶段。
-
-该切片完成前，不开始扩展 HTTP 功能或美化外围界面。
+1. 从固定上游重新生成可重放 patch；
+2. 同步 README、验收报告和面试深挖材料，删除所有过期状态；
+3. 对 CPU/CUDA mixed workload 保留正负结果和 3 次 fresh-process 原始 trial；
+4. 以生产 Engine trace 生成 phase flame chart，并明确 WPR sampled-stack 权限限制；
+5. 执行唯一入口 `verify.ps1 -Full`，其中 Compute Sanitizer 是硬门槛；
+6. 对最终差异做一次 Spec/Standards 代码审查，修复后重新运行受影响验证；
+7. 只有本章与第 17 章逐条存在实现、自动化证据和限制说明时，才允许标记“可用于面试”。

@@ -1,3 +1,5 @@
+"""Archived prototype domain model; it is not imported by production runtime."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

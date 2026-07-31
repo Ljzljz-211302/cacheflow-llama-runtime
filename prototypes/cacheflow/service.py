@@ -1,3 +1,5 @@
+"""Archived prototype service; production serving is implemented in C++."""
+
 from __future__ import annotations
 
 import threading

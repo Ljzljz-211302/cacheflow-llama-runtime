@@ -18,10 +18,10 @@ index 9e7b125..6195e3f 100644
  license_add_file("llama.cpp" "LICENSE")
  
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 8382c1d..c3b51eb 100644
+index 8382c1d..858c809 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -3256,6 +3256,164 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3256,6 +3256,172 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.slot_prompt_similarity = std::stof(value);
          }
      ).set_examples({LLAMA_EXAMPLE_SERVER}));
@@ -136,6 +136,14 @@ index 8382c1d..c3b51eb 100644
 +        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
++        {"--engine-trace"}, "PATH",
++        "write Chrome/Perfetto inference-engine prepare/plan/execute/commit spans",
++        [](common_params & params, const std::string & value) {
++            if (value.empty()) throw std::invalid_argument("engine trace path must not be empty");
++            params.engine_trace_path = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
 +        {"--prefill-chunk-size"}, "N",
 +        string_format(
 +            "maximum prompt tokens scheduled per slot in one decode iteration (default: %d; 0 = upstream greedy prefill)",
@@ -186,7 +194,7 @@ index 8382c1d..c3b51eb 100644
      add_opt(common_arg(
          {"--lora-init-without-apply"},
          string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),
-@@ -3413,6 +3571,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3413,6 +3579,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
  
      //
      // speculative parameters
@@ -241,10 +249,10 @@ index 8382c1d..c3b51eb 100644
  
      add_opt(common_arg(
 diff --git a/common/common.h b/common/common.h
-index 0b284cb..1189199 100644
+index 0b284cb..e43bea8 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -653,6 +653,24 @@ struct common_params {
+@@ -653,6 +653,25 @@ struct common_params {
      std::string media_path; // path to directory for loading media files
  
      float slot_prompt_similarity = 0.1f;
@@ -266,6 +274,7 @@ index 0b284cb..1189199 100644
 +    std::string kv_swap_path;
 +    int32_t kv_swap_budget_mib = 0;
 +    std::string kv_swap_fault = "none";
++    std::string engine_trace_path;
  
      // batched-bench params
      bool is_pp_shared   = false;
@@ -1364,10 +1373,10 @@ index 0000000..3af8e59
 +}
 diff --git a/tests/test-inference-engine.cpp b/tests/test-inference-engine.cpp
 new file mode 100644
-index 0000000..1d8cc4c
+index 0000000..9d66fd2
 --- /dev/null
 +++ b/tests/test-inference-engine.cpp
-@@ -0,0 +1,47 @@
+@@ -0,0 +1,88 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -1375,9 +1384,15 @@ index 0000000..1d8cc4c
 +#include "server-inference-engine.h"
 +
 +#include <cassert>
++#include <filesystem>
++#include <fstream>
++#include <string>
 +
 +int main() {
 +    server_inference_engine engine;
++    const auto trace = std::filesystem::temp_directory_path() / "cacheflow-engine-trace-test.json";
++    std::filesystem::remove(trace);
++    engine.configure_trace(trace);
 +    engine.scheduler().configure({0.1f, 0.25f, 64, true, 16, 256, 25.0});
 +    engine.set_kv_runtime(std::make_unique<server_kv_runtime>(16, 64));
 +    engine.set_swap_store(server_kv_create_host_swap_store(1 << 20));
@@ -1393,12 +1408,47 @@ index 0000000..1d8cc4c
 +        assert(step.record_executed(8));
 +    });
 +    assert(engine.commit(step));
++    engine.flush_trace();
++    std::ifstream trace_input(trace);
++    const std::string trace_text((std::istreambuf_iterator<char>(trace_input)), {});
++    assert(trace_text.find("\"name\":\"plan\"") != std::string::npos);
++    assert(trace_text.find("\"name\":\"execute\"") != std::string::npos);
++    trace_input.close();
++    std::filesystem::remove(trace);
 +
 +    const auto snapshot = engine.snapshot();
 +    assert(snapshot.iteration_phase == server_iteration_phase::committed);
 +    assert(snapshot.iteration_plan.decode_tokens == 1);
 +    assert(snapshot.iteration_plan.prefill_tokens == 7);
 +    assert(snapshot.block_runtime_enabled && snapshot.swap_store_enabled);
++
++    bool prepared = false;
++    bool executed = false;
++    const bool step_committed = engine.step(
++            [&]() {
++                prepared = true;
++                return true;
++            },
++            [&](server_inference_iteration & iteration) {
++                assert(prepared);
++                assert(engine.publish_plan(iteration, {0, 1, 1}));
++                engine.execute(iteration, [&]() {
++                    executed = true;
++                    assert(iteration.record_executed(1));
++                });
++                assert(engine.commit_with(iteration, []() {}));
++            });
++    assert(step_committed && executed);
++    assert(engine.snapshot().iteration_phase == server_iteration_phase::committed);
++
++    const bool step_aborted = engine.step(
++            []() { return true; },
++            [&](server_inference_iteration & iteration) {
++                assert(engine.publish_plan(iteration, {1, 0, 1}));
++                iteration.abort("injected step failure");
++            });
++    assert(!step_aborted);
++    assert(engine.snapshot().iteration_phase == server_iteration_phase::aborted);
 +
 +    server_sequence_state sequence;
 +    assert(engine.transition(sequence, SLOT_STATE_STARTED));
@@ -1459,10 +1509,10 @@ index 0000000..298af36
 +}
 diff --git a/tests/test-inference-scheduler.cpp b/tests/test-inference-scheduler.cpp
 new file mode 100644
-index 0000000..8e57e4a
+index 0000000..966521d
 --- /dev/null
 +++ b/tests/test-inference-scheduler.cpp
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,105 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -1544,12 +1594,28 @@ index 0000000..8e57e4a
 +    assert(scheduler.state().observations == 4);
 +}
 +
++static void test_adaptive_cpu_safety_fallback_selects_greedy_action() {
++    server_scheduler_config config;
++    config.adaptive_prefill = true;
++    config.prefill_chunk_size = 128;
++    config.adaptive_greedy_fallback = true;
++    server_inference_scheduler scheduler(config);
++
++    const auto first = scheduler.plan_prefill({{0, 1000}, {1, 1000}}, 512);
++    assert(first.effective_chunk_size == 0);
++    assert(first.quota(0) == 512);
++    scheduler.observe_iteration({1, 512, 100.0, 1});
++    assert(scheduler.state().effective_chunk_size == 0);
++    assert(scheduler.state().cost.observations == 1);
++}
++
 +int main() {
 +    test_cost_aware_slot_selection();
 +    test_threshold_negative_benefit_and_lru_tie_break();
 +    test_chunked_prefill_shares_an_iteration_budget();
 +    test_zero_chunk_preserves_greedy_upstream_behavior();
 +    test_adaptive_chunk_responds_to_real_iteration_feedback();
++    test_adaptive_cpu_safety_fallback_selects_greedy_action();
 +    return 0;
 +}
 diff --git a/tests/test-kv-block-backend.cpp b/tests/test-kv-block-backend.cpp
@@ -2532,7 +2598,7 @@ index 7d42743..a18ab1b 100644
  
  set(TARGET llama-server-impl)
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..ce56de3 100644
+index 986b2f1..ef80975 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -4,6 +4,14 @@
@@ -2741,7 +2807,18 @@ index 986b2f1..ce56de3 100644
  
      std::string model_name; // name of the loaded model, to be used by API
      std::set<std::string> model_aliases; // additional names for the model
-@@ -1114,8 +1198,59 @@ private:
+@@ -864,6 +948,10 @@ private:
+ 
+         params_base = params;
+         params_base.n_outputs_max = server_n_outputs_max(params_base);
++        if (!params_base.engine_trace_path.empty()) {
++            inference_engine.configure_trace(params_base.engine_trace_path);
++            SRV_INF("inference engine trace enabled: %s\n", params_base.engine_trace_path.c_str());
++        }
+ 
+         std::string & mmproj_path = params_base.mmproj.path;
+         bool has_mmproj = !mmproj_path.empty();
+@@ -1114,8 +1202,66 @@ private:
  
          n_swa = params_base.swa_full ? 0 : llama_model_n_swa(model_tgt);
  
@@ -2755,6 +2832,7 @@ index 986b2f1..ce56de3 100644
 +            (size_t) params_base.prefill_chunk_min,
 +            (size_t) params_base.prefill_chunk_max,
 +            params_base.prefill_target_iteration_ms,
++            params_base.n_gpu_layers <= 0,
 +        });
 +        SRV_INF("CacheFlow policies: scheduler=%s, prefill=%s, speculation=%s, kv_blocks=%s\n",
 +                params_base.scheduler_policy.c_str(), params_base.prefill_policy.c_str(),
@@ -2775,9 +2853,15 @@ index 986b2f1..ce56de3 100644
 +            const size_t block_size = (size_t) params_base.kv_block_size;
 +            const size_t capacity_blocks = ((size_t) n_ctx + block_size - 1) / block_size;
 +            inference_engine.set_kv_runtime(std::make_unique<server_kv_runtime>(block_size, capacity_blocks));
-+            llama_memory_cacheflow_set_block_size(llama_get_memory(ctx_tgt), (uint32_t) block_size);
-+            SRV_INF("block KV runtime enabled: block_size = %zu, capacity_blocks = %zu\n",
-+                    block_size, capacity_blocks);
++            const bool physical_block_capability = llama_memory_cacheflow_set_block_size(
++                    llama_get_memory(ctx_tgt), (uint32_t) block_size);
++            if (physical_block_capability) {
++                SRV_INF("block KV runtime enabled with physical memory capability: block_size = %zu, capacity_blocks = %zu\n",
++                        block_size, capacity_blocks);
++            } else {
++                SRV_WRN("%s", "block KV runtime is logical-only: active memory has no physical block capability; "
++                        "physical KV operations remain on the upstream memory path\n");
++            }
 +        } else {
 +            inference_engine.set_kv_runtime(nullptr);
 +        }
@@ -2803,7 +2887,7 @@ index 986b2f1..ce56de3 100644
  
          // setup slots
          SRV_INF("initializing slots, n_slots = %d\n", params_base.n_parallel);
-@@ -1178,6 +1313,9 @@ private:
+@@ -1178,6 +1324,9 @@ private:
              SLT_INF(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
  
              slot.callback_on_release = [this](int id_slot) {
@@ -2813,7 +2897,7 @@ index 986b2f1..ce56de3 100644
                  queue_tasks.pop_deferred_task(id_slot);
              };
  
-@@ -1383,9 +1521,10 @@ private:
+@@ -1383,9 +1532,10 @@ private:
  
          bool update_cache = false;
  
@@ -2827,7 +2911,7 @@ index 986b2f1..ce56de3 100644
  
              for (server_slot & slot : slots) {
                  // skip the slot if it is not available
-@@ -1393,29 +1532,41 @@ private:
+@@ -1393,29 +1543,41 @@ private:
                      continue;
                  }
  
@@ -2889,7 +2973,7 @@ index 986b2f1..ce56de3 100644
  
                  // if we are about to lose a large portion of the existing context - save it in the prompt cache
                  if (f_keep < 0.5f) {
-@@ -1443,12 +1594,16 @@ private:
+@@ -1443,12 +1605,16 @@ private:
  
              if (ret != nullptr) {
                  SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
@@ -2906,7 +2990,7 @@ index 986b2f1..ce56de3 100644
              update_cache = update_cache && prompt_cache;
  
              // cache prompts only for completion tasks
-@@ -1469,41 +1624,114 @@ private:
+@@ -1469,41 +1635,114 @@ private:
  
                  SRV_INF("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
              }
@@ -3042,7 +3126,7 @@ index 986b2f1..ce56de3 100644
      }
  
      std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
-@@ -1519,7 +1747,234 @@ private:
+@@ -1519,7 +1758,234 @@ private:
          return output;
      }
  
@@ -3277,7 +3361,7 @@ index 986b2f1..ce56de3 100644
          // process per-request lora adapters
          if (!task.params.lora.empty()) {
              auto task_loras = construct_lora_list(task.params.lora);
-@@ -1590,6 +2045,8 @@ private:
+@@ -1590,6 +2056,8 @@ private:
              return false;
          }
  
@@ -3286,7 +3370,7 @@ index 986b2f1..ce56de3 100644
          SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
  
          // initialize samplers
-@@ -1629,9 +2086,10 @@ private:
+@@ -1629,9 +2097,10 @@ private:
  
          slot.task = std::make_unique<const server_task>(std::move(task));
  
@@ -3298,7 +3382,7 @@ index 986b2f1..ce56de3 100644
  
          // reset server kill-switch counter
          n_empty_consecutive = 0;
-@@ -1966,6 +2424,7 @@ private:
+@@ -1966,6 +2435,7 @@ private:
  
          res->generation_params = slot.task->params; // copy the parameters
  
@@ -3306,7 +3390,7 @@ index 986b2f1..ce56de3 100644
          queue_results.send(std::move(res));
      }
  
-@@ -2214,12 +2673,14 @@ private:
+@@ -2214,12 +2684,14 @@ private:
                              if (!slot.is_processing()) {
                                  SLT_INF(slot, "%s", "saving idle slot to prompt cache\n");
  
@@ -3323,7 +3407,7 @@ index 986b2f1..ce56de3 100644
                                      // [TAG_IDLE_SLOT_CLEAR]
                                      slot.prompt_clear(false);
                                  }
-@@ -2301,6 +2762,7 @@ private:
+@@ -2301,6 +2773,7 @@ private:
                      res->t_start             = metrics.t_start;
  
                      res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
@@ -3331,7 +3415,7 @@ index 986b2f1..ce56de3 100644
                      res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
                      res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
                      res->t_tokens_generation_total       = metrics.t_tokens_generation_total;
-@@ -2308,12 +2770,95 @@ private:
+@@ -2308,12 +2781,95 @@ private:
                      res->n_tokens_max = metrics.n_tokens_max;
  
                      res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
@@ -3427,7 +3511,7 @@ index 986b2f1..ce56de3 100644
  
                      if (task.metrics_reset_bucket) {
                          metrics.reset_bucket();
-@@ -2479,7 +3024,7 @@ private:
+@@ -2479,7 +3035,7 @@ private:
          }
      }
  
@@ -3436,7 +3520,7 @@ index 986b2f1..ce56de3 100644
          // check if all slots are idle
          {
              bool all_idle = true;
-@@ -2494,7 +3039,7 @@ private:
+@@ -2494,7 +3050,7 @@ private:
              if (all_idle) {
                  SRV_INF("%s", "all slots are idle\n");
  
@@ -3445,7 +3529,7 @@ index 986b2f1..ce56de3 100644
              }
          }
  
-@@ -2509,7 +3054,7 @@ private:
+@@ -2509,7 +3065,7 @@ private:
          // apply context-shift if needed
          // TODO: simplify and improve
          for (server_slot & slot : slots) {
@@ -3454,18 +3538,18 @@ index 986b2f1..ce56de3 100644
                  if (!params_base.ctx_shift) {
                      // this check is redundant (for good)
                      // we should never get here, because generation should already stopped in process_token()
-@@ -2572,6 +3117,10 @@ private:
+@@ -2572,6 +3128,10 @@ private:
              }
          }
  
 +        return true;
 +    }
 +
-+    void plan_execute_iteration() {
++    void plan_execute_iteration(server_inference_iteration & iteration) {
          // start populating the batch for this iteration
          common_batch_clear(batch);
  
-@@ -2583,7 +3132,7 @@ private:
+@@ -2583,7 +3143,7 @@ private:
  
          // determine which slots are generating and drafting
          for (auto & slot : slots) {
@@ -3474,7 +3558,7 @@ index 986b2f1..ce56de3 100644
                  continue;
              }
  
-@@ -2602,7 +3151,9 @@ private:
+@@ -2602,7 +3162,9 @@ private:
                  const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                  const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
  
@@ -3485,7 +3569,7 @@ index 986b2f1..ce56de3 100644
  
                  if (n_draft_max > 0) {
                      GGML_ASSERT(slot.can_speculate());
-@@ -2643,7 +3194,12 @@ private:
+@@ -2643,7 +3205,12 @@ private:
  
          // generate the actual drafts (if any)
          {
@@ -3498,7 +3582,7 @@ index 986b2f1..ce56de3 100644
          }
  
          // make checkpoints if needed
-@@ -2705,6 +3261,55 @@ private:
+@@ -2705,6 +3272,53 @@ private:
          int32_t n_batch  = llama_n_batch(ctx_tgt);
          int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
  
@@ -3532,8 +3616,6 @@ index 986b2f1..ce56de3 100644
 +                    total > cached ? total - cached : 0)});
 +        }
 +
-+        auto & iteration = inference_engine.begin_prepared_iteration();
-+
 +        const size_t decode_tokens_planned = (size_t) batch.n_tokens;
 +        const int64_t iteration_started_us = ggml_time_us();
 +        const auto prefill_plan = inference_engine.scheduler().plan_prefill(
@@ -3554,7 +3636,7 @@ index 986b2f1..ce56de3 100644
          float  alora_scale       = -1.0f;
          size_t alora_disabled_id = 0;
  
-@@ -2721,24 +3326,33 @@ private:
+@@ -2721,24 +3335,33 @@ private:
                  }
  
                  // check if this is a child slot
@@ -3592,7 +3674,7 @@ index 986b2f1..ce56de3 100644
  
                          SLT_TRC(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
                                  slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
-@@ -3110,7 +3724,9 @@ private:
+@@ -3110,7 +3733,9 @@ private:
                      const bool n_before_user_known = n_before_user > 0;
  
                      // add prompt tokens for processing in the current batch
@@ -3603,7 +3685,7 @@ index 986b2f1..ce56de3 100644
                          // get next token to process
                          llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                          if (cur_tok == LLAMA_TOKEN_NULL) {
-@@ -3173,7 +3789,8 @@ private:
+@@ -3173,7 +3798,8 @@ private:
  
                      // entire prompt has been processed
                      if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
@@ -3613,7 +3695,7 @@ index 986b2f1..ce56de3 100644
  
                          GGML_ASSERT(batch.n_tokens > 0);
  
-@@ -3249,6 +3866,13 @@ private:
+@@ -3249,6 +3875,13 @@ private:
  
          SRV_DBG("decoding batch, n_tokens = %d\n", batch.n_tokens);
  
@@ -3627,7 +3709,7 @@ index 986b2f1..ce56de3 100644
          auto accept_special_token = [&](server_slot & slot, llama_token token) {
              return params_base.special ||
                  slot.task->params.sampling.preserved_tokens.find(token) != slot.task->params.sampling.preserved_tokens.end();
-@@ -3294,7 +3918,8 @@ private:
+@@ -3294,7 +3927,8 @@ private:
                  batch.logits   + i,
              };
  
@@ -3637,7 +3719,7 @@ index 986b2f1..ce56de3 100644
  
              metrics.on_decoded(slots);
  
-@@ -3320,6 +3945,7 @@ private:
+@@ -3320,6 +3954,7 @@ private:
                      // TODO: handle ret == 2 (abort) when we start aborting
  
                      if (!err.empty()) {
@@ -3645,7 +3727,7 @@ index 986b2f1..ce56de3 100644
                          SRV_ERR("%s i = %d, n_batch = %d, ret = %d\n", err.c_str(), i, n_batch, ret);
  
                          for (auto & slot : slots) {
-@@ -3394,6 +4020,7 @@ private:
+@@ -3394,6 +4029,7 @@ private:
              //}
              if (!common_speculative_process(spec.get(), batch_view)) {
                  SRV_ERR("%s", "failed to process speculative batch\n");
@@ -3653,7 +3735,7 @@ index 986b2f1..ce56de3 100644
  
                  // TODO: handle error
                  break;
-@@ -3407,10 +4034,11 @@ private:
+@@ -3407,10 +4043,11 @@ private:
  
              // handle `n_cmpl > 1` tasks - when the main prompt is processed, activate all child tasks too
              for (auto & slot : slots) {
@@ -3667,7 +3749,7 @@ index 986b2f1..ce56de3 100644
                              children.push_back(&other);
                          }
                      }
-@@ -3420,17 +4048,19 @@ private:
+@@ -3420,17 +4057,19 @@ private:
                      for (auto & child : children) {
                          SLT_INF(slot, " - copying state to child %d\n", child->id);
  
@@ -3690,7 +3772,7 @@ index 986b2f1..ce56de3 100644
                      if (slot.task->params.stream && slot.task->params.return_progress) {
                          send_partial_response(slot, {}, true);
                      }
-@@ -3440,7 +4070,7 @@ private:
+@@ -3440,7 +4079,7 @@ private:
                      continue; // continue loop of slots
                  }
  
@@ -3699,7 +3781,7 @@ index 986b2f1..ce56de3 100644
                      if (slot.task->type == SERVER_TASK_TYPE_EMBEDDING) {
                          // prompt evaluated for embedding
                          send_embedding(slot, batch_view);
-@@ -3459,12 +4089,12 @@ private:
+@@ -3459,12 +4098,12 @@ private:
                      GGML_ASSERT(slot.task->need_sampling());
  
                      // prompt evaluated for next-token prediction
@@ -3714,7 +3796,7 @@ index 986b2f1..ce56de3 100644
                      continue; // continue loop of slots
                  }
  
-@@ -3517,7 +4147,8 @@ private:
+@@ -3517,7 +4156,8 @@ private:
  
              // speculative decoding - main model sample and accept
              for (auto & slot : slots) {
@@ -3724,7 +3806,7 @@ index 986b2f1..ce56de3 100644
                      continue;
                  }
  
-@@ -3593,6 +4224,13 @@ private:
+@@ -3593,6 +4233,13 @@ private:
  
                  // update how many tokens out of those tested were accepted
                  slot.n_draft_accepted += ids.size() - 1;
@@ -3738,7 +3820,7 @@ index 986b2f1..ce56de3 100644
  
                  // add accepted tokens to the prompt
                  slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - n_draft);
-@@ -3631,11 +4269,38 @@ private:
+@@ -3631,11 +4278,39 @@ private:
  
                  SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) ids.size() - 1, (int) n_draft, slot.prompt.n_tokens());
              }
@@ -3746,13 +3828,14 @@ index 986b2f1..ce56de3 100644
          }
 +        });
 +
-+        commit_iteration(iteration, decode_tokens_planned, prefill_plan, iteration_started_us);
++        GGML_ASSERT(inference_engine.commit_with(iteration, [&]() {
++            commit_iteration(decode_tokens_planned, prefill_plan, iteration_started_us);
++        }) || iteration.is_aborted());
  
          SRV_DBG("%s", "run slots completed\n");
      }
  
 +    void commit_iteration(
-+            server_inference_iteration & iteration,
 +            size_t decode_tokens_planned,
 +            const server_prefill_plan & prefill_plan,
 +            int64_t iteration_started_us) {
@@ -3763,21 +3846,21 @@ index 986b2f1..ce56de3 100644
 +            prefill_plan.allocations.size(),
 +        });
 +        synchronize_kv_runtime();
-+        if (!iteration.is_aborted()) {
-+            GGML_ASSERT(inference_engine.commit(iteration));
-+        }
-+        GGML_ASSERT(iteration.validate().empty());
 +    }
 +
 +    void update_slots() {
-+        if (!prepare_iteration()) return;
-+        plan_execute_iteration();
++        inference_engine.step(
++                [this]() { return prepare_iteration(); },
++                [this](server_inference_iteration & iteration) {
++                    plan_execute_iteration(iteration);
++                    GGML_ASSERT(iteration.validate().empty());
++                });
 +    }
 +
      int get_slot_n_ctx() {
          return slots.back().n_ctx;
      }
-@@ -4127,6 +4792,151 @@ void server_routes::init_routes() {
+@@ -4127,6 +4802,151 @@ void server_routes::init_routes() {
                      {"name",  "prompt_tokens_total"},
                      {"help",  "Number of prompt tokens processed."},
                      {"value",  (uint64_t) res_task->n_prompt_tokens_processed_total}
@@ -3929,7 +4012,7 @@ index 986b2f1..ce56de3 100644
              }, {
                      {"name",  "prompt_seconds_total"},
                      {"help",  "Prompt process time"},
-@@ -4149,6 +4959,18 @@ void server_routes::init_routes() {
+@@ -4149,6 +4969,18 @@ void server_routes::init_routes() {
                      {"value",  res_task->n_tokens_max}
              }}},
              {"gauge", {{
@@ -3948,7 +4031,7 @@ index 986b2f1..ce56de3 100644
                      {"name",  "prompt_tokens_seconds"},
                      {"help",  "Average prompt throughput in tokens/s."},
                      {"value",  res_task->n_prompt_tokens_processed ? 1.e3 / res_task->t_prompt_processing * res_task->n_prompt_tokens_processed : 0.}
-@@ -4156,6 +4978,115 @@ void server_routes::init_routes() {
+@@ -4156,6 +4988,115 @@ void server_routes::init_routes() {
                      {"name",  "predicted_tokens_seconds"},
                      {"help",  "Average generation throughput in tokens/s."},
                      {"value",  res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}
@@ -4064,7 +4147,7 @@ index 986b2f1..ce56de3 100644
              },{
                      {"name",  "requests_processing"},
                      {"help",  "Number of requests processing."},
-@@ -4188,6 +5119,38 @@ void server_routes::init_routes() {
+@@ -4188,6 +5129,38 @@ void server_routes::init_routes() {
              }
          }
  
@@ -4105,28 +4188,72 @@ index 986b2f1..ce56de3 100644
          res->status = 200;
 diff --git a/tools/server/server-inference-engine.cpp b/tools/server/server-inference-engine.cpp
 new file mode 100644
-index 0000000..8a8f4eb
+index 0000000..1b63815
 --- /dev/null
 +++ b/tools/server/server-inference-engine.cpp
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,96 @@
 +#include "server-inference-engine.h"
 +
 +#include <stdexcept>
++#include <chrono>
++#include <fstream>
 +
 +server_inference_engine::server_inference_engine() :
 +        runtime_(server_create_llama_runtime()) {
 +}
 +
++server_inference_engine::~server_inference_engine() {
++    try { flush_trace(); } catch (...) {}
++}
++
++uint64_t server_inference_engine::clock_us() {
++    return (uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
++            std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++
++void server_inference_engine::record_trace(
++        const char * name, uint64_t started, uint64_t finished) {
++    if (trace_output_.empty()) return;
++    trace_events_.push_back({name, started, finished - started});
++}
++
++void server_inference_engine::configure_trace(std::filesystem::path output) {
++    trace_output_ = std::move(output);
++    trace_events_.clear();
++}
++
++void server_inference_engine::flush_trace() const {
++    if (trace_output_.empty()) return;
++    if (trace_output_.has_parent_path()) {
++        std::filesystem::create_directories(trace_output_.parent_path());
++    }
++    std::ofstream output(trace_output_, std::ios::trunc);
++    output.exceptions(std::ios::badbit | std::ios::failbit);
++    output << "{\"traceEvents\":[";
++    for (size_t i = 0; i < trace_events_.size(); ++i) {
++        const auto & event = trace_events_[i];
++        if (i) output << ',';
++        output << "{\"name\":\"" << event.name
++               << "\",\"cat\":\"inference-engine\",\"ph\":\"X\",\"pid\":1,\"tid\":1,\"ts\":"
++               << event.started_us << ",\"dur\":" << event.duration_us << '}';
++    }
++    output << "]}";
++}
++
 +server_inference_iteration & server_inference_engine::begin_prepared_iteration() {
 +    iteration_ = server_inference_iteration{};
 +    if (!iteration_.prepare()) throw std::logic_error("failed to prepare inference iteration");
++    plan_started_us_ = clock_us();
 +    return iteration_;
 +}
 +
 +bool server_inference_engine::publish_plan(
 +        server_inference_iteration & iteration,
 +        server_iteration_plan_summary plan) {
-+    return &iteration == &iteration_ && iteration.plan(plan);
++    if (&iteration != &iteration_ || !iteration.plan(plan)) return false;
++    const uint64_t finished = clock_us();
++    record_trace("plan", plan_started_us_, finished);
++    return true;
 +}
 +
 +bool server_inference_engine::commit(server_inference_iteration & iteration) {
@@ -4163,10 +4290,10 @@ index 0000000..8a8f4eb
 +}
 diff --git a/tools/server/server-inference-engine.h b/tools/server/server-inference-engine.h
 new file mode 100644
-index 0000000..926e44d
+index 0000000..d8ddb1a
 --- /dev/null
 +++ b/tools/server/server-inference-engine.h
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,154 @@
 +#pragma once
 +
 +#include "server-inference-iteration.h"
@@ -4178,8 +4305,12 @@ index 0000000..926e44d
 +#include "server-speculation-controller.h"
 +
 +#include <memory>
++#include <filesystem>
 +#include <stdexcept>
++#include <string>
++#include <type_traits>
 +#include <utility>
++#include <vector>
 +
 +enum slot_state : uint8_t {
 +    SLOT_STATE_IDLE,
@@ -4213,20 +4344,72 @@ index 0000000..926e44d
 +class server_inference_engine {
 +public:
 +    server_inference_engine();
++    ~server_inference_engine();
 +
 +    server_inference_iteration & begin_prepared_iteration();
 +    bool publish_plan(server_inference_iteration & iteration, server_iteration_plan_summary plan);
++
++    // Owns the production iteration order. The callbacks adapt llama-server's
++    // protocol/model objects, but cannot reorder the transaction phases.
++    template <typename Prepare, typename PlanExecute>
++    bool step(Prepare && prepare, PlanExecute && plan_execute) {
++        if (!measure("prepare", std::forward<Prepare>(prepare))) return false;
++        auto & iteration = begin_prepared_iteration();
++        try {
++            std::forward<PlanExecute>(plan_execute)(iteration);
++        } catch (...) {
++            iteration.abort("iteration callback raised an exception");
++            flush_trace();
++            throw;
++        }
++        flush_trace();
++        return !iteration.is_aborted();
++    }
 +
 +    template <typename Execute>
 +    void execute(server_inference_iteration & iteration, Execute && execute_batch) {
 +        if (&iteration != &iteration_ || !iteration.begin_execute()) {
 +            throw std::logic_error("invalid inference-engine execute transition");
 +        }
-+        std::forward<Execute>(execute_batch)();
++        measure("execute", std::forward<Execute>(execute_batch));
 +    }
 +
 +    bool commit(server_inference_iteration & iteration);
++
++    template <typename BeforeCommit>
++    bool commit_with(server_inference_iteration & iteration, BeforeCommit && before_commit) {
++        return measure("commit", [&]() {
++            std::forward<BeforeCommit>(before_commit)();
++            if (iteration.is_aborted()) return false;
++            return commit(iteration);
++        });
++    }
 +    bool transition(server_sequence_state & sequence, slot_state next);
++    void configure_trace(std::filesystem::path output);
++    void flush_trace() const;
++
++    template <typename Operation>
++    auto measure(const char * name, Operation && operation) -> decltype(operation()) {
++        const uint64_t started = clock_us();
++        if constexpr (std::is_void_v<decltype(operation())>) {
++            try {
++                std::forward<Operation>(operation)();
++                record_trace(name, started, clock_us());
++            } catch (...) {
++                record_trace(name, started, clock_us());
++                throw;
++            }
++        } else {
++            try {
++                auto result = std::forward<Operation>(operation)();
++                record_trace(name, started, clock_us());
++                return result;
++            } catch (...) {
++                record_trace(name, started, clock_us());
++                throw;
++            }
++        }
++    }
 +    server_engine_snapshot snapshot() const;
 +
 +    server_inference_scheduler & scheduler() { return scheduler_; }
@@ -4253,6 +4436,17 @@ index 0000000..926e44d
 +    std::unique_ptr<server_kv_swap_store> swap_store_;
 +    std::unique_ptr<server_runtime_adapter> runtime_;
 +    server_inference_iteration iteration_;
++    struct trace_event {
++        std::string name;
++        uint64_t started_us = 0;
++        uint64_t duration_us = 0;
++    };
++    std::filesystem::path trace_output_;
++    std::vector<trace_event> trace_events_;
++    uint64_t plan_started_us_ = 0;
++
++    static uint64_t clock_us();
++    void record_trace(const char * name, uint64_t started, uint64_t finished);
 +};
 diff --git a/tools/server/server-inference-iteration.cpp b/tools/server/server-inference-iteration.cpp
 new file mode 100644
@@ -4371,10 +4565,10 @@ index 0000000..a07cccb
 +};
 diff --git a/tools/server/server-inference-scheduler.cpp b/tools/server/server-inference-scheduler.cpp
 new file mode 100644
-index 0000000..dd104e7
+index 0000000..cc179ff
 --- /dev/null
 +++ b/tools/server/server-inference-scheduler.cpp
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,196 @@
 +#include "server-inference-scheduler.h"
 +
 +#include <algorithm>
@@ -4451,7 +4645,7 @@ index 0000000..dd104e7
 +    server_prefill_plan plan;
 +    plan.token_budget = token_budget;
 +    const size_t chunk_size = config_.adaptive_prefill
-+            ? adaptive_chunk_size_
++            ? (config_.adaptive_greedy_fallback ? 0 : adaptive_chunk_size_)
 +            : config_.prefill_chunk_size;
 +    plan.effective_chunk_size = chunk_size;
 +    if (token_budget == 0 || candidates.empty()) {
@@ -4518,7 +4712,8 @@ index 0000000..dd104e7
 +    observations_++;
 +    cost_model_.observe(
 +            observation.decode_tokens, observation.prefill_tokens, observation.elapsed_ms);
-+    if (!config_.adaptive_prefill || observation.prefill_tokens == 0) return;
++    if (!config_.adaptive_prefill || observation.prefill_tokens == 0 ||
++            config_.adaptive_greedy_fallback) return;
 +
 +    if (observation.decode_tokens == 0) {
 +        // No latency-sensitive decode work is waiting: consume prompt at the
@@ -4562,7 +4757,9 @@ index 0000000..dd104e7
 +server_scheduler_state server_inference_scheduler::state() const {
 +    return {
 +        config_.adaptive_prefill,
-+        config_.adaptive_prefill ? adaptive_chunk_size_ : config_.prefill_chunk_size,
++        config_.adaptive_prefill
++                ? (config_.adaptive_greedy_fallback ? 0 : adaptive_chunk_size_)
++                : config_.prefill_chunk_size,
 +        iteration_latency_ewma_ms_,
 +        observations_,
 +        cost_model_.state(),
@@ -4570,10 +4767,10 @@ index 0000000..dd104e7
 +}
 diff --git a/tools/server/server-inference-scheduler.h b/tools/server/server-inference-scheduler.h
 new file mode 100644
-index 0000000..44a75e3
+index 0000000..fc732d7
 --- /dev/null
 +++ b/tools/server/server-inference-scheduler.h
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,99 @@
 +#pragma once
 +
 +#include "server-model-cost-model.h"
@@ -4591,6 +4788,7 @@ index 0000000..44a75e3
 +    size_t prefill_chunk_min     = 16;
 +    size_t prefill_chunk_max     = 512;
 +    double target_iteration_ms   = 25.0;
++    bool   adaptive_greedy_fallback = false;
 +};
 +
 +struct server_slot_candidate {

@@ -1,3 +1,5 @@
+"""Archived prototype executor; production execution is owned by the C++ engine."""
+
 from __future__ import annotations
 
 import json

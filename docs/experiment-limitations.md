@@ -4,7 +4,7 @@
 
 ## Adaptive Prefill
 
-最初仅按 iteration latency EWMA 缩放 chunk 的控制器在 CUDA 上把 chunk 压到 16，P95 从 greedy 的 685.88 ms 恶化到 950.70 ms。加入在线 decode/prefill 成本模型后避免了坍缩，但两个中间版本仍慢于 greedy 或 fixed-256。最终版本在当前 CPU trace 上优于两个固定候选，在 CUDA 上优于错误 fixed 参数的中位数，但仍未击败 greedy 中位数和 fixed-256 P95。因此项目不宣称 adaptive 对所有 workload 最优。
+最初仅按 iteration latency EWMA 缩放 chunk 的控制器在 CUDA 上把 chunk 压到 16，P95 从 greedy 的 685.88 ms 恶化到 950.70 ms。加入在线 decode/prefill 成本模型后避免了坍缩，但中间版本仍会在 CPU 上劣于 greedy 和所有 fixed 候选。最终策略按 backend bucket 决策：CPU 在尚无稳定正收益时选择候选集合中的 `chunk=0` greedy 安全动作，CUDA 继续在线选择 chunk；A/B 脚本在 adaptive 比错误 fixed 候选回归超过 2% 时直接失败。这是 safety fallback，不应描述为 CPU 学出了更优 chunk。
 
 完整迭代数据见 `results/adaptive-prefill-tuning-history.csv`，最终三次 fresh-process 原始汇总见 `results/adaptive_prefill_trials.csv`。
 
@@ -25,3 +25,11 @@
 ## Compute Sanitizer
 
 本机为 Windows WDDM，首次运行 Compute Sanitizer 前需要管理员启用 debugger interface。2026-07-31 启用后，固定 sm_89 CUDA 正确性矩阵在 memcheck 下得到 `ERROR SUMMARY: 0 errors`，在 racecheck 下得到 `0 hazards displayed (0 errors, 0 warnings)`。此外仍保留 GPU K/V canary guard、随机映射矩阵、每轮完整性校验及 CUDA allocation/pinned allocation 故障注入。该结论限定当前驱动、硬件和测试矩阵，不能代替其他平台的复验。
+
+## Mixed Prefill / Decode
+
+CPU cacheflow 在两轮独立的 3-trial workload 中都改善 TTFT P95、TPOT P95、latency P95 和 aggregate TPS，但 median TTFT 曾退化。CUDA 结论不稳定：第一轮 latency P95 从 524.16 ms 退化到 610.14 ms、aggregate TPS 从 278.85 降到 249.33；紧接着的复验轮却得到 latency P95 602.19 -> 556.07 ms、TPS 241.95 -> 268.48。两轮反号说明 3 trials 在 laptop GPU 上不足以支持“稳定提升”的强结论，CPU 策略也不能直接外推 GPU batching；当前 CUDA 路径应保留 upstream 默认或增加 backend/workload-aware gating。当前请求级数据位于 `results/mixed_workload_trials.csv`，跨轮汇总保存在 `results/mixed_workload_repeated_runs.csv`。
+
+## Profiler 权限
+
+Windows Performance Recorder 的 sampled-stack profile 因当前非管理员会话缺少 `SeSystemProfilePrivilege` 而失败，VSDiagnostics attach 也未建立可用 session。项目保留该失败边界，并使用 production Engine 自带的 Chrome/Perfetto complete-event trace 生成 `results/engine-flame.svg`。这张图只能归因 prepare/plan/execute/commit phase duration，不能替代 CPU sampled stack、Nsight Systems timeline 或 Nsight Compute kernel 分析。

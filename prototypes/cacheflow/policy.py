@@ -1,3 +1,5 @@
+"""Archived prototype policy; production scheduling is implemented in C++."""
+
 from __future__ import annotations
 
 from .domain import RequestRecord, SchedulingDecision, SlotRecord

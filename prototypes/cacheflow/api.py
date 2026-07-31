@@ -1,3 +1,5 @@
+"""Archived prototype HTTP API; production serving is implemented in C++."""
+
 from __future__ import annotations
 
 import json

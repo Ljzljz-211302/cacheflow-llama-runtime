@@ -1,3 +1,5 @@
+"""Archived prototype checkpoint store; production swap is implemented in C++."""
+
 from __future__ import annotations
 
 import hashlib
