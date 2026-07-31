@@ -91,6 +91,25 @@ def main() -> None:
                         if line.startswith(f"llamacpp:{metric}_count ")), "")
                 if not count_line or float(count_line.split()[-1]) < 2:
                     raise AssertionError(f"latency histogram did not observe both requests: {metric}")
+            required_metrics = {
+                "counter": (
+                    "scheduler_iterations_total", "kv_copy_on_write_total",
+                    "kv_evicted_blocks_total", "kv_swap_bytes_total", "kv_restore_seconds",
+                    "cuda_kv_kernel_launches_total", "cuda_kv_backend_errors_total",
+                    "speculation_disabled_total",
+                ),
+                "gauge": (
+                    "batch_tokens", "batch_sequences", "prefill_starvation_ms",
+                    "kv_prefix_hit_ratio", "kv_blocks_used", "kv_blocks_free",
+                    "kv_shared_blocks", "adaptive_draft_length",
+                    "speculation_net_saved_ms",
+                ),
+            }
+            for metric_type, names in required_metrics.items():
+                for metric in names:
+                    declaration = f"# TYPE llamacpp:{metric} {metric_type}"
+                    if declaration not in prometheus:
+                        raise AssertionError(f"missing native {metric_type}: {metric}")
         finally:
             process.terminate()
             try:

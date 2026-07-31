@@ -18,19 +18,67 @@ index 9e7b125..6195e3f 100644
  license_add_file("llama.cpp" "LICENSE")
  
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 8382c1d..8ed8fc2 100644
+index 8382c1d..0e1d77a 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -3256,6 +3256,75 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3256,6 +3256,132 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.slot_prompt_similarity = std::stof(value);
          }
      ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--scheduler-policy"}, "upstream|cacheflow",
++        "select upstream-compatible scheduling or the complete CacheFlow policy set (default: upstream)",
++        [](common_params & params, const std::string & value) {
++            if (value == "upstream") {
++                params.scheduler_policy = value;
++                params.slot_cache_eviction_penalty = 0.0f;
++                params.prefill_policy = "greedy";
++                params.prefill_chunk_size = 0;
++                params.prefill_chunk_adaptive = false;
++                params.kv_block_runtime = false;
++                params.spec_policy = "fixed";
++                params.speculative_adaptive = false;
++            } else if (value == "cacheflow") {
++                params.scheduler_policy = value;
++                params.slot_cache_eviction_penalty = 0.25f;
++                params.prefill_policy = "adaptive";
++                params.prefill_chunk_adaptive = true;
++                params.kv_block_runtime = true;
++                params.spec_policy = "adaptive";
++                params.speculative_adaptive = true;
++            } else {
++                throw std::invalid_argument("scheduler policy must be upstream or cacheflow");
++            }
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--prefill-policy"}, "greedy|fixed|adaptive",
++        "select prefill control independently (fixed uses --prefill-chunk-size)",
++        [](common_params & params, const std::string & value) {
++            params.scheduler_policy = "cacheflow";
++            if (value == "greedy") {
++                params.prefill_policy = value;
++                params.prefill_chunk_size = 0;
++                params.prefill_chunk_adaptive = false;
++            } else if (value == "fixed") {
++                params.prefill_policy = value;
++                if (params.prefill_chunk_size == 0) params.prefill_chunk_size = 128;
++                params.prefill_chunk_adaptive = false;
++            } else if (value == "adaptive") {
++                params.prefill_policy = value;
++                params.prefill_chunk_adaptive = true;
++            } else {
++                throw std::invalid_argument("prefill policy must be greedy, fixed, or adaptive");
++            }
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
 +        {"--slot-cache-eviction-penalty"}, "PENALTY",
 +        string_format(
 +            "penalty applied to cached tokens evicted during slot selection (default: %.2f; 0.0 preserves LCP behavior)",
 +            params.slot_cache_eviction_penalty),
 +        [](common_params & params, const std::string & value) {
++            params.scheduler_policy = "cacheflow";
 +            params.slot_cache_eviction_penalty = std::stof(value);
 +            if (params.slot_cache_eviction_penalty < 0.0f) {
 +                throw std::invalid_argument("slot cache eviction penalty must be non-negative");
@@ -40,7 +88,10 @@ index 8382c1d..8ed8fc2 100644
 +    add_opt(common_arg(
 +        {"--kv-block-runtime"},
 +        "enable transactional block-level prefix sharing and residency tracking",
-+        [](common_params & params) { params.kv_block_runtime = true; }
++        [](common_params & params) {
++            params.scheduler_policy = "cacheflow";
++            params.kv_block_runtime = true;
++        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
 +        {"--kv-block-size"}, "N",
@@ -62,12 +113,18 @@ index 8382c1d..8ed8fc2 100644
 +                throw std::invalid_argument("prefill chunk size must be non-negative");
 +            }
 +            params.prefill_chunk_size = value;
++            params.scheduler_policy = value == 0 ? params.scheduler_policy : "cacheflow";
++            params.prefill_policy = value == 0 ? "greedy" : "fixed";
 +        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
 +        {"--prefill-chunk-adaptive"},
 +        "adapt prefill chunk size to measured iteration latency and decode pressure",
-+        [](common_params & params) { params.prefill_chunk_adaptive = true; }
++        [](common_params & params) {
++            params.scheduler_policy = "cacheflow";
++            params.prefill_policy = "adaptive";
++            params.prefill_chunk_adaptive = true;
++        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
 +        {"--prefill-chunk-min"}, "N",
@@ -97,14 +154,30 @@ index 8382c1d..8ed8fc2 100644
      add_opt(common_arg(
          {"--lora-init-without-apply"},
          string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),
-@@ -3413,6 +3482,37 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3413,6 +3539,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
  
      //
      // speculative parameters
 +    add_opt(common_arg(
++        {"--spec-policy"}, "fixed|adaptive",
++        "select fixed or feedback-controlled speculative draft length",
++        [](common_params & params, const std::string & value) {
++            params.scheduler_policy = "cacheflow";
++            if (value != "fixed" && value != "adaptive") {
++                throw std::invalid_argument("spec policy must be fixed or adaptive");
++            }
++            params.spec_policy = value;
++            params.speculative_adaptive = value == "adaptive";
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
 +        {"--speculative-adaptive"},
 +        "adapt draft length per sequence using acceptance and KV pressure",
-+        [](common_params & params) { params.speculative_adaptive = true; }
++        [](common_params & params) {
++            params.scheduler_policy = "cacheflow";
++            params.spec_policy = "adaptive";
++            params.speculative_adaptive = true;
++        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
 +        {"--speculative-disable-acceptance"}, "RATIO",
@@ -136,13 +209,16 @@ index 8382c1d..8ed8fc2 100644
  
      add_opt(common_arg(
 diff --git a/common/common.h b/common/common.h
-index 0b284cb..903f701 100644
+index 0b284cb..66356a1 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -653,6 +653,18 @@ struct common_params {
+@@ -653,6 +653,21 @@ struct common_params {
      std::string media_path; // path to directory for loading media files
  
      float slot_prompt_similarity = 0.1f;
++    std::string scheduler_policy = "upstream";
++    std::string prefill_policy = "greedy";
++    std::string spec_policy = "fixed";
 +    float slot_cache_eviction_penalty = 0.0f;
 +    int32_t prefill_chunk_size = 0;
 +    bool    prefill_chunk_adaptive = false;
@@ -158,18 +234,650 @@ index 0b284cb..903f701 100644
  
      // batched-bench params
      bool is_pp_shared   = false;
+diff --git a/include/llama.h b/include/llama.h
+index 27e4806..3a609a5 100644
+--- a/include/llama.h
++++ b/include/llama.h
+@@ -730,6 +730,33 @@ extern "C" {
+                  llama_pos p0,
+                  llama_pos p1);
+ 
++    // CacheFlow extension: asynchronously stage/restore a sequence's real KV
++    // stream through pinned host memory. Returns false for unsupported memory
++    // layouts (including unified/recurrent caches), allowing recomputation.
++    LLAMA_API bool llama_memory_seq_can_swap_cuda(llama_memory_t mem, llama_seq_id seq_id);
++    LLAMA_API bool llama_memory_seq_swap_out_cuda(llama_memory_t mem, llama_seq_id seq_id);
++    LLAMA_API bool llama_memory_seq_swap_in_cuda(llama_memory_t mem, llama_seq_id seq_id);
++    LLAMA_API void llama_memory_seq_swap_erase_cuda(llama_memory_t mem, llama_seq_id seq_id);
++
++    struct llama_cacheflow_cuda_stats {
++        uint64_t kernel_launches;
++        uint64_t blocks_copied;
++        uint64_t copy_bytes;
++        uint64_t swap_bytes;
++        uint64_t copy_microseconds;
++        uint64_t swap_out_microseconds;
++        uint64_t swap_in_microseconds;
++        uint64_t events_waited;
++        uint64_t pinned_bytes_current;
++        uint64_t pinned_bytes_peak;
++        uint64_t backend_errors;
++    };
++
++    // Returns false for memory implementations without the CacheFlow CUDA
++    // adapter. Values are cumulative for the lifetime of the memory object.
++    LLAMA_API bool llama_memory_cacheflow_cuda_stats(
++            llama_memory_t mem, struct llama_cacheflow_cuda_stats * stats);
++
+     // Removes all tokens that do not belong to the specified sequence
+     LLAMA_API void llama_memory_seq_keep(
+             llama_memory_t mem,
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index d15ccfd..eb17aab 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -54,6 +54,13 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
+ 
+ target_link_libraries(llama PUBLIC ggml)
+ 
++if (GGML_CUDA)
++    target_sources(llama PRIVATE llama-kv-cache-paged.cu)
++    target_compile_definitions(llama PRIVATE CACHEFLOW_KV_CUDA)
++    target_link_libraries(llama PRIVATE CUDA::cudart)
++    set_property(TARGET llama PROPERTY CUDA_STANDARD 17)
++endif()
++
+ if (BUILD_SHARED_LIBS)
+     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
+     target_compile_definitions(llama PRIVATE LLAMA_BUILD)
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 168dbab..0b9de81 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -3849,6 +3849,27 @@ void llama_memory_seq_cp(
+     mem->seq_cp(seq_id_src, seq_id_dst, p0, p1);
+ }
+ 
++bool llama_memory_seq_can_swap_cuda(llama_memory_t mem, llama_seq_id seq_id) {
++    return mem && mem->seq_can_swap_cuda(seq_id);
++}
++
++bool llama_memory_seq_swap_out_cuda(llama_memory_t mem, llama_seq_id seq_id) {
++    return mem && mem->seq_swap_out_cuda(seq_id);
++}
++
++bool llama_memory_seq_swap_in_cuda(llama_memory_t mem, llama_seq_id seq_id) {
++    return mem && mem->seq_swap_in_cuda(seq_id);
++}
++
++void llama_memory_seq_swap_erase_cuda(llama_memory_t mem, llama_seq_id seq_id) {
++    if (mem) mem->seq_swap_erase_cuda(seq_id);
++}
++
++bool llama_memory_cacheflow_cuda_stats(
++        llama_memory_t mem, llama_cacheflow_cuda_stats * stats) {
++    return mem && stats && mem->cacheflow_cuda_stats(*stats);
++}
++
+ void llama_memory_seq_keep(
+         llama_memory_t mem,
+           llama_seq_id seq_id) {
+diff --git a/src/llama-kv-cache-paged.cu b/src/llama-kv-cache-paged.cu
+new file mode 100644
+index 0000000..81ea6db
+--- /dev/null
++++ b/src/llama-kv-cache-paged.cu
+@@ -0,0 +1,361 @@
++#include "llama-kv-cache.h"
++
++#include "ggml.h"
++#include "llama-impl.h"
++
++#include <cuda_runtime.h>
++
++#include <algorithm>
++#include <cstdint>
++#include <memory>
++#include <unordered_map>
++#include <utility>
++#include <vector>
++
++namespace {
++
++struct cacheflow_tensor_copy {
++    const uint16_t * source;
++    uint16_t * destination;
++    size_t elements;
++};
++
++struct cacheflow_swap_piece {
++    void * device = nullptr;
++    void * pinned = nullptr;
++    size_t bytes = 0;
++};
++
++struct cacheflow_swap_record {
++    uint32_t stream_id = 0;
++    llama_kv_cells cells;
++    std::vector<cacheflow_swap_piece> pieces;
++    cudaEvent_t ready = nullptr;
++    cudaEvent_t started = nullptr;
++    size_t bytes = 0;
++};
++
++struct cacheflow_swap_store {
++    cudaStream_t stream = nullptr;
++    std::unordered_map<llama_seq_id, std::unique_ptr<cacheflow_swap_record>> records;
++};
++
++std::vector<std::pair<uint32_t, uint32_t>> occupied_ranges(const llama_kv_cells & cells) {
++    std::vector<std::pair<uint32_t, uint32_t>> result;
++    uint32_t begin = 0;
++    bool inside = false;
++    for (uint32_t cell = 0; cell < cells.size(); ++cell) {
++        if (!cells.is_empty(cell) && !inside) {
++            begin = cell;
++            inside = true;
++        } else if (cells.is_empty(cell) && inside) {
++            result.emplace_back(begin, cell);
++            inside = false;
++        }
++    }
++    if (inside) result.emplace_back(begin, cells.size());
++    return result;
++}
++
++__global__ void cacheflow_copy_real_kv_tensors(
++        const cacheflow_tensor_copy * copies,
++        size_t copy_count,
++        size_t max_elements) {
++    const size_t element = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
++    const size_t copy_index = blockIdx.y;
++    if (copy_index >= copy_count || element >= max_elements) return;
++    const auto copy = copies[copy_index];
++    if (element < copy.elements) copy.destination[element] = copy.source[element];
++}
++
++bool cuda_ok(cudaError_t status, const char * operation, llama_cacheflow_cuda_stats * stats = nullptr) {
++    if (status == cudaSuccess) return true;
++    if (stats) stats->backend_errors++;
++    LLAMA_LOG_WARN("CacheFlow CUDA KV adapter %s failed: %s\n",
++            operation, cudaGetErrorString(status));
++    return false;
++}
++
++void release_record(cacheflow_swap_record & record, llama_cacheflow_cuda_stats * stats = nullptr) {
++    if (record.ready) {
++        cudaEventSynchronize(record.ready);
++        cudaEventDestroy(record.ready);
++    }
++    if (record.started) cudaEventDestroy(record.started);
++    for (auto & piece : record.pieces) {
++        if (piece.pinned) cudaFreeHost(piece.pinned);
++    }
++    if (stats) stats->pinned_bytes_current -= std::min<uint64_t>(
++            stats->pinned_bytes_current, record.bytes);
++}
++
++} // namespace
++
++bool llama_kv_cache::seq_can_swap_cuda_impl(llama_seq_id seq_id) const {
++    if (seq_id < 0 || (size_t) seq_id >= seq_to_stream.size() || n_stream <= 1 || other) {
++        return false;
++    }
++    const uint32_t stream_id = seq_to_stream[seq_id];
++    // A physical stream may only be swapped independently when no other
++    // sequence maps to it. Unified KV therefore falls back to recomputation.
++    for (size_t id = 0; id < seq_to_stream.size(); ++id) {
++        if ((llama_seq_id) id != seq_id && seq_to_stream[id] == stream_id) return false;
++    }
++    for (const auto & layer : layers) {
++        const ggml_tensor * tensors[] = { layer.k_stream[stream_id], layer.v_stream[stream_id] };
++        for (const auto * tensor : tensors) {
++            if (!tensor) continue;
++            cudaPointerAttributes attributes{};
++            if (cudaPointerGetAttributes(&attributes, tensor->data) != cudaSuccess ||
++                    attributes.type != cudaMemoryTypeDevice) {
++                cudaGetLastError();
++                return false;
++            }
++        }
++    }
++    return true;
++}
++
++bool llama_kv_cache::seq_swap_out_cuda_impl(llama_seq_id seq_id) {
++    if (!seq_can_swap_cuda_impl(seq_id)) return false;
++    auto * store = static_cast<cacheflow_swap_store *>(paged_cuda_swap_store_);
++    if (!store) {
++        auto owned = std::make_unique<cacheflow_swap_store>();
++        if (!cuda_ok(cudaStreamCreateWithFlags(&owned->stream, cudaStreamNonBlocking),
++                "swap stream create", &cuda_stats_)) return false;
++        store = owned.release();
++        paged_cuda_swap_store_ = store;
++    }
++    seq_swap_erase_cuda_impl(seq_id);
++    auto record = std::make_unique<cacheflow_swap_record>();
++    record->stream_id = seq_to_stream[seq_id];
++    record->cells = v_cells[record->stream_id].cp(0, v_cells[record->stream_id].size());
++    const auto ranges = occupied_ranges(v_cells[record->stream_id]);
++    if (ranges.empty()) return false;
++    bool enqueued = false;
++    if (!cuda_ok(cudaEventCreate(&record->started), "swap start event create", &cuda_stats_) ||
++            !cuda_ok(cudaEventRecord(record->started, store->stream), "swap start event record", &cuda_stats_)) {
++        release_record(*record, &cuda_stats_);
++        return false;
++    }
++    for (const auto & layer : layers) {
++        ggml_tensor * tensors[] = {
++            layer.k_stream[record->stream_id], layer.v_stream[record->stream_id],
++        };
++        for (auto * tensor : tensors) {
++            if (!tensor) continue;
++            for (const auto & range : ranges) {
++                cacheflow_swap_piece piece;
++                piece.device = static_cast<uint8_t *>(tensor->data) + (size_t) range.first * tensor->nb[1];
++                piece.bytes = (size_t) (range.second - range.first) * tensor->nb[1];
++                if (!cuda_ok(cudaMallocHost(&piece.pinned, piece.bytes), "swap pinned allocation", &cuda_stats_)) {
++                    if (enqueued) cudaStreamSynchronize(store->stream);
++                    release_record(*record, &cuda_stats_);
++                    return false;
++                }
++                record->pieces.push_back(piece);
++                record->bytes += piece.bytes;
++                cuda_stats_.pinned_bytes_current += piece.bytes;
++                cuda_stats_.pinned_bytes_peak = std::max(
++                        cuda_stats_.pinned_bytes_peak, cuda_stats_.pinned_bytes_current);
++                if (!cuda_ok(cudaMemcpyAsync(piece.pinned, piece.device, piece.bytes,
++                        cudaMemcpyDeviceToHost, store->stream), "swap-out tensor copy", &cuda_stats_)) {
++                    cudaStreamSynchronize(store->stream);
++                    release_record(*record, &cuda_stats_);
++                    return false;
++                }
++                enqueued = true;
++            }
++        }
++    }
++    if (record->pieces.empty() ||
++            !cuda_ok(cudaEventCreate(&record->ready), "swap event create", &cuda_stats_) ||
++            !cuda_ok(cudaEventRecord(record->ready, store->stream), "swap-out event record", &cuda_stats_)) {
++        if (enqueued) cudaStreamSynchronize(store->stream);
++        release_record(*record, &cuda_stats_);
++        return false;
++    }
++    const size_t bytes = record->bytes;
++    cuda_stats_.copy_bytes += bytes;
++    cuda_stats_.swap_bytes += bytes;
++    store->records.emplace(seq_id, std::move(record));
++    LLAMA_LOG_INFO("CacheFlow CUDA swapped out sequence %d: stream %u, pinned bytes %zu\n",
++            seq_id, seq_to_stream[seq_id], bytes);
++    return true;
++}
++
++bool llama_kv_cache::seq_swap_in_cuda_impl(llama_seq_id seq_id) {
++    auto * store = static_cast<cacheflow_swap_store *>(paged_cuda_swap_store_);
++    if (!store) return false;
++    const auto found = store->records.find(seq_id);
++    if (found == store->records.end()) return false;
++    auto & record = *found->second;
++    if (!cuda_ok(cudaEventSynchronize(record.ready), "wait swap-out event", &cuda_stats_)) return false;
++    cuda_stats_.events_waited++;
++    float out_ms = 0.0f;
++    if (record.started && cuda_ok(cudaEventElapsedTime(&out_ms, record.started, record.ready),
++            "swap-out elapsed time", &cuda_stats_)) {
++        cuda_stats_.swap_out_microseconds += (uint64_t) (out_ms * 1000.0f);
++    }
++    cudaEventDestroy(record.ready);
++    record.ready = nullptr;
++    if (record.started) {
++        cudaEventDestroy(record.started);
++        record.started = nullptr;
++    }
++    if (!cuda_ok(cudaEventCreate(&record.started), "restore start event create", &cuda_stats_) ||
++            !cuda_ok(cudaEventRecord(record.started, store->stream), "restore start event record", &cuda_stats_)) {
++        return false;
++    }
++    for (const auto & piece : record.pieces) {
++        if (!cuda_ok(cudaMemcpyAsync(piece.device, piece.pinned, piece.bytes,
++                cudaMemcpyHostToDevice, store->stream), "swap-in tensor copy", &cuda_stats_)) return false;
++    }
++    if (!cuda_ok(cudaEventCreate(&record.ready), "restore event create", &cuda_stats_) ||
++            !cuda_ok(cudaEventRecord(record.ready, store->stream), "restore event record", &cuda_stats_) ||
++            !cuda_ok(cudaEventSynchronize(record.ready), "wait restore event", &cuda_stats_)) return false;
++    cuda_stats_.events_waited++;
++    float in_ms = 0.0f;
++    if (cuda_ok(cudaEventElapsedTime(&in_ms, record.started, record.ready),
++            "swap-in elapsed time", &cuda_stats_)) {
++        cuda_stats_.swap_in_microseconds += (uint64_t) (in_ms * 1000.0f);
++    }
++    v_cells[record.stream_id].set(0, record.cells);
++    const size_t bytes = record.bytes;
++    cuda_stats_.copy_bytes += bytes;
++    cuda_stats_.swap_bytes += bytes;
++    const uint32_t stream_id = record.stream_id;
++    seq_swap_erase_cuda_impl(seq_id);
++    LLAMA_LOG_INFO("CacheFlow CUDA restored sequence %d: stream %u, pinned bytes %zu\n",
++            seq_id, stream_id, bytes);
++    return true;
++}
++
++void llama_kv_cache::seq_swap_erase_cuda_impl(llama_seq_id seq_id) {
++    auto * store = static_cast<cacheflow_swap_store *>(paged_cuda_swap_store_);
++    if (!store) return;
++    const auto found = store->records.find(seq_id);
++    if (found == store->records.end()) return;
++    release_record(*found->second, &cuda_stats_);
++    store->records.erase(found);
++}
++
++void llama_kv_cache::destroy_paged_cuda_swap_store() {
++    auto * store = static_cast<cacheflow_swap_store *>(paged_cuda_swap_store_);
++    if (!store) return;
++    for (auto & item : store->records) release_record(*item.second, &cuda_stats_);
++    if (store->stream) cudaStreamDestroy(store->stream);
++    delete store;
++    paged_cuda_swap_store_ = nullptr;
++}
++
++bool llama_kv_cache::copy_streams_paged_cuda(const stream_copy_info & info) const {
++    if (info.empty()) return true;
++    std::vector<cacheflow_tensor_copy> copies;
++    size_t max_elements = 0;
++    int device = -1;
++    for (size_t mapping = 0; mapping < info.ssrc.size(); ++mapping) {
++        const uint32_t source_stream = info.ssrc[mapping];
++        const uint32_t destination_stream = info.sdst[mapping];
++        if (source_stream >= n_stream || destination_stream >= n_stream ||
++                source_stream == destination_stream) {
++            return false;
++        }
++        const auto ranges = occupied_ranges(v_cells[destination_stream]);
++        if (ranges.empty()) return false;
++        for (const auto & layer : layers) {
++            const ggml_tensor * planes[] = {
++                layer.k_stream[source_stream], layer.v_stream[source_stream],
++            };
++            ggml_tensor * destinations[] = {
++                layer.k_stream[destination_stream], layer.v_stream[destination_stream],
++            };
++            for (size_t plane = 0; plane < 2; ++plane) {
++                const auto * source = planes[plane];
++                auto * destination = destinations[plane];
++                if (!source && !destination) continue;
++                if (!source || !destination || source->type != GGML_TYPE_F16 ||
++                        destination->type != GGML_TYPE_F16 ||
++                        ggml_nbytes(source) != ggml_nbytes(destination)) {
++                    return false;
++                }
++                cudaPointerAttributes source_attributes{};
++                cudaPointerAttributes destination_attributes{};
++                if (cudaPointerGetAttributes(&source_attributes, source->data) != cudaSuccess ||
++                        cudaPointerGetAttributes(&destination_attributes, destination->data) != cudaSuccess ||
++                        source_attributes.type != cudaMemoryTypeDevice ||
++                        destination_attributes.type != cudaMemoryTypeDevice ||
++                        source_attributes.device != destination_attributes.device) {
++                    cudaGetLastError();
++                    return false;
++                }
++                if (device < 0) device = source_attributes.device;
++                if (source_attributes.device != device) return false; // multi-GPU falls back safely
++                if (source->nb[1] != destination->nb[1] || source->nb[1] % sizeof(uint16_t) != 0) {
++                    return false;
++                }
++                for (const auto & range : ranges) {
++                    const size_t byte_offset = (size_t) range.first * source->nb[1];
++                    const size_t elements = (size_t) (range.second - range.first) *
++                            source->nb[1] / sizeof(uint16_t);
++                    copies.push_back({
++                        reinterpret_cast<const uint16_t *>(
++                                static_cast<const uint8_t *>(source->data) + byte_offset),
++                        reinterpret_cast<uint16_t *>(
++                                static_cast<uint8_t *>(destination->data) + byte_offset),
++                        elements,
++                    });
++                    max_elements = std::max(max_elements, elements);
++                }
++            }
++        }
++    }
++    if (copies.empty() || device < 0) return false;
++    if (!cuda_ok(cudaSetDevice(device), "cudaSetDevice", &cuda_stats_)) return false;
++
++    cudaStream_t stream = nullptr;
++    cacheflow_tensor_copy * device_copies = nullptr;
++    cudaEvent_t complete = nullptr;
++    bool success = false;
++    cudaEvent_t started = nullptr;
++    if (!cuda_ok(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "stream create", &cuda_stats_)) goto cleanup;
++    if (!cuda_ok(cudaEventCreate(&started), "copy start event create", &cuda_stats_) ||
++            !cuda_ok(cudaEventRecord(started, stream), "copy start event record", &cuda_stats_)) goto cleanup;
++    if (!cuda_ok(cudaMallocAsync((void **) &device_copies,
++            copies.size() * sizeof(cacheflow_tensor_copy), stream), "descriptor allocation", &cuda_stats_)) goto cleanup;
++    if (!cuda_ok(cudaMemcpyAsync(device_copies, copies.data(),
++            copies.size() * sizeof(cacheflow_tensor_copy), cudaMemcpyHostToDevice, stream),
++            "descriptor upload", &cuda_stats_)) goto cleanup;
++    {
++        constexpr int threads = 256;
++        const dim3 grid((unsigned) ((max_elements + threads - 1) / threads),
++                (unsigned) copies.size());
++        cacheflow_copy_real_kv_tensors<<<grid, threads, 0, stream>>>(
++                device_copies, copies.size(), max_elements);
++    }
++    if (!cuda_ok(cudaGetLastError(), "real KV tensor kernel launch", &cuda_stats_)) goto cleanup;
++    cuda_stats_.kernel_launches++;
++    cuda_stats_.blocks_copied += copies.size();
++    for (const auto & copy : copies) cuda_stats_.copy_bytes += copy.elements * sizeof(uint16_t);
++    if (!cuda_ok(cudaFreeAsync(device_copies, stream), "descriptor release", &cuda_stats_)) goto cleanup;
++    device_copies = nullptr;
++    if (!cuda_ok(cudaEventCreate(&complete), "event create", &cuda_stats_)) goto cleanup;
++    if (!cuda_ok(cudaEventRecord(complete, stream), "event record", &cuda_stats_)) goto cleanup;
++    if (!cuda_ok(cudaEventSynchronize(complete), "event wait", &cuda_stats_)) goto cleanup;
++    cuda_stats_.events_waited++;
++    {
++        float copy_ms = 0.0f;
++        if (cuda_ok(cudaEventElapsedTime(&copy_ms, started, complete),
++                "copy elapsed time", &cuda_stats_)) {
++            cuda_stats_.copy_microseconds += (uint64_t) (copy_ms * 1000.0f);
++        }
++    }
++    success = true;
++
++cleanup:
++    if (device_copies) cudaFree(device_copies);
++    if (complete) cudaEventDestroy(complete);
++    if (started) cudaEventDestroy(started);
++    if (stream) cudaStreamDestroy(stream);
++    return success;
++}
+diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index 2802103..1d14624 100644
+--- a/src/llama-kv-cache.cpp
++++ b/src/llama-kv-cache.cpp
+@@ -376,6 +376,57 @@ llama_kv_cache::llama_kv_cache(
+     debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
+ }
+ 
++llama_kv_cache::~llama_kv_cache() {
++#ifdef CACHEFLOW_KV_CUDA
++    destroy_paged_cuda_swap_store();
++#endif
++}
++
++bool llama_kv_cache::seq_can_swap_cuda(llama_seq_id seq_id) const {
++#ifdef CACHEFLOW_KV_CUDA
++    return seq_can_swap_cuda_impl(seq_id);
++#else
++    (void) seq_id;
++    return false;
++#endif
++}
++
++bool llama_kv_cache::seq_swap_out_cuda(llama_seq_id seq_id) {
++#ifdef CACHEFLOW_KV_CUDA
++    return seq_swap_out_cuda_impl(seq_id);
++#else
++    (void) seq_id;
++    return false;
++#endif
++}
++
++bool llama_kv_cache::seq_swap_in_cuda(llama_seq_id seq_id) {
++#ifdef CACHEFLOW_KV_CUDA
++    return seq_swap_in_cuda_impl(seq_id);
++#else
++    (void) seq_id;
++    return false;
++#endif
++}
++
++void llama_kv_cache::seq_swap_erase_cuda(llama_seq_id seq_id) {
++#ifdef CACHEFLOW_KV_CUDA
++    seq_swap_erase_cuda_impl(seq_id);
++#else
++    (void) seq_id;
++#endif
++}
++
++bool llama_kv_cache::cacheflow_cuda_stats(llama_cacheflow_cuda_stats & stats) const {
++#ifdef CACHEFLOW_KV_CUDA
++    stats = cuda_stats_;
++    return true;
++#else
++    (void) stats;
++    return false;
++#endif
++}
++
+ void llama_kv_cache::clear(bool data) {
+     for (uint32_t s = 0; s < n_stream; ++s) {
+         v_cells[s].reset();
+@@ -840,6 +891,18 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
+ 
+         const size_t n_copy = sc_info.ssrc.size();
+ 
++#ifdef CACHEFLOW_KV_CUDA
++        if (copy_streams_paged_cuda(sc_info)) {
++            LLAMA_LOG_INFO("%s: CacheFlow CUDA adapter copied %zu real KV stream mappings\n",
++                    __func__, n_copy);
++        } else
++#endif
++        {
++#ifdef CACHEFLOW_KV_CUDA
++            LLAMA_LOG_WARN("%s: CacheFlow CUDA adapter could not handle %zu KV stream mappings; using the upstream tensor-copy fallback\n",
++                    __func__, n_copy);
++#endif
++
+         for (size_t i = 0; i < n_copy; ++i) {
+             const auto ssrc = sc_info.ssrc[i];
+             const auto sdst = sc_info.sdst[i];
+@@ -861,6 +924,7 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
+                 }
+             }
+         }
++        }
+     }
+ 
+     if (do_shift) {
+diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
+index 3d68f98..c9df6d1 100644
+--- a/src/llama-kv-cache.h
++++ b/src/llama-kv-cache.h
+@@ -114,7 +114,7 @@ public:
+         const  layer_reuse_cb & reuse,
+         const  layer_share_cb & share);
+ 
+-    ~llama_kv_cache() = default;
++    ~llama_kv_cache();
+ 
+     //
+     // llama_memory_i
+@@ -142,6 +142,12 @@ public:
+     llama_pos seq_pos_min(llama_seq_id seq_id) const override;
+     llama_pos seq_pos_max(llama_seq_id seq_id) const override;
+ 
++    bool seq_can_swap_cuda(llama_seq_id seq_id) const override;
++    bool seq_swap_out_cuda(llama_seq_id seq_id) override;
++    bool seq_swap_in_cuda(llama_seq_id seq_id) override;
++    void seq_swap_erase_cuda(llama_seq_id seq_id) override;
++    bool cacheflow_cuda_stats(llama_cacheflow_cuda_stats & stats) const override;
++
+     std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const override;
+ 
+     // state write/load
+@@ -185,6 +191,17 @@ public:
+ 
+     bool update(llama_context * lctx, bool do_shift, const stream_copy_info & sc_info);
+ 
++#ifdef CACHEFLOW_KV_CUDA
++    // Copies real llama KV stream tensors through one descriptor-driven CUDA
++    // launch. Returns false when layout/device constraints require fallback.
++    bool copy_streams_paged_cuda(const stream_copy_info & sc_info) const;
++    bool seq_can_swap_cuda_impl(llama_seq_id seq_id) const;
++    bool seq_swap_out_cuda_impl(llama_seq_id seq_id);
++    bool seq_swap_in_cuda_impl(llama_seq_id seq_id);
++    void seq_swap_erase_cuda_impl(llama_seq_id seq_id);
++    void destroy_paged_cuda_swap_store();
++#endif
++
+     // find a slot of kv cells that can hold the ubatch
+     // if cont == true, then the slot must be continuous
+     // return empty slot_info on failure
+@@ -215,6 +232,8 @@ public:
+     void set_input_v_rot(ggml_tensor * dst) const;
+ 
+ private:
++    void * paged_cuda_swap_store_ = nullptr;
++    mutable llama_cacheflow_cuda_stats cuda_stats_{};
+     const llama_model & model;
+     const llama_hparams & hparams;
+ 
+diff --git a/src/llama-memory.h b/src/llama-memory.h
+index db82539..1187875 100644
+--- a/src/llama-memory.h
++++ b/src/llama-memory.h
+@@ -116,6 +116,14 @@ struct llama_memory_i {
+     virtual llama_pos seq_pos_min(llama_seq_id seq_id) const = 0;
+     virtual llama_pos seq_pos_max(llama_seq_id seq_id) const = 0;
+ 
++    // Optional CUDA sequence swap. Backends that cannot guarantee a dedicated
++    // stream per sequence return false and retain the normal recompute path.
++    virtual bool seq_can_swap_cuda(llama_seq_id) const { return false; }
++    virtual bool seq_swap_out_cuda(llama_seq_id) { return false; }
++    virtual bool seq_swap_in_cuda(llama_seq_id) { return false; }
++    virtual void seq_swap_erase_cuda(llama_seq_id) {}
++    virtual bool cacheflow_cuda_stats(llama_cacheflow_cuda_stats &) const { return false; }
++
+     virtual std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const = 0;
+ 
+     //
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index e284a58..c018bc9 100644
+index e284a58..2877dc8 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -116,6 +116,50 @@ function(llama_build_and_test source)
+@@ -116,6 +116,95 @@ function(llama_build_and_test source)
      set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})
  endfunction()
  
 +llama_build(test-inference-scheduler.cpp
-+    ${PROJECT_SOURCE_DIR}/tools/server/server-inference-scheduler.cpp)
++    ${PROJECT_SOURCE_DIR}/tools/server/server-inference-scheduler.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-model-cost-model.cpp)
 +target_include_directories(test-inference-scheduler PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
 +llama_test(test-inference-scheduler)
++
++llama_build(test-inference-iteration.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-inference-iteration.cpp)
++target_include_directories(test-inference-iteration PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++llama_test(test-inference-iteration)
++
++llama_build(test-runtime-adapter.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-runtime-adapter.cpp)
++target_include_directories(test-runtime-adapter PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++llama_test(test-runtime-adapter)
++
++llama_build(test-model-cost-model.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-model-cost-model.cpp)
++target_include_directories(test-model-cost-model PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++llama_test(test-model-cost-model)
 +
 +llama_build(test-kv-capacity-planner.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-capacity-planner.cpp)
@@ -192,6 +900,12 @@ index e284a58..c018bc9 100644
 +target_include_directories(test-kv-block-backend PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
 +llama_test(test-kv-block-backend)
 +
++llama_build(test-kv-swap-store.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-swap-store.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-block-backend.cpp)
++target_include_directories(test-kv-swap-store PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++llama_test(test-kv-swap-store)
++
 +llama_build(test-speculation-controller.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-speculation-controller.cpp)
 +target_include_directories(test-speculation-controller PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
@@ -208,17 +922,338 @@ index e284a58..c018bc9 100644
 +    target_compile_definitions(test-kv-block-cuda PRIVATE GGML_USE_CUDA)
 +    target_link_libraries(test-kv-block-cuda PRIVATE CUDA::cudart)
 +    llama_test(test-kv-block-cuda)
++
++    add_library(test-kv-real-adapter-compile OBJECT
++        ${PROJECT_SOURCE_DIR}/src/llama-kv-cache-paged.cu)
++    target_include_directories(test-kv-real-adapter-compile PRIVATE
++        ${PROJECT_SOURCE_DIR}/src
++        ${PROJECT_SOURCE_DIR}/include
++        ${PROJECT_SOURCE_DIR}/ggml/include
++        ${PROJECT_SOURCE_DIR}/common)
++    target_compile_definitions(test-kv-real-adapter-compile PRIVATE CACHEFLOW_KV_CUDA)
++    target_link_libraries(test-kv-real-adapter-compile PRIVATE CUDA::cudart)
++    set_property(TARGET test-kv-real-adapter-compile PROPERTY CUDA_STANDARD 17)
++
++    add_executable(bench-kv-block-cuda bench-kv-block-cuda.cu)
++    target_include_directories(bench-kv-block-cuda PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++    target_link_libraries(bench-kv-block-cuda PRIVATE server-context CUDA::cudart)
++    set_property(TARGET bench-kv-block-cuda PROPERTY CUDA_STANDARD 17)
++
++    add_executable(bench-kv-cow-cuda bench-kv-cow-cuda.cpp)
++    target_include_directories(bench-kv-cow-cuda PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++    target_link_libraries(bench-kv-cow-cuda PRIVATE server-context CUDA::cudart)
++
++    add_executable(test-kv-real-cuda-swap test-kv-real-cuda-swap.cpp)
++    target_link_libraries(test-kv-real-cuda-swap PRIVATE llama ggml)
 +endif()
 +
  # build test-tokenizer-0 target once and add many tests
  llama_build(test-tokenizer-0.cpp)
  
+diff --git a/tests/bench-kv-block-cuda.cu b/tests/bench-kv-block-cuda.cu
+new file mode 100644
+index 0000000..8c25a56
+--- /dev/null
++++ b/tests/bench-kv-block-cuda.cu
+@@ -0,0 +1,176 @@
++#include "server-kv-block-backend.h"
++
++#include <cuda_runtime.h>
++
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
++
++namespace {
++
++void check(cudaError_t status, const char * operation) {
++    if (status != cudaSuccess) {
++        std::fprintf(stderr, "%s: %s\n", operation, cudaGetErrorString(status));
++        std::exit(1);
++    }
++}
++
++__global__ void gather(
++        const uint16_t * source_k,
++        const uint16_t * source_v,
++        uint16_t * staging_k,
++        uint16_t * staging_v,
++        const server_kv_block_copy * mapping,
++        size_t count,
++        size_t elements_per_block) {
++    const size_t linear = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (linear >= count * elements_per_block) return;
++    const size_t item = linear / elements_per_block;
++    const size_t element = linear % elements_per_block;
++    const size_t source = (size_t) mapping[item].source * elements_per_block + element;
++    staging_k[linear] = source_k[source];
++    staging_v[linear] = source_v[source];
++}
++
++__global__ void scatter(
++        const uint16_t * staging_k,
++        const uint16_t * staging_v,
++        uint16_t * destination_k,
++        uint16_t * destination_v,
++        const server_kv_block_copy * mapping,
++        size_t count,
++        size_t elements_per_block) {
++    const size_t linear = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (linear >= count * elements_per_block) return;
++    const size_t item = linear / elements_per_block;
++    const size_t element = linear % elements_per_block;
++    const size_t destination = (size_t) mapping[item].destination * elements_per_block + element;
++    destination_k[destination] = staging_k[linear];
++    destination_v[destination] = staging_v[linear];
++}
++
++struct timings {
++    float gpu_ms;
++    double end_to_end_ms;
++};
++
++timings measure_memcpy(
++        uint16_t * k,
++        uint16_t * v,
++        const std::vector<server_kv_block_copy> & mapping,
++        size_t elements_per_block,
++        cudaStream_t stream) {
++    cudaEvent_t start = nullptr;
++    cudaEvent_t stop = nullptr;
++    check(cudaEventCreate(&start), "create memcpy start event");
++    check(cudaEventCreate(&stop), "create memcpy stop event");
++    const auto wall_start = std::chrono::steady_clock::now();
++    check(cudaEventRecord(start, stream), "record memcpy start");
++    const size_t bytes = elements_per_block * sizeof(uint16_t);
++    for (const auto & copy : mapping) {
++        check(cudaMemcpyAsync(k + (size_t) copy.destination * elements_per_block,
++                k + (size_t) copy.source * elements_per_block, bytes,
++                cudaMemcpyDeviceToDevice, stream), "memcpy K block");
++        check(cudaMemcpyAsync(v + (size_t) copy.destination * elements_per_block,
++                v + (size_t) copy.source * elements_per_block, bytes,
++                cudaMemcpyDeviceToDevice, stream), "memcpy V block");
++    }
++    check(cudaEventRecord(stop, stream), "record memcpy stop");
++    check(cudaEventSynchronize(stop), "wait memcpy stop");
++    const auto wall_stop = std::chrono::steady_clock::now();
++    float gpu_ms = 0.0f;
++    check(cudaEventElapsedTime(&gpu_ms, start, stop), "measure memcpy events");
++    cudaEventDestroy(start);
++    cudaEventDestroy(stop);
++    return { gpu_ms,
++        std::chrono::duration<double, std::milli>(wall_stop - wall_start).count() };
++}
++
++timings measure_batch(
++        uint16_t * k,
++        uint16_t * v,
++        uint16_t * staged_k,
++        uint16_t * staged_v,
++        server_kv_block_copy * device_mapping,
++        const std::vector<server_kv_block_copy> & mapping,
++        size_t elements_per_block,
++        cudaStream_t stream) {
++    cudaEvent_t start = nullptr;
++    cudaEvent_t stop = nullptr;
++    check(cudaEventCreate(&start), "create batch start event");
++    check(cudaEventCreate(&stop), "create batch stop event");
++    const auto wall_start = std::chrono::steady_clock::now();
++    check(cudaMemcpyAsync(device_mapping, mapping.data(),
++            mapping.size() * sizeof(server_kv_block_copy), cudaMemcpyHostToDevice, stream),
++            "upload mapping");
++    check(cudaEventRecord(start, stream), "record batch start");
++    const size_t total = mapping.size() * elements_per_block;
++    constexpr int threads = 256;
++    const unsigned blocks = (unsigned) ((total + threads - 1) / threads);
++    gather<<<blocks, threads, 0, stream>>>(
++            k, v, staged_k, staged_v, device_mapping, mapping.size(), elements_per_block);
++    scatter<<<blocks, threads, 0, stream>>>(
++            staged_k, staged_v, k, v, device_mapping, mapping.size(), elements_per_block);
++    check(cudaGetLastError(), "launch batched KV kernels");
++    check(cudaEventRecord(stop, stream), "record batch stop");
++    check(cudaEventSynchronize(stop), "wait batch stop");
++    const auto wall_stop = std::chrono::steady_clock::now();
++    float gpu_ms = 0.0f;
++    check(cudaEventElapsedTime(&gpu_ms, start, stop), "measure batch events");
++    cudaEventDestroy(start);
++    cudaEventDestroy(stop);
++    return { gpu_ms,
++        std::chrono::duration<double, std::milli>(wall_stop - wall_start).count() };
++}
++
++} // namespace
++
++int main() {
++    constexpr size_t capacity = 96;
++    const server_kv_tensor_layout layout = {
++        32, 8, 128, 16, server_kv_element_type::fp16,
++        server_kv_memory_layout::separate_k_v_planes,
++    };
++    const size_t elements = layout.elements_per_plane_block();
++    const size_t plane_elements = capacity * elements;
++    uint16_t * k = nullptr;
++    uint16_t * v = nullptr;
++    uint16_t * staged_k = nullptr;
++    uint16_t * staged_v = nullptr;
++    server_kv_block_copy * device_mapping = nullptr;
++    cudaStream_t stream = nullptr;
++    check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "create benchmark stream");
++    check(cudaMalloc((void **) &k, plane_elements * sizeof(uint16_t)), "allocate K");
++    check(cudaMalloc((void **) &v, plane_elements * sizeof(uint16_t)), "allocate V");
++    check(cudaMalloc((void **) &staged_k, 32 * elements * sizeof(uint16_t)), "allocate staged K");
++    check(cudaMalloc((void **) &staged_v, 32 * elements * sizeof(uint16_t)), "allocate staged V");
++    check(cudaMalloc((void **) &device_mapping, 32 * sizeof(server_kv_block_copy)), "allocate mapping");
++    check(cudaMemset(k, 0x2a, plane_elements * sizeof(uint16_t)), "initialize K");
++    check(cudaMemset(v, 0x5c, plane_elements * sizeof(uint16_t)), "initialize V");
++
++    std::puts("method,blocks,trial,gpu_ms,end_to_end_ms,bytes");
++    for (const size_t count : { 1u, 4u, 16u, 32u }) {
++        std::vector<server_kv_block_copy> mapping;
++        for (size_t i = 0; i < count; ++i) mapping.push_back({ (uint32_t) i, (uint32_t) (48 + i) });
++        (void) measure_memcpy(k, v, mapping, elements, stream);
++        (void) measure_batch(k, v, staged_k, staged_v, device_mapping, mapping, elements, stream);
++        for (int trial = 0; trial < 5; ++trial) {
++            const auto baseline = measure_memcpy(k, v, mapping, elements, stream);
++            std::printf("per_block_memcpy,%zu,%d,%.6f,%.6f,%zu\n", count, trial,
++                    baseline.gpu_ms, baseline.end_to_end_ms, count * layout.bytes_per_block());
++            const auto batched = measure_batch(
++                    k, v, staged_k, staged_v, device_mapping, mapping, elements, stream);
++            std::printf("batched_gather_scatter,%zu,%d,%.6f,%.6f,%zu\n", count, trial,
++                    batched.gpu_ms, batched.end_to_end_ms, count * layout.bytes_per_block());
++        }
++    }
++    cudaFree(device_mapping);
++    cudaFree(staged_v);
++    cudaFree(staged_k);
++    cudaFree(v);
++    cudaFree(k);
++    cudaStreamDestroy(stream);
++    return 0;
++}
+diff --git a/tests/bench-kv-cow-cuda.cpp b/tests/bench-kv-cow-cuda.cpp
+new file mode 100644
+index 0000000..3af8e59
+--- /dev/null
++++ b/tests/bench-kv-cow-cuda.cpp
+@@ -0,0 +1,64 @@
++#include "server-kv-block-backend.h"
++
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
++
++static double elapsed_ms(const std::chrono::steady_clock::time_point & start) {
++    return std::chrono::duration<double, std::milli>(
++            std::chrono::steady_clock::now() - start).count();
++}
++
++int main() {
++    // Qwen2.5-0.5B KV geometry: 24 layers, 2 KV heads, 64 head dim.
++    const server_kv_tensor_layout layout = {
++        24, 2, 64, 16, server_kv_element_type::fp16,
++        server_kv_memory_layout::separate_k_v_planes,
++    };
++    constexpr size_t sequence_blocks = 64;
++    constexpr size_t capacity = sequence_blocks * 2 + 2;
++    auto backend = server_kv_create_cuda_block_backend(layout, capacity);
++    std::vector<uint16_t> k(layout.elements_per_plane_block(), 7);
++    std::vector<uint16_t> v(layout.elements_per_plane_block(), 11);
++    for (size_t block = 0; block < sequence_blocks; ++block) {
++        k[0] = (uint16_t) block;
++        v[0] = (uint16_t) (1000 + block);
++        backend->write_block((uint32_t) block, k, v);
++    }
++    std::vector<server_kv_block_copy> full;
++    for (size_t block = 0; block < sequence_blocks; ++block) {
++        full.push_back({(uint32_t) block, (uint32_t) (sequence_blocks + block)});
++    }
++    // Warm both paths and allocator/event pools.
++    backend->wait(backend->copy_blocks(full, layout));
++    backend->wait(backend->clone_shared_tail(
++            (uint32_t) (sequence_blocks - 1), (uint32_t) (capacity - 1), layout));
++
++    std::puts("method,trial,end_to_end_ms,bytes,copy_launches,extra_device_bytes");
++    for (int trial = 0; trial < 100; ++trial) {
++        auto before = backend->stats();
++        auto start = std::chrono::steady_clock::now();
++        backend->wait(backend->copy_blocks(full, layout));
++        const double baseline_ms = elapsed_ms(start);
++        auto after = backend->stats();
++        std::printf("whole_sequence_copy,%d,%.6f,%zu,%llu,%zu\n", trial, baseline_ms,
++                sequence_blocks * layout.bytes_per_block(),
++                (unsigned long long) ((after.direct_copy_batches - before.direct_copy_batches) *
++                        sequence_blocks * 2),
++                sequence_blocks * layout.bytes_per_block());
++
++        before = backend->stats();
++        start = std::chrono::steady_clock::now();
++        backend->wait(backend->clone_shared_tail(
++                (uint32_t) (sequence_blocks - 1), (uint32_t) (capacity - 1), layout));
++        const double cow_ms = elapsed_ms(start);
++        after = backend->stats();
++        std::printf("tail_block_cow,%d,%.6f,%zu,%llu,%zu\n", trial, cow_ms,
++                layout.bytes_per_block(),
++                (unsigned long long) (after.kernel_launches - before.kernel_launches),
++                layout.bytes_per_block());
++    }
++    if (!backend->verify_integrity()) return 1;
++    return 0;
++}
+diff --git a/tests/test-inference-iteration.cpp b/tests/test-inference-iteration.cpp
+new file mode 100644
+index 0000000..298af36
+--- /dev/null
++++ b/tests/test-inference-iteration.cpp
+@@ -0,0 +1,36 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
++#include "server-inference-iteration.h"
++
++#include <cassert>
++
++int main() {
++    server_inference_iteration iteration;
++    assert(!iteration.begin_execute());
++    assert(iteration.prepare());
++    assert(!iteration.prepare());
++    assert(iteration.plan({2, 6, 8}));
++    const auto frozen = iteration.plan_summary();
++    assert(iteration.begin_execute());
++    assert(iteration.record_executed(3));
++    assert(!iteration.begin_commit());
++    assert(iteration.record_executed(5));
++    assert(iteration.begin_commit());
++    assert(iteration.plan_summary().decode_tokens == frozen.decode_tokens);
++    assert(iteration.commit());
++    assert(iteration.validate().empty());
++
++    server_inference_iteration failed;
++    assert(failed.prepare() && failed.plan({1, 3, 4}) && failed.begin_execute());
++    assert(failed.record_executed(2));
++    failed.abort("injected decode failure");
++    assert(failed.is_aborted() && !failed.begin_commit());
++    assert(failed.executed_tokens() == 2 && failed.validate().empty());
++
++    server_inference_iteration overflow;
++    assert(overflow.prepare() && overflow.plan({0, 1, 1}) && overflow.begin_execute());
++    assert(!overflow.record_executed(2));
++    return 0;
++}
 diff --git a/tests/test-inference-scheduler.cpp b/tests/test-inference-scheduler.cpp
 new file mode 100644
-index 0000000..814c5f0
+index 0000000..8e57e4a
 --- /dev/null
 +++ b/tests/test-inference-scheduler.cpp
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,89 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
 +#include "server-inference-scheduler.h"
 +
 +#include <cassert>
@@ -288,7 +1323,9 @@ index 0000000..814c5f0
 +    scheduler.observe_iteration({1, 64, 40.0});
 +    assert(scheduler.state().effective_chunk_size == 32);
 +    scheduler.observe_iteration({1, 32, 10.0});
-+    assert(scheduler.state().effective_chunk_size == 48);
++    assert(scheduler.state().effective_chunk_size >= 16);
++    assert(scheduler.state().effective_chunk_size <= 256);
++    assert(scheduler.state().cost.observations == 3);
 +    scheduler.observe_iteration({0, 48, 100.0});
 +    assert(scheduler.state().effective_chunk_size == 256);
 +    assert(scheduler.state().observations == 4);
@@ -304,10 +1341,14 @@ index 0000000..814c5f0
 +}
 diff --git a/tests/test-kv-block-backend.cpp b/tests/test-kv-block-backend.cpp
 new file mode 100644
-index 0000000..3f51340
+index 0000000..e1bfb1b
 --- /dev/null
 +++ b/tests/test-kv-block-backend.cpp
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,95 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
 +#include "server-kv-block-backend.h"
 +
 +#include <cassert>
@@ -401,15 +1442,20 @@ index 0000000..3f51340
 +}
 diff --git a/tests/test-kv-block-cuda.cpp b/tests/test-kv-block-cuda.cpp
 new file mode 100644
-index 0000000..cb1a5ab
+index 0000000..914774f
 --- /dev/null
 +++ b/tests/test-kv-block-cuda.cpp
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,162 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
 +#include "server-kv-block-backend.h"
 +
 +#include <algorithm>
 +#include <cassert>
 +#include <cstdint>
++#include <cstdlib>
 +#include <random>
 +#include <stdexcept>
 +#include <vector>
@@ -424,6 +1470,56 @@ index 0000000..cb1a5ab
 +    assert(left.block_count == right.block_count);
 +    assert(left.k == right.k);
 +    assert(left.v == right.v);
++}
++
++static void set_fail_point(const char * value) {
++#ifdef _WIN32
++    _putenv_s("CACHEFLOW_TEST_CUDA_FAIL_POINT", value ? value : "");
++#else
++    if (value) setenv("CACHEFLOW_TEST_CUDA_FAIL_POINT", value, 1);
++    else unsetenv("CACHEFLOW_TEST_CUDA_FAIL_POINT");
++#endif
++}
++
++static void test_allocation_failures_release_partial_resources() {
++    const server_kv_tensor_layout layout = {
++        2, 2, 16, 8, server_kv_element_type::fp16,
++        server_kv_memory_layout::separate_k_v_planes,
++    };
++    set_fail_point("constructor_after_k");
++    bool constructor_failed = false;
++    try { (void) server_kv_create_cuda_block_backend(layout, 16); }
++    catch (const std::runtime_error &) { constructor_failed = true; }
++    set_fail_point(nullptr);
++    assert(constructor_failed);
++
++    auto backend = server_kv_create_cuda_block_backend(layout, 16);
++    const auto values = payload(layout.elements_per_plane_block(), 71);
++    backend->write_block(0, values, values);
++    backend->write_block(1, values, values);
++
++    set_fail_point("device_staging");
++    bool staging_failed = false;
++    try { (void) backend->copy_blocks({ { 0, 1 }, { 1, 0 } }, layout); }
++    catch (const std::runtime_error &) { staging_failed = true; }
++    set_fail_point(nullptr);
++    assert(staging_failed);
++    assert(backend->verify_integrity());
++
++    set_fail_point("pinned_planes");
++    bool pinned_failed = false;
++    server_kv_host_blocks host;
++    try { (void) backend->swap_out({ 0, 1 }, host); }
++    catch (const std::runtime_error &) { pinned_failed = true; }
++    set_fail_point(nullptr);
++    assert(pinned_failed);
++    assert(backend->verify_integrity());
++    const auto stats = backend->stats();
++    assert(stats.backend_errors == 2);
++    assert(stats.pinned_bytes_current == 0);
++
++    backend->wait(backend->copy_blocks({ { 0, 2 } }, layout));
++    assert(backend->verify_integrity());
 +}
 +
 +static void run_layout_case(uint32_t block_tokens, uint32_t head_dim, uint32_t seed) {
@@ -498,9 +1594,14 @@ index 0000000..cb1a5ab
 +    assert(stats.copy_bytes >= stats.blocks_copied * layout.bytes_per_block());
 +    assert(stats.pinned_bytes_current == 0);
 +    assert(stats.pinned_bytes_peak > 0);
++    assert(stats.direct_copy_batches > 0);
++    assert(stats.staged_copy_batches > 0);
++    assert(cpu->verify_integrity());
++    assert(cuda->verify_integrity());
 +}
 +
 +int main() {
++    test_allocation_failures_release_partial_resources();
 +    run_layout_case(8, 16, 11);
 +    run_layout_case(16, 32, 22);
 +    run_layout_case(32, 64, 33);
@@ -509,10 +1610,14 @@ index 0000000..cb1a5ab
 +}
 diff --git a/tests/test-kv-block-manager.cpp b/tests/test-kv-block-manager.cpp
 new file mode 100644
-index 0000000..ff90ecd
+index 0000000..9aa3710
 --- /dev/null
 +++ b/tests/test-kv-block-manager.cpp
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,155 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
 +#include "server-kv-block-manager.h"
 +
 +#include <cassert>
@@ -552,6 +1657,7 @@ index 0000000..ff90ecd
 +    assert(writable.writable && writable.copied);
 +    const auto after = manager.snapshot();
 +    assert(after.allocated_blocks == 3);
++    assert(after.copy_on_write_total == 1);
 +    assert(after.sequences[0].blocks.back() != after.sequences[1].blocks.back());
 +    assert(manager.validate().empty());
 +}
@@ -665,10 +1771,14 @@ index 0000000..ff90ecd
 +}
 diff --git a/tests/test-kv-capacity-planner.cpp b/tests/test-kv-capacity-planner.cpp
 new file mode 100644
-index 0000000..2f24408
+index 0000000..acabcd2
 --- /dev/null
 +++ b/tests/test-kv-capacity-planner.cpp
-@@ -0,0 +1,40 @@
+@@ -0,0 +1,44 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
 +#include "server-kv-capacity-planner.h"
 +
 +#include <cassert>
@@ -709,12 +1819,115 @@ index 0000000..2f24408
 +    test_reclaims_multiple_slots_and_reports_unresolved_pressure();
 +    return 0;
 +}
+diff --git a/tests/test-kv-real-cuda-swap.cpp b/tests/test-kv-real-cuda-swap.cpp
+new file mode 100644
+index 0000000..b448bf4
+--- /dev/null
++++ b/tests/test-kv-real-cuda-swap.cpp
+@@ -0,0 +1,93 @@
++#include "ggml-backend.h"
++#include "llama.h"
++
++#include <chrono>
++#include <cstdlib>
++#include <cstdio>
++#include <string>
++#include <vector>
++
++static void require(bool condition, const char * message) {
++    if (!condition) {
++        std::fprintf(stderr, "FAILED: %s\n", message);
++        std::exit(1);
++    }
++}
++
++int main(int argc, char ** argv) {
++    if (argc != 2) {
++        std::fprintf(stderr, "usage: %s MODEL.gguf\n", argv[0]);
++        return 2;
++    }
++    ggml_backend_load_all();
++    auto model_params = llama_model_default_params();
++    model_params.n_gpu_layers = 99;
++    llama_model * model = llama_model_load_from_file(argv[1], model_params);
++    require(model != nullptr, "model load");
++    const llama_vocab * vocab = llama_model_get_vocab(model);
++    const std::string prompt =
++            "CacheFlow validates physical KV swap with a real transformer prompt. "
++            "The restored sequence must preserve every key, value, and cell position.";
++    const int token_count = -llama_tokenize(
++            vocab, prompt.data(), prompt.size(), nullptr, 0, true, true);
++    require(token_count > 0, "prompt token count");
++    std::vector<llama_token> tokens(token_count);
++    require(llama_tokenize(vocab, prompt.data(), prompt.size(), tokens.data(),
++            tokens.size(), true, true) == token_count, "prompt tokenization");
++
++    auto context_params = llama_context_default_params();
++    context_params.n_ctx = 512;
++    context_params.n_batch = 256;
++    context_params.n_seq_max = 2;
++    context_params.kv_unified = false;
++    llama_context * context = llama_init_from_model(model, context_params);
++    require(context != nullptr, "context initialization");
++    llama_batch batch = llama_batch_get_one(tokens.data(), tokens.size());
++    require(llama_decode(context, batch) == 0, "prompt decode");
++    llama_synchronize(context);
++    llama_memory_t memory = llama_get_memory(context);
++    require(llama_memory_seq_pos_max(memory, 0) >= 0, "decoded sequence residency");
++    require(llama_memory_seq_can_swap_cuda(memory, 0), "CUDA swap capability");
++
++    const size_t state_size = llama_state_seq_get_size_ext(
++            context, 0, LLAMA_STATE_SEQ_FLAGS_NONE);
++    std::vector<uint8_t> before(state_size);
++    std::vector<uint8_t> after(state_size);
++    require(state_size > 20, "non-empty serialized KV state");
++    require(llama_state_seq_get_data_ext(context, before.data(), before.size(), 0,
++            LLAMA_STATE_SEQ_FLAGS_NONE) == before.size(), "state snapshot before swap");
++    const llama_pos max_position = llama_memory_seq_pos_max(memory, 0);
++    const auto out_start = std::chrono::steady_clock::now();
++    require(llama_memory_seq_swap_out_cuda(memory, 0), "CUDA swap-out enqueue");
++    require(llama_memory_seq_rm(memory, 0, -1, -1), "sequence remove after swap-out");
++    require(llama_memory_seq_pos_max(memory, 0) == -1, "sequence eviction");
++    const auto restore_start = std::chrono::steady_clock::now();
++    require(llama_memory_seq_swap_in_cuda(memory, 0), "CUDA swap-in");
++    const auto restore_stop = std::chrono::steady_clock::now();
++    require(llama_memory_seq_pos_max(memory, 0) == max_position, "restored cell positions");
++    require(llama_state_seq_get_data_ext(context, after.data(), after.size(), 0,
++            LLAMA_STATE_SEQ_FLAGS_NONE) == after.size(), "state snapshot after restore");
++    require(before == after, "byte-identical restored KV state");
++    llama_cacheflow_cuda_stats stats{};
++    require(llama_memory_cacheflow_cuda_stats(memory, &stats), "CUDA stats capability");
++    require(stats.copy_bytes >= 2 * 319488, "physical swap bytes counted");
++    require(stats.swap_bytes == stats.copy_bytes, "swap-only byte accounting");
++    require(stats.swap_out_microseconds > 0 && stats.swap_in_microseconds > 0,
++            "CUDA event timings counted");
++    require(stats.events_waited >= 2 && stats.pinned_bytes_current == 0 &&
++            stats.pinned_bytes_peak >= 319488 && stats.backend_errors == 0,
++            "CUDA event, pinned-memory, and error metrics");
++    const double enqueue_ms = std::chrono::duration<double, std::milli>(
++            restore_start - out_start).count();
++    const double restore_ms = std::chrono::duration<double, std::milli>(
++            restore_stop - restore_start).count();
++    std::printf("real_cuda_swap,state_bytes=%zu,swap_out_enqueue_ms=%.3f,restore_ms=%.3f,"
++            "cuda_swap_out_us=%llu,cuda_swap_in_us=%llu,pinned_peak=%llu\n",
++            state_size, enqueue_ms, restore_ms,
++            (unsigned long long) stats.swap_out_microseconds,
++            (unsigned long long) stats.swap_in_microseconds,
++            (unsigned long long) stats.pinned_bytes_peak);
++    llama_free(context);
++    llama_model_free(model);
++    return 0;
++}
 diff --git a/tests/test-kv-runtime.cpp b/tests/test-kv-runtime.cpp
 new file mode 100644
-index 0000000..554e228
+index 0000000..41b5719
 --- /dev/null
 +++ b/tests/test-kv-runtime.cpp
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,87 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
 +#include "server-kv-runtime.h"
 +
 +#include <algorithm>
@@ -798,12 +2011,160 @@ index 0000000..554e228
 +    test_randomized_residency_transitions_preserve_invariants();
 +    return 0;
 +}
+diff --git a/tests/test-kv-swap-store.cpp b/tests/test-kv-swap-store.cpp
+new file mode 100644
+index 0000000..b9a92fd
+--- /dev/null
++++ b/tests/test-kv-swap-store.cpp
+@@ -0,0 +1,73 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
++#include "server-kv-swap-store.h"
++
++#include <cassert>
++#include <filesystem>
++#include <fstream>
++
++static server_kv_swap_payload payload() {
++    server_kv_swap_payload result;
++    result.sequence_id = 17;
++    result.physical_blocks = {3, 9};
++    result.data.resize({2, 2, 4, 4}, 2);
++    for (size_t i = 0; i < result.data.k.size(); ++i) {
++        result.data.k[i] = (uint16_t) (i + 1);
++        result.data.v[i] = (uint16_t) (1000 + i);
++    }
++    return result;
++}
++
++static void exercise(server_kv_swap_store & store) {
++    const auto source = payload();
++    const auto saved = store.save(source);
++    assert(saved.ok && saved.handle != 0);
++    server_kv_swap_payload restored;
++    assert(store.restore(saved.handle, restored));
++    assert(restored.sequence_id == source.sequence_id);
++    assert(restored.physical_blocks == source.physical_blocks);
++    assert(restored.data.k == source.data.k && restored.data.v == source.data.v);
++
++    store.inject(server_kv_swap_fault::next_restore);
++    restored.sequence_id = 999;
++    std::string error;
++    assert(!store.restore(saved.handle, restored, &error));
++    assert(!error.empty() && restored.sequence_id == 999); // no partial publication
++    assert(store.erase(saved.handle));
++    assert(!store.restore(saved.handle, restored));
++    const auto stats = store.stats();
++    assert(stats.saves == 1 && stats.restores == 1 && stats.erases == 1);
++    assert(stats.restore_failures == 2 && stats.bytes_current == 0 && stats.bytes_peak > 0);
++}
++
++int main() {
++    auto host = server_kv_create_host_swap_store(1 << 20);
++    exercise(*host);
++    host->inject(server_kv_swap_fault::next_save);
++    assert(!host->save(payload()).ok);
++    auto tiny = server_kv_create_host_swap_store(1);
++    assert(!tiny->save(payload()).ok);
++
++    const auto directory = std::filesystem::temp_directory_path() / "cacheflow-kv-swap-test";
++    std::filesystem::remove_all(directory);
++    auto file = server_kv_create_file_swap_store(directory, 1 << 20);
++    exercise(*file);
++    file->inject(server_kv_swap_fault::next_save);
++    assert(!file->save(payload()).ok);
++
++    const auto saved = file->save(payload());
++    assert(saved.ok);
++    const auto path = directory / ("sequence-" + std::to_string(saved.handle) + ".cfswap");
++    std::ofstream corrupt(path, std::ios::binary | std::ios::app);
++    corrupt.put('x');
++    corrupt.close();
++    server_kv_swap_payload untouched;
++    untouched.sequence_id = 123;
++    assert(!file->restore(saved.handle, untouched));
++    assert(untouched.sequence_id == 123);
++    assert(file->erase(saved.handle));
++    std::filesystem::remove_all(directory);
++    return 0;
++}
+diff --git a/tests/test-model-cost-model.cpp b/tests/test-model-cost-model.cpp
+new file mode 100644
+index 0000000..1a944de
+--- /dev/null
++++ b/tests/test-model-cost-model.cpp
+@@ -0,0 +1,28 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
++#include "server-model-cost-model.h"
++
++#include <cassert>
++#include <cmath>
++#include <initializer_list>
++
++int main() {
++    server_model_cost_model model(0.99);
++    for (size_t round = 0; round < 8; ++round) {
++        for (size_t decode : { 0u, 1u, 4u }) {
++            for (size_t prefill : { 0u, 32u, 128u, 512u }) {
++                if (decode == 0 && prefill == 0) continue;
++                model.observe(decode, prefill, 1.5 + decode * 3.0 + prefill * 0.02);
++            }
++        }
++    }
++    const auto state = model.state();
++    assert(std::abs(state.decode_ms_per_token - 3.0) < 0.05);
++    assert(std::abs(state.prefill_ms_per_token - 0.02) < 0.002);
++    assert(std::abs(state.fixed_ms - 1.5) < 0.05);
++    const size_t recommended = model.recommend_prefill_chunk(12.0, 1, 2, 16, 512);
++    assert(recommended >= 180 && recommended <= 190);
++    return 0;
++}
+diff --git a/tests/test-runtime-adapter.cpp b/tests/test-runtime-adapter.cpp
+new file mode 100644
+index 0000000..383e0c5
+--- /dev/null
++++ b/tests/test-runtime-adapter.cpp
+@@ -0,0 +1,25 @@
++#include "server-runtime-adapter.h"
++
++#include <cstdio>
++#include <cstdlib>
++
++static void require(bool condition, const char * message) {
++    if (!condition) {
++        std::fprintf(stderr, "FAILED: %s\n", message);
++        std::exit(1);
++    }
++}
++
++int main() {
++    server_deterministic_runtime runtime({ { 1, -2, 0 }, 1000 });
++    llama_batch empty{};
++    const auto oom = runtime.decode(nullptr, empty);
++    require(oom.code == 1 && !oom.committed, "injected KV OOM is uncommitted");
++    require(oom.elapsed_us >= 500, "fixed decode latency is observable");
++    const auto compute = runtime.decode(nullptr, empty);
++    require(compute.code == -2 && !compute.committed, "partial compute failure is uncommitted");
++    const auto success = runtime.decode(nullptr, empty);
++    require(success.code == 0 && success.committed, "successful decode commits");
++    require(runtime.calls() == 3, "deterministic call accounting");
++    return 0;
++}
 diff --git a/tests/test-speculation-controller.cpp b/tests/test-speculation-controller.cpp
 new file mode 100644
-index 0000000..c052ed3
+index 0000000..297ccfe
 --- /dev/null
 +++ b/tests/test-speculation-controller.cpp
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,61 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
 +#include "server-speculation-controller.h"
 +
 +#include <cassert>
@@ -816,6 +2177,7 @@ index 0000000..c052ed3
 +    config.acceptance_alpha = 0.5;
 +    config.cooldown_iterations = 3;
 +    config.warmup_observations = 2;
++    config.min_evidence_tokens = 8;
 +    return config;
 +}
 +
@@ -834,6 +2196,7 @@ index 0000000..c052ed3
 +    controller.observe({2, 8, 0, 0.2});
 +    controller.observe({2, 4, 0, 0.2});
 +    assert(controller.state(2).disabled);
++    assert(controller.disabled_low_acceptance_total() == 1);
 +    assert(controller.recommend(2, 8, 0.2) == 0);
 +    assert(controller.recommend(2, 8, 0.2) == 0);
 +    assert(controller.recommend(2, 8, 0.2) == 0);
@@ -843,7 +2206,10 @@ index 0000000..c052ed3
 +static void test_sequences_are_independent_and_fixed_mode_is_compatible() {
 +    server_speculation_controller adaptive(adaptive_config());
 +    adaptive.observe({1, 8, 0, 0.0});
-+    assert(adaptive.state(1).draft_tokens == 4);
++    assert(adaptive.state(1).draft_tokens == 8);
++    adaptive.observe({1, 8, 0, 0.0});
++    assert(adaptive.state(1).draft_tokens == 1);
++    assert(adaptive.state(1).disabled);
 +    assert(adaptive.state(2).draft_tokens == 8);
 +
 +    server_speculation_controller fixed;
@@ -857,29 +2223,37 @@ index 0000000..c052ed3
 +    return 0;
 +}
 diff --git a/tools/server/CMakeLists.txt b/tools/server/CMakeLists.txt
-index 7d42743..6c7ecde 100644
+index 7d42743..b8656bb 100644
 --- a/tools/server/CMakeLists.txt
 +++ b/tools/server/CMakeLists.txt
-@@ -11,6 +11,18 @@ add_library(${TARGET} STATIC
+@@ -11,6 +11,26 @@ add_library(${TARGET} STATIC
      server-task.h
      server-queue.cpp
      server-queue.h
-+    server-inference-scheduler.cpp
-+    server-inference-scheduler.h
++      server-inference-scheduler.cpp
++      server-inference-scheduler.h
++      server-inference-iteration.cpp
++      server-inference-iteration.h
 +    server-kv-capacity-planner.cpp
 +    server-kv-capacity-planner.h
 +    server-kv-block-manager.cpp
 +    server-kv-block-manager.h
 +    server-kv-runtime.cpp
 +    server-kv-runtime.h
-+    server-kv-block-backend.cpp
-+    server-kv-block-backend.h
++      server-kv-block-backend.cpp
++      server-kv-block-backend.h
++      server-kv-swap-store.cpp
++      server-kv-swap-store.h
 +    server-speculation-controller.cpp
 +    server-speculation-controller.h
++    server-runtime-adapter.cpp
++    server-runtime-adapter.h
++    server-model-cost-model.cpp
++    server-model-cost-model.h
      server-common.cpp
      server-common.h
      server-context.cpp
-@@ -27,6 +39,12 @@ target_include_directories(${TARGET} PRIVATE ../mtmd)
+@@ -27,6 +47,12 @@ target_include_directories(${TARGET} PRIVATE ../mtmd)
  target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
  target_link_libraries(${TARGET} PUBLIC llama-common mtmd ${CMAKE_THREAD_LIBS_INIT})
  
@@ -893,21 +2267,31 @@ index 7d42743..6c7ecde 100644
  
  set(TARGET llama-server-impl)
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..777ee09 100644
+index 986b2f1..121948f 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -4,6 +4,10 @@
+@@ -4,6 +4,12 @@
  #include "server-http.h"
  #include "server-task.h"
  #include "server-queue.h"
 +#include "server-inference-scheduler.h"
++#include "server-inference-iteration.h"
 +#include "server-kv-capacity-planner.h"
 +#include "server-kv-runtime.h"
 +#include "server-speculation-controller.h"
++#include "server-runtime-adapter.h"
  
  #include "build-info.h"
  #include "common.h"
-@@ -685,6 +689,7 @@ struct server_metrics {
+@@ -129,6 +135,7 @@ struct server_slot {
+     slot_state state = SLOT_STATE_IDLE;
+ 
+     server_prompt prompt;
++    llama_tokens cuda_swapped_tokens;
+ 
+     bool prompt_save(server_prompt_cache & prompt_cache) const {
+         if (prompt.tokens.size() == 0) {
+@@ -685,6 +692,7 @@ struct server_metrics {
      int64_t t_start = 0;
  
      uint64_t n_prompt_tokens_processed_total = 0;
@@ -915,7 +2299,7 @@ index 986b2f1..777ee09 100644
      uint64_t t_prompt_processing_total       = 0;
      uint64_t n_tokens_predicted_total        = 0;
      uint64_t t_tokens_generation_total       = 0;
-@@ -692,6 +697,7 @@ struct server_metrics {
+@@ -692,6 +700,7 @@ struct server_metrics {
      uint64_t n_tokens_max = 0;
  
      uint64_t n_prompt_tokens_processed = 0;
@@ -923,7 +2307,7 @@ index 986b2f1..777ee09 100644
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -700,6 +706,19 @@ struct server_metrics {
+@@ -700,6 +709,33 @@ struct server_metrics {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -935,15 +2319,29 @@ index 986b2f1..777ee09 100644
 +    uint64_t n_decode_tokens_scheduled_total  = 0;
 +    uint64_t n_prefill_tokens_scheduled_total = 0;
 +    uint64_t n_prefill_chunks_scheduled_total = 0;
++    uint64_t batch_tokens = 0;
++    uint64_t batch_sequences = 0;
++    double prefill_starvation_ms = 0.0;
 +    uint64_t n_kv_admission_pressure_total = 0;
 +    uint64_t n_kv_proactive_evictions_total = 0;
 +    uint64_t n_kv_proactive_reclaimed_tokens_total = 0;
 +    uint64_t n_kv_admission_failures_total = 0;
++    uint64_t n_requests_preempted_total = 0;
++    uint64_t n_requests_swapped_total = 0;
++    uint64_t n_requests_restored_total = 0;
++    uint64_t n_requests_recomputed_total = 0;
++    uint64_t n_draft_tokens_total = 0;
++    uint64_t n_draft_tokens_accepted_total = 0;
++    double t_speculation_draft_total_ms = 0.0;
++    server_latency_histogram time_to_first_token;
++    server_latency_histogram time_per_output_token;
++    server_latency_histogram request_latency;
++    server_latency_histogram request_queue;
 +
      void init() {
          t_start = ggml_time_us();
      }
-@@ -707,6 +726,8 @@ struct server_metrics {
+@@ -707,6 +743,8 @@ struct server_metrics {
      void on_prompt_eval(const server_slot & slot) {
          n_prompt_tokens_processed_total += slot.n_prompt_tokens_processed;
          n_prompt_tokens_processed       += slot.n_prompt_tokens_processed;
@@ -952,7 +2350,7 @@ index 986b2f1..777ee09 100644
          t_prompt_processing             += slot.t_prompt_processing;
          t_prompt_processing_total       += slot.t_prompt_processing;
  
-@@ -730,8 +751,36 @@ struct server_metrics {
+@@ -730,8 +768,63 @@ struct server_metrics {
          }
      }
  
@@ -966,11 +2364,18 @@ index 986b2f1..777ee09 100644
 +        }
 +    }
 +
-+    void on_scheduler_plan(size_t decode_tokens, const server_prefill_plan & plan) {
++    void on_scheduler_plan(
++            size_t decode_tokens,
++            size_t decode_sequences,
++            const server_prefill_plan & plan,
++            double max_prefill_wait_ms) {
 +        n_scheduler_iterations_total++;
 +        n_decode_tokens_scheduled_total += decode_tokens;
 +        n_prefill_tokens_scheduled_total += plan.tokens_scheduled;
 +        n_prefill_chunks_scheduled_total += plan.allocations.size();
++        batch_tokens = decode_tokens + plan.tokens_scheduled;
++        batch_sequences = decode_sequences + plan.allocations.size();
++        prefill_starvation_ms = max_prefill_wait_ms;
 +    }
 +
 +    void on_kv_capacity_plan(const server_kv_capacity_plan & plan) {
@@ -983,13 +2388,33 @@ index 986b2f1..777ee09 100644
 +        n_kv_admission_failures_total += plan.fits() ? 0 : 1;
 +    }
 +
++    void on_speculation(size_t drafted, size_t accepted) {
++        n_draft_tokens_total += drafted;
++        n_draft_tokens_accepted_total += accepted;
++    }
++
++    void on_request_finished(const server_slot & slot) {
++        if (!slot.task || slot.task->t_queued_us <= 0 || slot.t_start_process_prompt <= 0) return;
++        const int64_t now = ggml_time_us();
++        request_queue.observe(std::max<int64_t>(0,
++                slot.t_start_process_prompt - slot.task->t_queued_us) / 1.e6);
++        request_latency.observe(std::max<int64_t>(0,
++                now - slot.task->t_queued_us) / 1.e6);
++        if (slot.n_decoded > 0 && slot.t_start_generation > 0) {
++            time_to_first_token.observe(std::max<int64_t>(0,
++                    slot.t_start_generation - slot.task->t_queued_us) / 1.e6);
++            time_per_output_token.observe((slot.t_token_generation / 1.e3) /
++                    std::max(1, slot.n_decoded - 1));
++        }
++    }
++
      void reset_bucket() {
          n_prompt_tokens_processed = 0;
 +        n_prompt_tokens_cached    = 0;
          t_prompt_processing       = 0;
          n_tokens_predicted        = 0;
          t_tokens_generation       = 0;
-@@ -816,8 +865,10 @@ private:
+@@ -816,8 +909,11 @@ private:
      json json_ui_settings = json::object();    // Primary: new name
      json json_webui_settings = json::object();    // Deprecated: use json_ui_settings instead (kept for compat)
  
@@ -998,11 +2423,12 @@ index 986b2f1..777ee09 100644
 +    server_inference_scheduler inference_scheduler;
 +    server_kv_capacity_planner kv_capacity_planner;
 +    std::unique_ptr<server_kv_runtime> kv_runtime;
++    std::unique_ptr<server_runtime_adapter> runtime_adapter = server_create_llama_runtime();
 +    server_speculation_controller speculation_controller;
  
      std::string model_name; // name of the loaded model, to be used by API
      std::set<std::string> model_aliases; // additional names for the model
-@@ -1114,8 +1165,35 @@ private:
+@@ -1114,8 +1210,39 @@ private:
  
          n_swa = params_base.swa_full ? 0 : llama_model_n_swa(model_tgt);
  
@@ -1017,6 +2443,9 @@ index 986b2f1..777ee09 100644
 +            (size_t) params_base.prefill_chunk_max,
 +            params_base.prefill_target_iteration_ms,
 +        });
++        SRV_INF("CacheFlow policies: scheduler=%s, prefill=%s, speculation=%s, kv_blocks=%s\n",
++                params_base.scheduler_policy.c_str(), params_base.prefill_policy.c_str(),
++                params_base.spec_policy.c_str(), params_base.kv_block_runtime ? "enabled" : "disabled");
 +        speculation_controller.configure({
 +            params_base.speculative_adaptive,
 +            1,
@@ -1027,6 +2456,7 @@ index 986b2f1..777ee09 100644
 +            params_base.speculative_kv_pressure,
 +            (size_t) params_base.speculative_cooldown,
 +            4,
++            24,
 +        });
 +        if (params_base.kv_block_runtime) {
 +            const size_t block_size = (size_t) params_base.kv_block_size;
@@ -1040,7 +2470,7 @@ index 986b2f1..777ee09 100644
  
          // setup slots
          SRV_INF("initializing slots, n_slots = %d\n", params_base.n_parallel);
-@@ -1383,9 +1461,10 @@ private:
+@@ -1383,9 +1510,10 @@ private:
  
          bool update_cache = false;
  
@@ -1054,7 +2484,7 @@ index 986b2f1..777ee09 100644
  
              for (server_slot & slot : slots) {
                  // skip the slot if it is not available
-@@ -1393,29 +1472,27 @@ private:
+@@ -1393,29 +1521,38 @@ private:
                      continue;
                  }
  
@@ -1073,26 +2503,37 @@ index 986b2f1..777ee09 100644
 -                    sim_best = sim_cur;
 -
 -                    ret = &slot;
--                }
++                size_t swapped_prefix = 0;
++                while (swapped_prefix < slot.cuda_swapped_tokens.size() &&
++                        swapped_prefix < task.tokens.size() &&
++                        slot.cuda_swapped_tokens[swapped_prefix] == task.tokens[swapped_prefix]) {
++                    ++swapped_prefix;
+                 }
++                const size_t resident_prefix = slot.prompt.tokens.get_common_prefix(task.tokens);
 +                candidates.push_back({
 +                    slot.id,
-+                    slot.prompt.tokens.get_common_prefix(task.tokens),
-+                    slot.prompt.tokens.size(),
++                    std::max(resident_prefix, swapped_prefix),
++                    std::max(slot.prompt.tokens.size(), slot.cuda_swapped_tokens.size()),
 +                    slot.t_last_used,
 +                });
              }
  
 -            if (ret != nullptr) {
 -                const float f_keep = (sim_best*task.tokens.size()) / ret->prompt.tokens.size();
+-
+-                SLT_INF(*ret, "selected slot by LCP similarity, sim_best = %.3f (> %.3f thold), f_keep = %.3f\n",
+-                        sim_best, slot_prompt_similarity, f_keep);
 +            const auto selected = inference_scheduler.select_slot(candidates, task.tokens.size());
 +            if (selected.found()) {
 +                ret = get_slot_by_id(selected.id);
 +                GGML_ASSERT(ret != nullptr);
 +                const float similarity = (float) selected.reused_tokens / task.tokens.size();
-+                const float f_keep = (float) selected.reused_tokens / ret->prompt.tokens.size();
- 
--                SLT_INF(*ret, "selected slot by LCP similarity, sim_best = %.3f (> %.3f thold), f_keep = %.3f\n",
--                        sim_best, slot_prompt_similarity, f_keep);
++                const size_t retained_tokens = std::max(
++                        ret->prompt.tokens.size(), ret->cuda_swapped_tokens.size());
++                const float f_keep = retained_tokens > 0
++                        ? (float) selected.reused_tokens / retained_tokens
++                        : 0.0f;
++
 +                SLT_INF(*ret,
 +                        "selected slot by cache-aware score, score = %.3f, similarity = %.3f (> %.3f thold), "
 +                        "reused = %zu, evicted = %zu, penalty = %.3f, f_keep = %.3f\n",
@@ -1102,7 +2543,7 @@ index 986b2f1..777ee09 100644
  
                  // if we are about to lose a large portion of the existing context - save it in the prompt cache
                  if (f_keep < 0.5f) {
-@@ -1443,6 +1520,7 @@ private:
+@@ -1443,12 +1580,15 @@ private:
  
              if (ret != nullptr) {
                  SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
@@ -1110,7 +2551,15 @@ index 986b2f1..777ee09 100644
  
                  update_cache = true;
              }
-@@ -1469,41 +1547,114 @@ private:
+         }
+ 
+         if (ret) {
++            const bool cuda_restored = try_restore_cuda_swap(*ret, task.tokens);
++            if (cuda_restored) update_cache = false;
+             update_cache = update_cache && prompt_cache;
+ 
+             // cache prompts only for completion tasks
+@@ -1469,41 +1609,114 @@ private:
  
                  SRV_INF("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
              }
@@ -1246,7 +2695,7 @@ index 986b2f1..777ee09 100644
      }
  
      std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
-@@ -1519,7 +1670,82 @@ private:
+@@ -1519,7 +1732,128 @@ private:
          return output;
      }
  
@@ -1310,8 +2759,18 @@ index 986b2f1..777ee09 100644
 +        GGML_ASSERT(invalid.empty());
 +    }
 +
-+    void mark_slot_preempted(server_slot & slot) {
-+        if (!kv_runtime || slot.prompt.tokens.empty()) return;
++    bool mark_slot_preempted(server_slot & slot) {
++        if (slot.prompt.tokens.empty()) return false;
++        bool cuda_swapped = false;
++        auto * memory = llama_get_memory(ctx_tgt);
++        if (!ctx_dft && llama_memory_seq_can_swap_cuda(memory, slot.id)) {
++            llama_synchronize(ctx_tgt);
++            cuda_swapped = llama_memory_seq_swap_out_cuda(memory, slot.id);
++            if (cuda_swapped) slot.cuda_swapped_tokens = slot.prompt.tokens.get_tokens();
++        }
++        metrics.n_requests_preempted_total++;
++        metrics.n_requests_swapped_total += cuda_swapped ? 1 : 0;
++        if (!kv_runtime) return cuda_swapped;
 +        if (!kv_runtime->preempt(slot.id, (uint64_t) ggml_time_us())) {
 +            // The logical snapshot may lag a just-completed request by one
 +            // iteration. Synchronize it before retrying the transition.
@@ -1322,14 +2781,50 @@ index 986b2f1..777ee09 100644
 +                kv_runtime->preempt(slot.id, (uint64_t) ggml_time_us());
 +            }
 +        }
++        return cuda_swapped;
++    }
++
++    bool try_restore_cuda_swap(server_slot & slot, const server_tokens & requested) {
++        if (slot.cuda_swapped_tokens.empty() || requested.size() < slot.cuda_swapped_tokens.size()) {
++            return false;
++        }
++        for (size_t i = 0; i < slot.cuda_swapped_tokens.size(); ++i) {
++            if (slot.cuda_swapped_tokens[i] != requested[i]) return false;
++        }
++        if (!llama_memory_seq_swap_in_cuda(llama_get_memory(ctx_tgt), slot.id)) return false;
++        slot.prompt.tokens.clear();
++        slot.prompt.tokens.insert(slot.cuda_swapped_tokens);
++        // The scheduler constructs its prefill candidates before the STARTED
++        // state performs the usual one-token logits rollback. Do that rollback
++        // at restore time so an exact prompt match still schedules one token.
++        if (!slot.prompt.tokens.empty()) {
++            slot.prompt.tokens.keep_first(slot.prompt.tokens.size() - 1);
++            common_context_seq_rm(ctx_tgt, slot.id, slot.prompt.tokens.pos_next(), -1);
++        }
++        slot.cuda_swapped_tokens.clear();
++        metrics.n_requests_restored_total++;
++        if (kv_runtime && kv_runtime->is_swapped(slot.id)) {
++            std::string error;
++            if (!kv_runtime->restore(slot.id, (uint64_t) ggml_time_us(), &error)) {
++                SRV_WRN("logical KV restore failed for slot %d: %s\n", slot.id, error.c_str());
++            }
++        }
++        SRV_INF("restored real CUDA KV stream for slot %d with %zu prompt tokens\n",
++                slot.id, slot.prompt.tokens.size());
++        return true;
 +    }
 +
      bool launch_slot_with_task(server_slot & slot, server_task && task) {
++        if (!slot.cuda_swapped_tokens.empty()) {
++            llama_memory_seq_swap_erase_cuda(llama_get_memory(ctx_tgt), slot.id);
++            slot.cuda_swapped_tokens.clear();
++            metrics.n_requests_recomputed_total++;
++        }
 +        speculation_controller.reset(slot.id);
          // process per-request lora adapters
          if (!task.params.lora.empty()) {
              auto task_loras = construct_lora_list(task.params.lora);
-@@ -1590,6 +1816,8 @@ private:
+@@ -1590,6 +1924,8 @@ private:
              return false;
          }
  
@@ -1338,7 +2833,15 @@ index 986b2f1..777ee09 100644
          SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
  
          // initialize samplers
-@@ -2214,13 +2442,15 @@ private:
+@@ -1966,6 +2302,7 @@ private:
+ 
+         res->generation_params = slot.task->params; // copy the parameters
+ 
++        metrics.on_request_finished(slot);
+         queue_results.send(std::move(res));
+     }
+ 
+@@ -2214,12 +2551,14 @@ private:
                              if (!slot.is_processing()) {
                                  SLT_INF(slot, "%s", "saving idle slot to prompt cache\n");
  
@@ -1349,13 +2852,13 @@ index 986b2f1..777ee09 100644
                                      prompt_cache->update();
                                  }
  
-                                 if (params_base.kv_unified) {
+-                                if (params_base.kv_unified) {
++                                const bool cuda_swapped = saved && mark_slot_preempted(slot);
++                                if (params_base.kv_unified || cuda_swapped) {
                                      // [TAG_IDLE_SLOT_CLEAR]
-+                                    if (saved) mark_slot_preempted(slot);
                                      slot.prompt_clear(false);
                                  }
-                             }
-@@ -2301,6 +2531,7 @@ private:
+@@ -2301,6 +2640,7 @@ private:
                      res->t_start             = metrics.t_start;
  
                      res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
@@ -1363,7 +2866,7 @@ index 986b2f1..777ee09 100644
                      res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
                      res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
                      res->t_tokens_generation_total       = metrics.t_tokens_generation_total;
-@@ -2308,12 +2539,44 @@ private:
+@@ -2308,12 +2648,84 @@ private:
                      res->n_tokens_max = metrics.n_tokens_max;
  
                      res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
@@ -1382,13 +2885,53 @@ index 986b2f1..777ee09 100644
 +                    res->n_decode_tokens_scheduled_total  = metrics.n_decode_tokens_scheduled_total;
 +                    res->n_prefill_tokens_scheduled_total = metrics.n_prefill_tokens_scheduled_total;
 +                    res->n_prefill_chunks_scheduled_total = metrics.n_prefill_chunks_scheduled_total;
++                    res->batch_tokens = metrics.batch_tokens;
++                    res->batch_sequences = metrics.batch_sequences;
++                    res->prefill_starvation_ms = metrics.prefill_starvation_ms;
 +                    res->n_kv_admission_pressure_total = metrics.n_kv_admission_pressure_total;
 +                    res->n_kv_proactive_evictions_total = metrics.n_kv_proactive_evictions_total;
 +                    res->n_kv_proactive_reclaimed_tokens_total = metrics.n_kv_proactive_reclaimed_tokens_total;
 +                    res->n_kv_admission_failures_total = metrics.n_kv_admission_failures_total;
++                    res->n_requests_preempted_total = metrics.n_requests_preempted_total;
++                    res->n_requests_swapped_total = metrics.n_requests_swapped_total;
++                    res->n_requests_restored_total = metrics.n_requests_restored_total;
++                    res->n_requests_recomputed_total = metrics.n_requests_recomputed_total;
++                    res->n_draft_tokens_total = metrics.n_draft_tokens_total;
++                    res->n_draft_tokens_accepted_total = metrics.n_draft_tokens_accepted_total;
++                    res->n_speculation_disabled_low_acceptance_total =
++                            speculation_controller.disabled_low_acceptance_total();
++                    const double target_ms_per_token = metrics.n_tokens_predicted_total
++                            ? (double) metrics.t_tokens_generation_total /
++                                    metrics.n_tokens_predicted_total
++                            : 0.0;
++                    res->speculation_net_saved_ms =
++                            metrics.n_draft_tokens_accepted_total * target_ms_per_token -
++                            metrics.t_speculation_draft_total_ms;
++                    res->time_to_first_token = metrics.time_to_first_token;
++                    res->time_per_output_token = metrics.time_per_output_token;
++                    res->request_latency = metrics.request_latency;
++                    res->request_queue = metrics.request_queue;
++
++                    const auto scheduler_state = inference_scheduler.state();
++                    res->adaptive_prefill_chunk = scheduler_state.effective_chunk_size;
++                    res->adaptive_prefill_iteration_ms = scheduler_state.iteration_latency_ewma_ms;
++                    for (const auto & slot : slots) {
++                        res->adaptive_draft_length += speculation_controller.state(slot.id).draft_tokens;
++                    }
++                    if (!slots.empty()) res->adaptive_draft_length /= slots.size();
++
++                    if (kv_runtime) {
++                        const auto kv_snapshot = kv_runtime->snapshot().blocks;
++                        res->kv_blocks_used = kv_snapshot.allocated_blocks;
++                        res->kv_blocks_free = kv_snapshot.capacity_blocks -
++                                kv_snapshot.allocated_blocks - kv_snapshot.reserved_blocks;
++                        res->kv_shared_blocks = kv_snapshot.shared_blocks;
++                        res->kv_copy_on_write_total = kv_snapshot.copy_on_write_total;
++                    }
 +
 +                    auto memory = llama_get_memory(ctx_tgt);
 +                    if (memory) {
++                        llama_memory_cacheflow_cuda_stats(memory, &res->cuda_kv);
 +                        for (const auto & slot : slots) {
 +                            const llama_pos pos_min = llama_memory_seq_pos_min(memory, slot.id);
 +                            const llama_pos pos_max = llama_memory_seq_pos_max(memory, slot.id);
@@ -1408,7 +2951,7 @@ index 986b2f1..777ee09 100644
  
                      if (task.metrics_reset_bucket) {
                          metrics.reset_bucket();
-@@ -2602,7 +2865,9 @@ private:
+@@ -2602,7 +3014,9 @@ private:
                  const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                  const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
  
@@ -1419,7 +2962,20 @@ index 986b2f1..777ee09 100644
  
                  if (n_draft_max > 0) {
                      GGML_ASSERT(slot.can_speculate());
-@@ -2705,6 +2970,38 @@ private:
+@@ -2643,7 +3057,12 @@ private:
+ 
+         // generate the actual drafts (if any)
+         {
++            const int64_t draft_started_us = ggml_time_us();
+             common_speculative_draft(spec.get());
++            if (!drafting.empty()) {
++                metrics.t_speculation_draft_total_ms +=
++                        std::max<int64_t>(0, ggml_time_us() - draft_started_us) / 1.e3;
++            }
+         }
+ 
+         // make checkpoints if needed
+@@ -2705,6 +3124,55 @@ private:
          int32_t n_batch  = llama_n_batch(ctx_tgt);
          int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
  
@@ -1445,20 +3001,37 @@ index 986b2f1..777ee09 100644
 +                        : 0;
 +            }
 +            const size_t total = (size_t) slot.task->n_tokens();
-+            prefill_candidates.push_back({slot.id, total > cached ? total - cached : 0});
++            // A fully cached prompt still has to re-evaluate its final token to
++            // produce logits ([TAG_PROMPT_LOGITS] below). Giving it zero quota
++            // deadlocks the iteration before that rollback can run.
++            prefill_candidates.push_back({slot.id, std::max<size_t>(1,
++                    total > cached ? total - cached : 0)});
 +        }
++
++        server_inference_iteration iteration;
++        GGML_ASSERT(iteration.prepare());
 +
 +        const size_t decode_tokens_planned = (size_t) batch.n_tokens;
 +        const int64_t iteration_started_us = ggml_time_us();
 +        const auto prefill_plan = inference_scheduler.plan_prefill(
 +                prefill_candidates,
 +                n_batch > batch.n_tokens ? (size_t) (n_batch - batch.n_tokens) : 0);
-+        metrics.on_scheduler_plan((size_t) batch.n_tokens, prefill_plan);
++        double max_prefill_wait_ms = 0.0;
++        for (const auto & candidate : prefill_candidates) {
++            if (prefill_plan.quota(candidate.id) != 0) continue;
++            const auto & waiting = slots.at((size_t) candidate.id);
++            if (waiting.task && waiting.task->t_queued_us > 0) {
++                max_prefill_wait_ms = std::max(max_prefill_wait_ms,
++                        (iteration_started_us - waiting.task->t_queued_us) / 1.e3);
++            }
++        }
++        metrics.on_scheduler_plan(
++                (size_t) batch.n_tokens, generating.size(), prefill_plan, max_prefill_wait_ms);
 +
          float  alora_scale       = -1.0f;
          size_t alora_disabled_id = 0;
  
-@@ -2730,6 +3027,13 @@ private:
+@@ -2730,6 +3198,13 @@ private:
                  if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
                      const auto & input_tokens = slot.task->tokens;
  
@@ -1472,7 +3045,7 @@ index 986b2f1..777ee09 100644
                      // used to determine the number of tokens added to the batch for the current slot
                      const auto n_tokens_prev = batch.n_tokens;
  
-@@ -3110,7 +3414,9 @@ private:
+@@ -3110,7 +3585,9 @@ private:
                      const bool n_before_user_known = n_before_user > 0;
  
                      // add prompt tokens for processing in the current batch
@@ -1483,7 +3056,47 @@ index 986b2f1..777ee09 100644
                          // get next token to process
                          llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                          if (cur_tok == LLAMA_TOKEN_NULL) {
-@@ -3593,6 +3899,12 @@ private:
+@@ -3249,6 +3726,13 @@ private:
+ 
+         SRV_DBG("decoding batch, n_tokens = %d\n", batch.n_tokens);
+ 
++        GGML_ASSERT(iteration.plan({
++            decode_tokens_planned,
++            prefill_plan.tokens_scheduled,
++            (size_t) batch.n_tokens,
++        }));
++        GGML_ASSERT(iteration.begin_execute());
++
+         auto accept_special_token = [&](server_slot & slot, llama_token token) {
+             return params_base.special ||
+                 slot.task->params.sampling.preserved_tokens.find(token) != slot.task->params.sampling.preserved_tokens.end();
+@@ -3294,7 +3778,8 @@ private:
+                 batch.logits   + i,
+             };
+ 
+-            const int ret = llama_decode(ctx_tgt, batch_view);
++            const auto decode_result = runtime_adapter->decode(ctx_tgt, batch_view);
++            const int ret = decode_result.code;
+ 
+             metrics.on_decoded(slots);
+ 
+@@ -3320,6 +3805,7 @@ private:
+                     // TODO: handle ret == 2 (abort) when we start aborting
+ 
+                     if (!err.empty()) {
++                        iteration.abort(err);
+                         SRV_ERR("%s i = %d, n_batch = %d, ret = %d\n", err.c_str(), i, n_batch, ret);
+ 
+                         for (auto & slot : slots) {
+@@ -3394,6 +3880,7 @@ private:
+             //}
+             if (!common_speculative_process(spec.get(), batch_view)) {
+                 SRV_ERR("%s", "failed to process speculative batch\n");
++                iteration.abort("failed to process speculative batch");
+ 
+                 // TODO: handle error
+                 break;
+@@ -3593,6 +4080,13 @@ private:
  
                  // update how many tokens out of those tested were accepted
                  slot.n_draft_accepted += ids.size() - 1;
@@ -1493,24 +3106,36 @@ index 986b2f1..777ee09 100644
 +                    ids.size() - 1,
 +                    current_kv_pressure(),
 +                });
++                metrics.on_speculation(n_draft, ids.size() - 1);
  
                  // add accepted tokens to the prompt
                  slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - n_draft);
-@@ -3633,6 +3945,13 @@ private:
-             }
-         }
+@@ -3631,7 +4125,24 @@ private:
  
+                 SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) ids.size() - 1, (int) n_draft, slot.prompt.n_tokens());
+             }
++            GGML_ASSERT(iteration.record_executed((size_t) n_tokens));
++        }
++
++        if (!iteration.is_aborted()) {
++            GGML_ASSERT(iteration.begin_commit());
++        }
++
 +        inference_scheduler.observe_iteration({
 +            decode_tokens_planned,
 +            prefill_plan.tokens_scheduled,
 +            (ggml_time_us() - iteration_started_us) / 1000.0,
++            prefill_plan.allocations.size(),
 +        });
 +        synchronize_kv_runtime();
-+
++        if (!iteration.is_aborted()) {
++            GGML_ASSERT(iteration.commit());
+         }
++        GGML_ASSERT(iteration.validate().empty());
+ 
          SRV_DBG("%s", "run slots completed\n");
      }
- 
-@@ -4127,6 +4446,58 @@ void server_routes::init_routes() {
+@@ -4127,6 +4638,133 @@ void server_routes::init_routes() {
                      {"name",  "prompt_tokens_total"},
                      {"help",  "Number of prompt tokens processed."},
                      {"value",  (uint64_t) res_task->n_prompt_tokens_processed_total}
@@ -1566,10 +3191,104 @@ index 986b2f1..777ee09 100644
 +                    {"name",  "kv_admission_failures_total"},
 +                    {"help",  "KV admission plans still over capacity after all idle victims."},
 +                    {"value",  res_task->n_kv_admission_failures_total}
++            }, {
++                    {"name",  "kv_copy_on_write_total"},
++                    {"help",  "Logical shared tail blocks cloned before mutation."},
++                    {"value",  res_task->kv_copy_on_write_total}
++            }, {
++                    {"name",  "kv_evicted_blocks_total"},
++                    {"help",  "Logical KV blocks reclaimed proactively by admission control."},
++                    {"value",  params.kv_block_size > 0
++                            ? (res_task->n_kv_proactive_reclaimed_tokens_total + params.kv_block_size - 1) /
++                                    params.kv_block_size
++                            : 0}
++            }, {
++                    {"name",  "kv_swap_bytes_total"},
++                    {"help",  "Cumulative bytes moved between device KV and pinned host storage."},
++                    {"value",  res_task->cuda_kv.swap_bytes}
++            }, {
++                    {"name",  "kv_restore_seconds"},
++                    {"help",  "Cumulative CUDA-event time spent restoring KV blocks."},
++                    {"value",  res_task->cuda_kv.swap_in_microseconds / 1.e6}
++            }, {
++                    {"name",  "requests_preempted_total"},
++                    {"help",  "Sequences selected for KV preemption."},
++                    {"value",  res_task->n_requests_preempted_total}
++            }, {
++                    {"name",  "requests_swapped_total"},
++                    {"help",  "Sequences physically swapped through the CUDA pinned-memory path."},
++                    {"value",  res_task->n_requests_swapped_total}
++            }, {
++                    {"name",  "requests_restored_total"},
++                    {"help",  "CUDA-swapped sequences restored without full prefill recomputation."},
++                    {"value",  res_task->n_requests_restored_total}
++            }, {
++                    {"name",  "requests_recomputed_total"},
++                    {"help",  "Swapped sequences discarded because an incoming prompt did not match."},
++                    {"value",  res_task->n_requests_recomputed_total}
++            }, {
++                    {"name",  "draft_tokens_total"},
++                    {"help",  "Speculative draft tokens verified by the target model."},
++                    {"value",  res_task->n_draft_tokens_total}
++            }, {
++                    {"name",  "draft_tokens_accepted_total"},
++                    {"help",  "Speculative draft tokens accepted by the target model."},
++                    {"value",  res_task->n_draft_tokens_accepted_total}
++            }, {
++                    {"name",  "cuda_kv_kernel_launches_total"},
++                    {"help",  "Descriptor-driven real KV CUDA kernels launched."},
++                    {"value",  res_task->cuda_kv.kernel_launches}
++            }, {
++                    {"name",  "cuda_kv_blocks_copied_total"},
++                    {"help",  "Real KV tensor ranges copied by CacheFlow CUDA kernels."},
++                    {"value",  res_task->cuda_kv.blocks_copied}
++            }, {
++                    {"name",  "cuda_kv_copy_bytes_total"},
++                    {"help",  "Real KV bytes transported by CUDA copy and swap operations."},
++                    {"value",  res_task->cuda_kv.copy_bytes}
++            }, {
++                    {"name",  "cuda_kv_events_waited_total"},
++                    {"help",  "CUDA KV dependency events explicitly waited by the runtime."},
++                    {"value",  res_task->cuda_kv.events_waited}
++            }, {
++                    {"name",  "cuda_kv_backend_errors_total"},
++                    {"help",  "CUDA runtime failures observed by the real KV adapter."},
++                    {"value",  res_task->cuda_kv.backend_errors}
++            }, {
++                    {"name",  "cuda_kv_copy_seconds"},
++                    {"help",  "Cumulative CUDA-event time spent in descriptor KV copies."},
++                    {"value",  res_task->cuda_kv.copy_microseconds / 1.e6}
++            }, {
++                    {"name",  "cuda_kv_swap_out_seconds"},
++                    {"help",  "Cumulative CUDA-event time spent swapping KV to pinned host memory."},
++                    {"value",  res_task->cuda_kv.swap_out_microseconds / 1.e6}
++            }, {
++                    {"name",  "cuda_kv_swap_in_seconds"},
++                    {"help",  "Cumulative CUDA-event time spent restoring KV to device memory."},
++                    {"value",  res_task->cuda_kv.swap_in_microseconds / 1.e6}
              }, {
                      {"name",  "prompt_seconds_total"},
                      {"help",  "Prompt process time"},
-@@ -4156,6 +4527,43 @@ void server_routes::init_routes() {
+@@ -4149,6 +4787,18 @@ void server_routes::init_routes() {
+                     {"value",  res_task->n_tokens_max}
+             }}},
+             {"gauge", {{
++                    {"name",  "cacheflow_scheduler_policy"},
++                    {"help",  "Effective scheduler policy (0 = upstream, 1 = cacheflow)."},
++                    {"value",  params.scheduler_policy == "cacheflow" ? 1 : 0}
++            },{
++                    {"name",  "cacheflow_prefill_policy"},
++                    {"help",  "Effective prefill policy (0 = greedy, 1 = fixed, 2 = adaptive)."},
++                    {"value",  params.prefill_policy == "adaptive" ? 2 : params.prefill_policy == "fixed" ? 1 : 0}
++            },{
++                    {"name",  "cacheflow_spec_policy"},
++                    {"help",  "Effective speculation policy (0 = fixed, 1 = adaptive)."},
++                    {"value",  params.spec_policy == "adaptive" ? 1 : 0}
++            },{
+                     {"name",  "prompt_tokens_seconds"},
+                     {"help",  "Average prompt throughput in tokens/s."},
+                     {"value",  res_task->n_prompt_tokens_processed ? 1.e3 / res_task->t_prompt_processing * res_task->n_prompt_tokens_processed : 0.}
+@@ -4156,6 +4806,115 @@ void server_routes::init_routes() {
                      {"name",  "predicted_tokens_seconds"},
                      {"help",  "Average generation throughput in tokens/s."},
                      {"value",  res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}
@@ -1581,9 +3300,81 @@ index 986b2f1..777ee09 100644
 +                                    (res_task->n_prompt_tokens_cached + res_task->n_prompt_tokens_processed)
 +                            : 0.}
 +            },{
++                    {"name",  "kv_prefix_hit_ratio"},
++                    {"help",  "Ratio of prompt tokens served from a resident KV prefix."},
++                    {"value",  res_task->n_prompt_tokens_cached + res_task->n_prompt_tokens_processed
++                            ? (double) res_task->n_prompt_tokens_cached /
++                                    (res_task->n_prompt_tokens_cached + res_task->n_prompt_tokens_processed)
++                            : 0.}
++            },{
++                    {"name",  "batch_tokens"},
++                    {"help",  "Tokens admitted by the most recent scheduler iteration."},
++                    {"value",  res_task->batch_tokens}
++            },{
++                    {"name",  "batch_sequences"},
++                    {"help",  "Sequences admitted by the most recent scheduler iteration."},
++                    {"value",  res_task->batch_sequences}
++            },{
++                    {"name",  "prefill_starvation_ms"},
++                    {"help",  "Maximum queue age of a prefill sequence deferred by the latest plan."},
++                    {"value",  res_task->prefill_starvation_ms}
++            },{
 +                    {"name",  "kv_cache_tokens"},
 +                    {"help",  "Logical tokens currently occupying KV cache sequence spans."},
 +                    {"value",  res_task->kv_cache_tokens}
++            },{
++                    {"name",  "kv_blocks_used"},
++                    {"help",  "Logical KV blocks currently allocated."},
++                    {"value",  res_task->kv_blocks_used}
++            },{
++                    {"name",  "kv_blocks_free"},
++                    {"help",  "Logical KV blocks available after reservations."},
++                    {"value",  res_task->kv_blocks_free}
++            },{
++                    {"name",  "kv_shared_blocks"},
++                    {"help",  "Logical KV blocks referenced by more than one sequence."},
++                    {"value",  res_task->kv_shared_blocks}
++            },{
++                    {"name",  "adaptive_prefill_chunk"},
++                    {"help",  "Current adaptive prefill chunk size in tokens."},
++                    {"value",  res_task->adaptive_prefill_chunk}
++            },{
++                    {"name",  "adaptive_prefill_iteration_milliseconds"},
++                    {"help",  "EWMA inference-iteration latency observed by adaptive prefill."},
++                    {"value",  res_task->adaptive_prefill_iteration_ms}
++            },{
++                    {"name",  "adaptive_draft_length"},
++                    {"help",  "Mean current draft length recommended across server slots."},
++                    {"value",  res_task->adaptive_draft_length}
++            },{
++                    {"name",  "draft_acceptance_ratio"},
++                    {"help",  "Cumulative fraction of speculative draft tokens accepted."},
++                    {"value",  res_task->n_draft_tokens_total
++                            ? (double) res_task->n_draft_tokens_accepted_total / res_task->n_draft_tokens_total
++                            : 0.0}
++            },{
++                    {"name",  "speculation_net_saved_ms"},
++                    {"help",  "Estimated accepted-target work saved minus observed draft wall time."},
++                    {"value",  res_task->speculation_net_saved_ms}
++            },{
++                    {"name",  "cuda_kv_effective_bandwidth_bytes"},
++                    {"help",  "Effective KV transport bytes per CUDA-event second."},
++                    {"value",  res_task->cuda_kv.copy_microseconds +
++                                    res_task->cuda_kv.swap_out_microseconds +
++                                    res_task->cuda_kv.swap_in_microseconds
++                            ? res_task->cuda_kv.copy_bytes * 1.e6 /
++                                    (res_task->cuda_kv.copy_microseconds +
++                                     res_task->cuda_kv.swap_out_microseconds +
++                                     res_task->cuda_kv.swap_in_microseconds)
++                            : 0.0}
++            },{
++                    {"name",  "cuda_kv_pinned_pool_bytes"},
++                    {"help",  "Pinned host bytes currently retained by CUDA KV swap records."},
++                    {"value",  res_task->cuda_kv.pinned_bytes_current}
++            },{
++                    {"name",  "cuda_kv_pinned_pool_peak_bytes"},
++                    {"help",  "Peak pinned host bytes retained by CUDA KV swap records."},
++                    {"value",  res_task->cuda_kv.pinned_bytes_peak}
 +            },{
 +                    {"name",  "kv_cache_capacity_tokens"},
 +                    {"help",  "Configured KV cache token capacity across all slots."},
@@ -1613,12 +3404,166 @@ index 986b2f1..777ee09 100644
              },{
                      {"name",  "requests_processing"},
                      {"help",  "Number of requests processing."},
+@@ -4188,6 +4947,38 @@ void server_routes::init_routes() {
+             }
+         }
+ 
++        prometheus << "# HELP llamacpp:speculation_disabled_total Adaptive speculation cooldown entries by reason.\n"
++                   << "# TYPE llamacpp:speculation_disabled_total counter\n"
++                   << "llamacpp:speculation_disabled_total{reason=\"low_acceptance\"} "
++                   << res_task->n_speculation_disabled_low_acceptance_total << "\n";
++
++        auto append_histogram = [&prometheus](const char * name, const char * help,
++                const server_latency_histogram & histogram) {
++            prometheus << "# HELP llamacpp:" << name << " " << help << "\n"
++                       << "# TYPE llamacpp:" << name << " histogram\n";
++            uint64_t cumulative = 0;
++            for (size_t index = 0; index < histogram.buckets.size(); ++index) {
++                cumulative += histogram.buckets[index];
++                prometheus << "llamacpp:" << name << "_bucket{le=\"";
++                if (index < server_latency_histogram::bounds.size()) {
++                    prometheus << server_latency_histogram::bounds[index];
++                } else {
++                    prometheus << "+Inf";
++                }
++                prometheus << "\"} " << cumulative << "\n";
++            }
++            prometheus << "llamacpp:" << name << "_sum " << histogram.sum << "\n"
++                       << "llamacpp:" << name << "_count " << histogram.count << "\n";
++        };
++        append_histogram("time_to_first_token_seconds",
++                "Request queue plus prompt time to first sampled token.", res_task->time_to_first_token);
++        append_histogram("time_per_output_token_seconds",
++                "Mean inter-token generation time per completed request.", res_task->time_per_output_token);
++        append_histogram("request_latency_seconds",
++                "End-to-end server request latency.", res_task->request_latency);
++        append_histogram("request_queue_seconds",
++                "Time from enqueue until prompt processing starts.", res_task->request_queue);
++
+         res->headers["Process-Start-Time-Unix"] = std::to_string(res_task->t_start);
+         res->content_type = "text/plain; version=0.0.4";
+         res->status = 200;
+diff --git a/tools/server/server-inference-iteration.cpp b/tools/server/server-inference-iteration.cpp
+new file mode 100644
+index 0000000..28e2b6b
+--- /dev/null
++++ b/tools/server/server-inference-iteration.cpp
+@@ -0,0 +1,56 @@
++#include "server-inference-iteration.h"
++
++bool server_inference_iteration::prepare() {
++    if (phase_ != server_iteration_phase::created) return false;
++    phase_ = server_iteration_phase::prepared;
++    return true;
++}
++
++bool server_inference_iteration::plan(server_iteration_plan_summary value) {
++    if (phase_ != server_iteration_phase::prepared) return false;
++    plan_ = value;
++    phase_ = server_iteration_phase::planned;
++    return true;
++}
++
++bool server_inference_iteration::begin_execute() {
++    if (phase_ != server_iteration_phase::planned) return false;
++    phase_ = server_iteration_phase::executing;
++    return true;
++}
++
++bool server_inference_iteration::record_executed(size_t tokens) {
++    if (phase_ != server_iteration_phase::executing ||
++            tokens > plan_.physical_batch_tokens - executed_tokens_) return false;
++    executed_tokens_ += tokens;
++    return true;
++}
++
++bool server_inference_iteration::begin_commit() {
++    if (phase_ != server_iteration_phase::executing ||
++            executed_tokens_ != plan_.physical_batch_tokens) return false;
++    phase_ = server_iteration_phase::committing;
++    return true;
++}
++
++bool server_inference_iteration::commit() {
++    if (phase_ != server_iteration_phase::committing) return false;
++    phase_ = server_iteration_phase::committed;
++    return true;
++}
++
++void server_inference_iteration::abort(std::string reason) {
++    if (phase_ == server_iteration_phase::committed) return;
++    phase_ = server_iteration_phase::aborted;
++    error_ = std::move(reason);
++}
++
++std::string server_inference_iteration::validate() const {
++    if (executed_tokens_ > plan_.physical_batch_tokens) return "execution exceeded immutable physical batch";
++    if ((phase_ == server_iteration_phase::committing || phase_ == server_iteration_phase::committed) &&
++            executed_tokens_ != plan_.physical_batch_tokens) {
++        return "iteration committed a partial physical batch";
++    }
++    if (phase_ == server_iteration_phase::aborted && error_.empty()) return "aborted iteration has no reason";
++    return {};
++}
+diff --git a/tools/server/server-inference-iteration.h b/tools/server/server-inference-iteration.h
+new file mode 100644
+index 0000000..a07cccb
+--- /dev/null
++++ b/tools/server/server-inference-iteration.h
+@@ -0,0 +1,47 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <string>
++
++enum class server_iteration_phase : uint8_t {
++    created,
++    prepared,
++    planned,
++    executing,
++    committing,
++    committed,
++    aborted,
++};
++
++struct server_iteration_plan_summary {
++    size_t decode_tokens = 0;
++    size_t prefill_tokens = 0;
++    size_t physical_batch_tokens = 0;
++};
++
++// Enforces the prepare -> immutable plan -> execute -> commit transaction
++// boundary independently from llama-server's request and HTTP state.
++class server_inference_iteration {
++public:
++    bool prepare();
++    bool plan(server_iteration_plan_summary value);
++    bool begin_execute();
++    bool record_executed(size_t tokens);
++    bool begin_commit();
++    bool commit();
++    void abort(std::string reason);
++
++    server_iteration_phase phase() const { return phase_; }
++    const server_iteration_plan_summary & plan_summary() const { return plan_; }
++    size_t executed_tokens() const { return executed_tokens_; }
++    const std::string & error() const { return error_; }
++    bool is_aborted() const { return phase_ == server_iteration_phase::aborted; }
++    std::string validate() const;
++
++private:
++    server_iteration_phase phase_ = server_iteration_phase::created;
++    server_iteration_plan_summary plan_;
++    size_t executed_tokens_ = 0;
++    std::string error_;
++};
 diff --git a/tools/server/server-inference-scheduler.cpp b/tools/server/server-inference-scheduler.cpp
 new file mode 100644
-index 0000000..cc8d76e
+index 0000000..dd104e7
 --- /dev/null
 +++ b/tools/server/server-inference-scheduler.cpp
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,193 @@
 +#include "server-inference-scheduler.h"
 +
 +#include <algorithm>
@@ -1647,6 +3592,9 @@ index 0000000..cc8d76e
 +            config.prefill_chunk_size == 0 ? config.prefill_chunk_max : config.prefill_chunk_size,
 +            config.prefill_chunk_min,
 +            config.prefill_chunk_max);
++    iteration_latency_ewma_ms_ = 0.0;
++    observations_ = 0;
++    cost_model_.reset();
 +}
 +
 +server_slot_plan server_inference_scheduler::select_slot(
@@ -1757,6 +3705,8 @@ index 0000000..cc8d76e
 +            ? observation.elapsed_ms
 +            : alpha * observation.elapsed_ms + (1.0 - alpha) * iteration_latency_ewma_ms_;
 +    observations_++;
++    cost_model_.observe(
++            observation.decode_tokens, observation.prefill_tokens, observation.elapsed_ms);
 +    if (!config_.adaptive_prefill || observation.prefill_tokens == 0) return;
 +
 +    if (observation.decode_tokens == 0) {
@@ -1766,7 +3716,27 @@ index 0000000..cc8d76e
 +        return;
 +    }
 +
-+    if (observation.elapsed_ms > config_.target_iteration_ms) {
++    const auto cost_state = cost_model_.state();
++    if (cost_state.observations >= 3 && cost_state.prefill_ms_per_token > 1e-6) {
++        size_t recommended = cost_model_.recommend_prefill_chunk(
++                config_.target_iteration_ms,
++                observation.decode_tokens,
++                observation.prefill_sequences,
++                config_.prefill_chunk_min,
++                config_.prefill_chunk_max);
++        // Regression is least reliable during the first mixed iterations.
++        // Never shrink while the measured iteration still has clear latency
++        // headroom; use that headroom to gather a more informative sample.
++        if (observation.elapsed_ms < config_.target_iteration_ms * 0.70) {
++            recommended = std::max(recommended, std::min(
++                    config_.prefill_chunk_max,
++                    adaptive_chunk_size_ + config_.prefill_chunk_min));
++        }
++        adaptive_chunk_size_ = std::clamp(
++                (adaptive_chunk_size_ + recommended) / 2,
++                config_.prefill_chunk_min,
++                config_.prefill_chunk_max);
++    } else if (observation.elapsed_ms > config_.target_iteration_ms) {
 +        adaptive_chunk_size_ = std::max(
 +                config_.prefill_chunk_min,
 +                adaptive_chunk_size_ / 2);
@@ -1784,15 +3754,18 @@ index 0000000..cc8d76e
 +        config_.adaptive_prefill ? adaptive_chunk_size_ : config_.prefill_chunk_size,
 +        iteration_latency_ewma_ms_,
 +        observations_,
++        cost_model_.state(),
 +    };
 +}
 diff --git a/tools/server/server-inference-scheduler.h b/tools/server/server-inference-scheduler.h
 new file mode 100644
-index 0000000..fb474db
+index 0000000..44a75e3
 --- /dev/null
 +++ b/tools/server/server-inference-scheduler.h
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,98 @@
 +#pragma once
++
++#include "server-model-cost-model.h"
 +
 +#include <cstddef>
 +#include <cstdint>
@@ -1849,6 +3822,7 @@ index 0000000..fb474db
 +    size_t decode_tokens = 0;
 +    size_t prefill_tokens = 0;
 +    double elapsed_ms = 0.0;
++    size_t prefill_sequences = 0;
 +};
 +
 +struct server_scheduler_state {
@@ -1856,6 +3830,7 @@ index 0000000..fb474db
 +    size_t effective_chunk_size = 0;
 +    double iteration_latency_ewma_ms = 0.0;
 +    uint64_t observations = 0;
++    server_model_cost_state cost;
 +};
 +
 +// Owns request-to-slot placement and iteration-level prefill allocation.
@@ -1884,13 +3859,14 @@ index 0000000..fb474db
 +    size_t adaptive_chunk_size_ = 0;
 +    double iteration_latency_ewma_ms_ = 0.0;
 +    uint64_t observations_ = 0;
++    server_model_cost_model cost_model_;
 +};
 diff --git a/tools/server/server-kv-block-backend.cpp b/tools/server/server-kv-block-backend.cpp
 new file mode 100644
-index 0000000..9b2ff21
+index 0000000..e82bc2b
 --- /dev/null
 +++ b/tools/server/server-kv-block-backend.cpp
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,226 @@
 +#include "server-kv-block-backend.h"
 +
 +#include <algorithm>
@@ -2013,6 +3989,8 @@ index 0000000..9b2ff21
 +
 +    server_kv_backend_stats stats() const override { return stats_; }
 +
++    bool verify_integrity() const override { return true; }
++
 +    void write_block(
 +            server_kv_physical_block_id block,
 +            const std::vector<uint16_t> & k,
@@ -2117,10 +4095,10 @@ index 0000000..9b2ff21
 +}
 diff --git a/tools/server/server-kv-block-backend.h b/tools/server/server-kv-block-backend.h
 new file mode 100644
-index 0000000..2a3a909
+index 0000000..2399499
 --- /dev/null
 +++ b/tools/server/server-kv-block-backend.h
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,110 @@
 +#pragma once
 +
 +#include <cstddef>
@@ -2168,6 +4146,8 @@ index 0000000..2a3a909
 +    uint64_t pinned_bytes_current = 0;
 +    uint64_t pinned_bytes_peak = 0;
 +    uint64_t backend_errors = 0;
++    uint64_t direct_copy_batches = 0;
++    uint64_t staged_copy_batches = 0;
 +};
 +
 +// Host representation used by swap. K and V use separate dense planes in the
@@ -2203,6 +4183,10 @@ index 0000000..2a3a909
 +            const std::vector<server_kv_physical_block_id> & destinations) = 0;
 +    virtual void wait(server_kv_backend_event event) = 0;
 +    virtual server_kv_backend_stats stats() const = 0;
++    // Validates allocator guard regions when the backend provides them. This
++    // is deliberately callable from long-running stress tests as a portable
++    // alternative when Compute Sanitizer cannot attach to a WDDM device.
++    virtual bool verify_integrity() const = 0;
 +
 +    // Explicit transfer methods keep tests and model adapters independent of
 +    // backend allocation details. They are synchronous initialization/readback
@@ -2227,15 +4211,16 @@ index 0000000..2a3a909
 +#endif
 diff --git a/tools/server/server-kv-block-cuda.cu b/tools/server/server-kv-block-cuda.cu
 new file mode 100644
-index 0000000..42e98a4
+index 0000000..c6d6ce0
 --- /dev/null
 +++ b/tools/server/server-kv-block-cuda.cu
-@@ -0,0 +1,469 @@
+@@ -0,0 +1,576 @@
 +#include "server-kv-block-backend.h"
 +
 +#include <cuda_runtime.h>
 +
 +#include <algorithm>
++#include <cstdlib>
 +#include <cstring>
 +#include <memory>
 +#include <mutex>
@@ -2251,6 +4236,11 @@ index 0000000..42e98a4
 +    if (status != cudaSuccess) {
 +        throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(status));
 +    }
++}
++
++bool inject_failure(const char * point) {
++    const char * configured = std::getenv("CACHEFLOW_TEST_CUDA_FAIL_POINT");
++    return configured && std::string(configured) == point;
 +}
 +
 +__global__ void gather_kv_blocks(
@@ -2330,14 +4320,22 @@ index 0000000..42e98a4
 +        cuda_check(cudaStreamCreateWithFlags(&swap_stream_, cudaStreamNonBlocking),
 +                "cudaStreamCreate(swap)");
 +        const size_t bytes = capacity_blocks_ * layout_.elements_per_plane_block() * sizeof(uint16_t);
++        const size_t allocation_bytes = bytes + 2 * guard_elements_ * sizeof(uint16_t);
 +        try {
-+            cuda_check(cudaMalloc((void **) &k_, bytes), "cudaMalloc(K plane)");
-+            cuda_check(cudaMalloc((void **) &v_, bytes), "cudaMalloc(V plane)");
++            cuda_check(cudaMalloc((void **) &k_allocation_, allocation_bytes), "cudaMalloc(K plane)");
++            if (inject_failure("constructor_after_k")) {
++                throw std::runtime_error("injected CUDA allocation failure after K plane");
++            }
++            cuda_check(cudaMalloc((void **) &v_allocation_, allocation_bytes), "cudaMalloc(V plane)");
++            k_ = k_allocation_ + guard_elements_;
++            v_ = v_allocation_ + guard_elements_;
++            cuda_check(cudaMemset(k_allocation_, guard_pattern_, allocation_bytes), "cudaMemset(K guards)");
++            cuda_check(cudaMemset(v_allocation_, guard_pattern_, allocation_bytes), "cudaMemset(V guards)");
 +            cuda_check(cudaMemset(k_, 0, bytes), "cudaMemset(K plane)");
 +            cuda_check(cudaMemset(v_, 0, bytes), "cudaMemset(V plane)");
 +        } catch (...) {
-+            if (k_) cudaFree(k_);
-+            if (v_) cudaFree(v_);
++            if (k_allocation_) cudaFree(k_allocation_);
++            if (v_allocation_) cudaFree(v_allocation_);
 +            cudaStreamDestroy(copy_stream_);
 +            cudaStreamDestroy(swap_stream_);
 +            throw;
@@ -2356,8 +4354,8 @@ index 0000000..42e98a4
 +            try { wait({ id }); } catch (...) {}
 +        }
 +        cudaSetDevice(device_);
-+        if (k_) cudaFree(k_);
-+        if (v_) cudaFree(v_);
++        if (k_allocation_) cudaFree(k_allocation_);
++        if (v_allocation_) cudaFree(v_allocation_);
 +        if (copy_stream_) cudaStreamDestroy(copy_stream_);
 +        if (swap_stream_) cudaStreamDestroy(swap_stream_);
 +    }
@@ -2370,21 +4368,47 @@ index 0000000..42e98a4
 +        require_layout(layout);
 +        validate_mapping(mapping);
 +        cuda_check(cudaSetDevice(device_), "cudaSetDevice(copy)");
-+        pending_operation operation;
-+        allocate_pinned_mapping(operation, mapping);
-+        const size_t elements = mapping.size() * layout_.elements_per_plane_block();
-+        allocate_device_staging(operation, elements, copy_stream_);
-+        enqueue_mapping(operation, copy_stream_);
-+        launch_gather(operation, mapping.size(), copy_stream_);
-+        launch_scatter(operation, mapping.size(), copy_stream_);
-+        {
-+            std::lock_guard<std::mutex> lock(mutex_);
-+            stats_.kernel_launches += mapping.empty() ? 0 : 2;
-+            stats_.blocks_copied += mapping.size();
-+            stats_.copy_bytes += mapping.size() * layout_.bytes_per_block();
++        if (!requires_snapshot(mapping)) {
++            const size_t elements = layout_.elements_per_plane_block();
++            const size_t bytes = elements * sizeof(uint16_t);
++            for (const auto & copy : mapping) {
++                cuda_check(cudaMemcpyAsync(k_ + (size_t) copy.destination * elements,
++                        k_ + (size_t) copy.source * elements, bytes,
++                        cudaMemcpyDeviceToDevice, copy_stream_), "cudaMemcpyAsync(direct K block)");
++                cuda_check(cudaMemcpyAsync(v_ + (size_t) copy.destination * elements,
++                        v_ + (size_t) copy.source * elements, bytes,
++                        cudaMemcpyDeviceToDevice, copy_stream_), "cudaMemcpyAsync(direct V block)");
++            }
++            {
++                std::lock_guard<std::mutex> lock(mutex_);
++                stats_.blocks_copied += mapping.size();
++                stats_.copy_bytes += mapping.size() * layout_.bytes_per_block();
++                stats_.direct_copy_batches += !mapping.empty();
++            }
++            return record({}, copy_stream_);
 +        }
-+        release_device_staging_async(operation, copy_stream_);
-+        return record(std::move(operation), copy_stream_);
++        pending_operation operation;
++        try {
++            allocate_pinned_mapping(operation, mapping);
++            const size_t elements = mapping.size() * layout_.elements_per_plane_block();
++            allocate_device_staging(operation, elements, copy_stream_);
++            enqueue_mapping(operation, copy_stream_);
++            launch_gather(operation, mapping.size(), copy_stream_);
++            launch_scatter(operation, mapping.size(), copy_stream_);
++            {
++                std::lock_guard<std::mutex> lock(mutex_);
++                stats_.kernel_launches += mapping.empty() ? 0 : 2;
++                stats_.blocks_copied += mapping.size();
++                stats_.copy_bytes += mapping.size() * layout_.bytes_per_block();
++                stats_.staged_copy_batches += !mapping.empty();
++            }
++            release_device_staging_async(operation, copy_stream_);
++            return record(std::move(operation), copy_stream_);
++        } catch (...) {
++            discard(operation, copy_stream_);
++            note_error();
++            throw;
++        }
 +    }
 +
 +    server_kv_backend_event clone_shared_tail(
@@ -2419,26 +4443,32 @@ index 0000000..42e98a4
 +        std::vector<server_kv_block_copy> mapping;
 +        mapping.reserve(blocks.size());
 +        for (size_t i = 0; i < blocks.size(); ++i) mapping.push_back({ blocks[i], (uint32_t) i });
-+        allocate_pinned_mapping(operation, mapping);
-+        const size_t elements = blocks.size() * layout_.elements_per_plane_block();
-+        allocate_device_staging(operation, elements, swap_stream_);
-+        allocate_pinned_planes(operation, elements);
-+        operation.swap_out_destination = &destination;
-+        enqueue_mapping(operation, swap_stream_);
-+        launch_gather(operation, mapping.size(), swap_stream_);
-+        {
-+            std::lock_guard<std::mutex> lock(mutex_);
-+            stats_.kernel_launches += mapping.empty() ? 0 : 1;
-+            stats_.blocks_copied += blocks.size();
-+            stats_.copy_bytes += blocks.size() * layout_.bytes_per_block();
++        try {
++            allocate_pinned_mapping(operation, mapping);
++            const size_t elements = blocks.size() * layout_.elements_per_plane_block();
++            allocate_device_staging(operation, elements, swap_stream_);
++            allocate_pinned_planes(operation, elements);
++            operation.swap_out_destination = &destination;
++            enqueue_mapping(operation, swap_stream_);
++            launch_gather(operation, mapping.size(), swap_stream_);
++            {
++                std::lock_guard<std::mutex> lock(mutex_);
++                stats_.kernel_launches += mapping.empty() ? 0 : 1;
++                stats_.blocks_copied += blocks.size();
++                stats_.copy_bytes += blocks.size() * layout_.bytes_per_block();
++            }
++            const size_t bytes = elements * sizeof(uint16_t);
++            cuda_check(cudaMemcpyAsync(operation.pinned_k, operation.staged_k, bytes,
++                    cudaMemcpyDeviceToHost, swap_stream_), "cudaMemcpyAsync(swap out K)");
++            cuda_check(cudaMemcpyAsync(operation.pinned_v, operation.staged_v, bytes,
++                    cudaMemcpyDeviceToHost, swap_stream_), "cudaMemcpyAsync(swap out V)");
++            release_device_staging_async(operation, swap_stream_);
++            return record(std::move(operation), swap_stream_);
++        } catch (...) {
++            discard(operation, swap_stream_);
++            note_error();
++            throw;
 +        }
-+        const size_t bytes = elements * sizeof(uint16_t);
-+        cuda_check(cudaMemcpyAsync(operation.pinned_k, operation.staged_k, bytes,
-+                cudaMemcpyDeviceToHost, swap_stream_), "cudaMemcpyAsync(swap out K)");
-+        cuda_check(cudaMemcpyAsync(operation.pinned_v, operation.staged_v, bytes,
-+                cudaMemcpyDeviceToHost, swap_stream_), "cudaMemcpyAsync(swap out V)");
-+        release_device_staging_async(operation, swap_stream_);
-+        return record(std::move(operation), swap_stream_);
 +    }
 +
 +    server_kv_backend_event swap_in(
@@ -2460,26 +4490,32 @@ index 0000000..42e98a4
 +        for (size_t i = 0; i < destinations.size(); ++i) {
 +            mapping.push_back({ (uint32_t) i, destinations[i] });
 +        }
-+        allocate_pinned_mapping(operation, mapping);
-+        allocate_device_staging(operation, elements, swap_stream_);
-+        allocate_pinned_planes(operation, elements);
-+        const size_t bytes = elements * sizeof(uint16_t);
-+        std::memcpy(operation.pinned_k, source.k.data(), bytes);
-+        std::memcpy(operation.pinned_v, source.v.data(), bytes);
-+        cuda_check(cudaMemcpyAsync(operation.staged_k, operation.pinned_k, bytes,
-+                cudaMemcpyHostToDevice, swap_stream_), "cudaMemcpyAsync(swap in K)");
-+        cuda_check(cudaMemcpyAsync(operation.staged_v, operation.pinned_v, bytes,
-+                cudaMemcpyHostToDevice, swap_stream_), "cudaMemcpyAsync(swap in V)");
-+        enqueue_mapping(operation, swap_stream_);
-+        launch_scatter(operation, mapping.size(), swap_stream_);
-+        {
-+            std::lock_guard<std::mutex> lock(mutex_);
-+            stats_.kernel_launches += mapping.empty() ? 0 : 1;
-+            stats_.blocks_copied += destinations.size();
-+            stats_.copy_bytes += destinations.size() * layout_.bytes_per_block();
++        try {
++            allocate_pinned_mapping(operation, mapping);
++            allocate_device_staging(operation, elements, swap_stream_);
++            allocate_pinned_planes(operation, elements);
++            const size_t bytes = elements * sizeof(uint16_t);
++            std::memcpy(operation.pinned_k, source.k.data(), bytes);
++            std::memcpy(operation.pinned_v, source.v.data(), bytes);
++            cuda_check(cudaMemcpyAsync(operation.staged_k, operation.pinned_k, bytes,
++                    cudaMemcpyHostToDevice, swap_stream_), "cudaMemcpyAsync(swap in K)");
++            cuda_check(cudaMemcpyAsync(operation.staged_v, operation.pinned_v, bytes,
++                    cudaMemcpyHostToDevice, swap_stream_), "cudaMemcpyAsync(swap in V)");
++            enqueue_mapping(operation, swap_stream_);
++            launch_scatter(operation, mapping.size(), swap_stream_);
++            {
++                std::lock_guard<std::mutex> lock(mutex_);
++                stats_.kernel_launches += mapping.empty() ? 0 : 1;
++                stats_.blocks_copied += destinations.size();
++                stats_.copy_bytes += destinations.size() * layout_.bytes_per_block();
++            }
++            release_device_staging_async(operation, swap_stream_);
++            return record(std::move(operation), swap_stream_);
++        } catch (...) {
++            discard(operation, swap_stream_);
++            note_error();
++            throw;
 +        }
-+        release_device_staging_async(operation, swap_stream_);
-+        return record(std::move(operation), swap_stream_);
 +    }
 +
 +    void wait(server_kv_backend_event event) override {
@@ -2511,6 +4547,23 @@ index 0000000..42e98a4
 +    server_kv_backend_stats stats() const override {
 +        std::lock_guard<std::mutex> lock(mutex_);
 +        return stats_;
++    }
++
++    bool verify_integrity() const override {
++        cuda_check(cudaSetDevice(device_), "cudaSetDevice(verify guards)");
++        const size_t data_elements = capacity_blocks_ * layout_.elements_per_plane_block();
++        std::vector<uint16_t> observed(4 * guard_elements_);
++        cuda_check(cudaMemcpy(observed.data(), k_allocation_, guard_elements_ * sizeof(uint16_t),
++                cudaMemcpyDeviceToHost), "read K prefix guard");
++        cuda_check(cudaMemcpy(observed.data() + guard_elements_, k_ + data_elements,
++                guard_elements_ * sizeof(uint16_t), cudaMemcpyDeviceToHost), "read K suffix guard");
++        cuda_check(cudaMemcpy(observed.data() + 2 * guard_elements_, v_allocation_,
++                guard_elements_ * sizeof(uint16_t), cudaMemcpyDeviceToHost), "read V prefix guard");
++        cuda_check(cudaMemcpy(observed.data() + 3 * guard_elements_, v_ + data_elements,
++                guard_elements_ * sizeof(uint16_t), cudaMemcpyDeviceToHost), "read V suffix guard");
++        return std::all_of(observed.begin(), observed.end(), [](uint16_t value) {
++            return value == 0xa5a5;
++        });
 +    }
 +
 +    void write_block(
@@ -2555,6 +4608,10 @@ index 0000000..42e98a4
 +    server_kv_tensor_layout layout_;
 +    size_t capacity_blocks_;
 +    int device_;
++    static constexpr size_t guard_elements_ = 4096;
++    static constexpr int guard_pattern_ = 0xa5;
++    uint16_t * k_allocation_ = nullptr;
++    uint16_t * v_allocation_ = nullptr;
 +    uint16_t * k_ = nullptr;
 +    uint16_t * v_ = nullptr;
 +    cudaStream_t copy_stream_ = nullptr;
@@ -2592,6 +4649,14 @@ index 0000000..42e98a4
 +        }
 +    }
 +
++    static bool requires_snapshot(const std::vector<server_kv_block_copy> & mapping) {
++        std::unordered_set<server_kv_physical_block_id> destinations;
++        for (const auto & copy : mapping) destinations.insert(copy.destination);
++        return std::any_of(mapping.begin(), mapping.end(), [&](const server_kv_block_copy & copy) {
++            return destinations.count(copy.source) != 0;
++        });
++    }
++
 +    static void allocate_pinned_mapping(
 +            pending_operation & operation,
 +            const std::vector<server_kv_block_copy> & mapping) {
@@ -2601,6 +4666,9 @@ index 0000000..42e98a4
 +        cuda_check(cudaMallocHost((void **) &operation.pinned_mapping, bytes),
 +                "cudaMallocHost(block mapping)");
 +        operation.pinned_bytes += bytes;
++        if (inject_failure("pinned_mapping")) {
++            throw std::runtime_error("injected pinned mapping exhaustion");
++        }
 +        std::memcpy(operation.pinned_mapping, mapping.data(), bytes);
 +    }
 +
@@ -2612,6 +4680,9 @@ index 0000000..42e98a4
 +            cuda_check(cudaMallocAsync((void **) &operation.device_mapping,
 +                    operation.mapping_count * sizeof(server_kv_block_copy), stream),
 +                    "cudaMallocAsync(block mapping)");
++            if (inject_failure("device_staging")) {
++                throw std::runtime_error("injected CUDA staging allocation failure");
++            }
 +        }
 +        if (elements > 0) {
 +            cuda_check(cudaMallocAsync((void **) &operation.staged_k,
@@ -2625,9 +4696,13 @@ index 0000000..42e98a4
 +        if (elements == 0) return;
 +        cuda_check(cudaMallocHost((void **) &operation.pinned_k, elements * sizeof(uint16_t)),
 +                "cudaMallocHost(staged K)");
++        operation.pinned_bytes += elements * sizeof(uint16_t);
++        if (inject_failure("pinned_planes")) {
++            throw std::runtime_error("injected pinned plane exhaustion");
++        }
 +        cuda_check(cudaMallocHost((void **) &operation.pinned_v, elements * sizeof(uint16_t)),
 +                "cudaMallocHost(staged V)");
-+        operation.pinned_bytes += 2 * elements * sizeof(uint16_t);
++        operation.pinned_bytes += elements * sizeof(uint16_t);
 +    }
 +
 +    static void enqueue_mapping(pending_operation & operation, cudaStream_t stream) {
@@ -2690,6 +4765,22 @@ index 0000000..42e98a4
 +        if (operation.pinned_k) cudaFreeHost(operation.pinned_k);
 +        if (operation.pinned_v) cudaFreeHost(operation.pinned_v);
 +    }
++
++    static void discard(pending_operation & operation, cudaStream_t stream) {
++        cudaStreamSynchronize(stream);
++        if (operation.device_mapping) cudaFree(operation.device_mapping);
++        if (operation.staged_k) cudaFree(operation.staged_k);
++        if (operation.staged_v) cudaFree(operation.staged_v);
++        operation.device_mapping = nullptr;
++        operation.staged_k = nullptr;
++        operation.staged_v = nullptr;
++        cleanup(operation);
++    }
++
++    void note_error() {
++        std::lock_guard<std::mutex> lock(mutex_);
++        stats_.backend_errors++;
++    }
 +};
 +
 +} // namespace
@@ -2702,10 +4793,10 @@ index 0000000..42e98a4
 +}
 diff --git a/tools/server/server-kv-block-manager.cpp b/tools/server/server-kv-block-manager.cpp
 new file mode 100644
-index 0000000..8f7823a
+index 0000000..3c79c16
 --- /dev/null
 +++ b/tools/server/server-kv-block-manager.cpp
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,386 @@
 +#include "server-kv-block-manager.h"
 +
 +#include <algorithm>
@@ -2986,6 +5077,7 @@ index 0000000..8f7823a
 +    result.writable = true;
 +    result.copied = true;
 +    result.block_id = new_id;
++    copy_on_write_total_++;
 +    return result;
 +}
 +
@@ -3027,6 +5119,7 @@ index 0000000..8f7823a
 +    result.capacity_blocks = capacity_blocks_;
 +    result.allocated_blocks = blocks_.size();
 +    result.reserved_blocks = reserved_blocks_;
++    result.copy_on_write_total = copy_on_write_total_;
 +    for (const auto & item : blocks_) {
 +        const auto & value = item.second;
 +        if (value.ref_count > 1) {
@@ -3092,10 +5185,10 @@ index 0000000..8f7823a
 +}
 diff --git a/tools/server/server-kv-block-manager.h b/tools/server/server-kv-block-manager.h
 new file mode 100644
-index 0000000..eaec11a
+index 0000000..262f133
 --- /dev/null
 +++ b/tools/server/server-kv-block-manager.h
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,127 @@
 +#pragma once
 +
 +#include <cstddef>
@@ -3146,6 +5239,7 @@ index 0000000..eaec11a
 +    size_t allocated_blocks = 0;
 +    size_t reserved_blocks = 0;
 +    size_t shared_blocks = 0;
++    uint64_t copy_on_write_total = 0;
 +    std::vector<server_kv_block_view> blocks;
 +    std::vector<server_kv_sequence_view> sequences;
 +};
@@ -3203,6 +5297,7 @@ index 0000000..eaec11a
 +    size_t capacity_blocks_;
 +    server_kv_block_id next_block_id_ = 1;
 +    size_t reserved_blocks_ = 0;
++    uint64_t copy_on_write_total_ = 0;
 +    std::unordered_map<server_kv_block_id, block> blocks_;
 +    std::unordered_map<server_kv_sequence_id, sequence> sequences_;
 +    std::unordered_map<uint64_t, std::vector<server_kv_block_id>> prefix_index_;
@@ -3576,12 +5671,602 @@ index 0000000..ed288a0
 +            const std::vector<server_kv_token> & left,
 +            const std::vector<server_kv_token> & right);
 +};
+diff --git a/tools/server/server-kv-swap-store.cpp b/tools/server/server-kv-swap-store.cpp
+new file mode 100644
+index 0000000..02074f2
+--- /dev/null
++++ b/tools/server/server-kv-swap-store.cpp
+@@ -0,0 +1,267 @@
++#include "server-kv-swap-store.h"
++
++#include <algorithm>
++#include <cstring>
++#include <fstream>
++#include <limits>
++#include <stdexcept>
++#include <unordered_map>
++
++namespace {
++
++constexpr uint64_t swap_magic = 0x31505753464b5643ULL; // "CVKFSWP1"
++
++size_t payload_bytes(const server_kv_swap_payload & payload) {
++    return payload.physical_blocks.size() * sizeof(server_kv_physical_block_id) +
++            (payload.data.k.size() + payload.data.v.size()) * sizeof(uint16_t);
++}
++
++uint64_t checksum(const server_kv_swap_payload & payload) {
++    uint64_t value = 1469598103934665603ULL;
++    auto add = [&value](const void * ptr, size_t bytes) {
++        const auto * data = static_cast<const uint8_t *>(ptr);
++        for (size_t i = 0; i < bytes; ++i) {
++            value ^= data[i];
++            value *= 1099511628211ULL;
++        }
++    };
++    add(&payload.sequence_id, sizeof(payload.sequence_id));
++    if (!payload.physical_blocks.empty()) add(payload.physical_blocks.data(),
++            payload.physical_blocks.size() * sizeof(payload.physical_blocks[0]));
++    if (!payload.data.k.empty()) add(payload.data.k.data(), payload.data.k.size() * sizeof(uint16_t));
++    if (!payload.data.v.empty()) add(payload.data.v.data(), payload.data.v.size() * sizeof(uint16_t));
++    return value;
++}
++
++void validate_payload(const server_kv_swap_payload & payload) {
++    payload.data.layout.validate();
++    const size_t elements = payload.data.layout.elements_per_plane_block() * payload.data.block_count;
++    if (payload.sequence_id < 0 || payload.physical_blocks.size() != payload.data.block_count ||
++            payload.data.k.size() != elements || payload.data.v.size() != elements) {
++        throw std::invalid_argument("invalid KV swap payload");
++    }
++}
++
++class host_swap_store final : public server_kv_swap_store {
++public:
++    explicit host_swap_store(size_t budget_bytes) : budget_bytes_(budget_bytes) {}
++
++    server_kv_swap_result save(const server_kv_swap_payload & payload) override {
++        if (consume(server_kv_swap_fault::next_save)) return save_error("injected host save failure");
++        try { validate_payload(payload); } catch (const std::exception & error) { return save_error(error.what()); }
++        const size_t bytes = payload_bytes(payload);
++        if (bytes > budget_bytes_ - std::min<size_t>(budget_bytes_, stats_.bytes_current)) {
++            return save_error("host swap budget exhausted");
++        }
++        const auto handle = next_handle_++;
++        records_.emplace(handle, payload);
++        stats_.saves++;
++        stats_.bytes_current += bytes;
++        stats_.bytes_peak = std::max(stats_.bytes_peak, stats_.bytes_current);
++        return {true, handle, {}};
++    }
++
++    bool restore(server_kv_swap_handle handle, server_kv_swap_payload & payload, std::string * error) override {
++        if (consume(server_kv_swap_fault::next_restore)) return restore_error("injected host restore failure", error);
++        const auto found = records_.find(handle);
++        if (found == records_.end()) return restore_error("unknown host swap handle", error);
++        payload = found->second;
++        stats_.restores++;
++        return true;
++    }
++
++    bool erase(server_kv_swap_handle handle) override {
++        const auto found = records_.find(handle);
++        if (found == records_.end()) return false;
++        stats_.bytes_current -= payload_bytes(found->second);
++        records_.erase(found);
++        stats_.erases++;
++        return true;
++    }
++
++    void inject(server_kv_swap_fault fault) override { fault_ = fault; }
++    server_kv_swap_store_stats stats() const override { return stats_; }
++
++private:
++    size_t budget_bytes_;
++    server_kv_swap_handle next_handle_ = 1;
++    server_kv_swap_fault fault_ = server_kv_swap_fault::none;
++    std::unordered_map<server_kv_swap_handle, server_kv_swap_payload> records_;
++    server_kv_swap_store_stats stats_;
++
++    bool consume(server_kv_swap_fault expected) {
++        if (fault_ != expected) return false;
++        fault_ = server_kv_swap_fault::none;
++        return true;
++    }
++    server_kv_swap_result save_error(std::string error) {
++        stats_.save_failures++;
++        return {false, 0, std::move(error)};
++    }
++    bool restore_error(std::string message, std::string * error) {
++        stats_.restore_failures++;
++        if (error) *error = std::move(message);
++        return false;
++    }
++};
++
++struct file_header {
++    uint64_t magic;
++    uint64_t checksum;
++    int64_t sequence_id;
++    uint64_t physical_count;
++    uint64_t block_count;
++    uint32_t layers;
++    uint32_t kv_heads;
++    uint32_t head_dim;
++    uint32_t block_tokens;
++    uint8_t element_type;
++    uint8_t memory_layout;
++    uint8_t reserved[6]{};
++};
++
++class file_swap_store final : public server_kv_swap_store {
++public:
++    file_swap_store(std::filesystem::path directory, size_t budget_bytes) :
++            directory_(std::move(directory)), budget_bytes_(budget_bytes) {
++        std::filesystem::create_directories(directory_);
++    }
++
++    server_kv_swap_result save(const server_kv_swap_payload & payload) override {
++        if (consume(server_kv_swap_fault::next_save)) return save_error("injected file save failure");
++        try { validate_payload(payload); } catch (const std::exception & error) { return save_error(error.what()); }
++        const size_t bytes = payload_bytes(payload);
++        if (bytes > budget_bytes_ - std::min<size_t>(budget_bytes_, stats_.bytes_current)) {
++            return save_error("file swap budget exhausted");
++        }
++        const auto handle = next_handle_++;
++        const auto final_path = path(handle);
++        const auto temporary_path = final_path.string() + ".tmp";
++        file_header header {
++            swap_magic, checksum(payload), payload.sequence_id,
++            payload.physical_blocks.size(), payload.data.block_count,
++            payload.data.layout.layers, payload.data.layout.kv_heads,
++            payload.data.layout.head_dim, payload.data.layout.block_tokens,
++            (uint8_t) payload.data.layout.element_type,
++            (uint8_t) payload.data.layout.memory_layout,
++        };
++        try {
++            std::ofstream output(temporary_path, std::ios::binary | std::ios::trunc);
++            output.exceptions(std::ios::badbit | std::ios::failbit);
++            output.write(reinterpret_cast<const char *>(&header), sizeof(header));
++            write_vector(output, payload.physical_blocks);
++            write_vector(output, payload.data.k);
++            write_vector(output, payload.data.v);
++            output.close();
++            std::filesystem::rename(temporary_path, final_path);
++        } catch (const std::exception & error) {
++            std::error_code ignored;
++            std::filesystem::remove(temporary_path, ignored);
++            return save_error(error.what());
++        }
++        sizes_[handle] = bytes;
++        stats_.saves++;
++        stats_.bytes_current += bytes;
++        stats_.bytes_peak = std::max(stats_.bytes_peak, stats_.bytes_current);
++        return {true, handle, {}};
++    }
++
++    bool restore(server_kv_swap_handle handle, server_kv_swap_payload & payload, std::string * error) override {
++        if (consume(server_kv_swap_fault::next_restore)) return restore_error("injected file restore failure", error);
++        if (sizes_.count(handle) == 0) return restore_error("unknown file swap handle", error);
++        try {
++            std::ifstream input(path(handle), std::ios::binary);
++            input.exceptions(std::ios::badbit | std::ios::failbit);
++            file_header header{};
++            input.read(reinterpret_cast<char *>(&header), sizeof(header));
++            if (header.magic != swap_magic || header.physical_count != header.block_count ||
++                    header.block_count > std::numeric_limits<size_t>::max()) {
++                throw std::runtime_error("invalid KV swap file header");
++            }
++            server_kv_swap_payload candidate;
++            candidate.sequence_id = header.sequence_id;
++            candidate.data.layout = {
++                header.layers, header.kv_heads, header.head_dim, header.block_tokens,
++                (server_kv_element_type) header.element_type,
++                (server_kv_memory_layout) header.memory_layout,
++            };
++            candidate.data.layout.validate();
++            candidate.data.block_count = (size_t) header.block_count;
++            const size_t elements = candidate.data.layout.elements_per_plane_block() * candidate.data.block_count;
++            candidate.physical_blocks.resize((size_t) header.physical_count);
++            candidate.data.k.resize(elements);
++            candidate.data.v.resize(elements);
++            read_vector(input, candidate.physical_blocks);
++            read_vector(input, candidate.data.k);
++            read_vector(input, candidate.data.v);
++            input.peek();
++            if (!input.eof() || checksum(candidate) != header.checksum) {
++                throw std::runtime_error("KV swap checksum or length mismatch");
++            }
++            payload = std::move(candidate); // transactional publication
++        } catch (const std::exception & exception) {
++            return restore_error(exception.what(), error);
++        }
++        stats_.restores++;
++        return true;
++    }
++
++    bool erase(server_kv_swap_handle handle) override {
++        const auto found = sizes_.find(handle);
++        if (found == sizes_.end()) return false;
++        std::error_code error;
++        if (!std::filesystem::remove(path(handle), error) || error) return false;
++        stats_.bytes_current -= found->second;
++        sizes_.erase(found);
++        stats_.erases++;
++        return true;
++    }
++
++    void inject(server_kv_swap_fault fault) override { fault_ = fault; }
++    server_kv_swap_store_stats stats() const override { return stats_; }
++
++private:
++    std::filesystem::path directory_;
++    size_t budget_bytes_;
++    server_kv_swap_handle next_handle_ = 1;
++    server_kv_swap_fault fault_ = server_kv_swap_fault::none;
++    std::unordered_map<server_kv_swap_handle, size_t> sizes_;
++    server_kv_swap_store_stats stats_;
++
++    std::filesystem::path path(server_kv_swap_handle handle) const {
++        return directory_ / ("sequence-" + std::to_string(handle) + ".cfswap");
++    }
++    bool consume(server_kv_swap_fault expected) {
++        if (fault_ != expected) return false;
++        fault_ = server_kv_swap_fault::none;
++        return true;
++    }
++    server_kv_swap_result save_error(std::string error) {
++        stats_.save_failures++;
++        return {false, 0, std::move(error)};
++    }
++    bool restore_error(std::string message, std::string * error) {
++        stats_.restore_failures++;
++        if (error) *error = std::move(message);
++        return false;
++    }
++    template <typename T> static void write_vector(std::ofstream & output, const std::vector<T> & values) {
++        if (!values.empty()) output.write(reinterpret_cast<const char *>(values.data()),
++                (std::streamsize) (values.size() * sizeof(T)));
++    }
++    template <typename T> static void read_vector(std::ifstream & input, std::vector<T> & values) {
++        if (!values.empty()) input.read(reinterpret_cast<char *>(values.data()),
++                (std::streamsize) (values.size() * sizeof(T)));
++    }
++};
++
++} // namespace
++
++std::unique_ptr<server_kv_swap_store> server_kv_create_host_swap_store(size_t budget_bytes) {
++    return std::make_unique<host_swap_store>(budget_bytes);
++}
++
++std::unique_ptr<server_kv_swap_store> server_kv_create_file_swap_store(
++        const std::filesystem::path & directory, size_t budget_bytes) {
++    return std::make_unique<file_swap_store>(directory, budget_bytes);
++}
+diff --git a/tools/server/server-kv-swap-store.h b/tools/server/server-kv-swap-store.h
+new file mode 100644
+index 0000000..7b64440
+--- /dev/null
++++ b/tools/server/server-kv-swap-store.h
+@@ -0,0 +1,57 @@
++#pragma once
++
++#include "server-kv-block-backend.h"
++
++#include <cstddef>
++#include <cstdint>
++#include <filesystem>
++#include <memory>
++#include <string>
++#include <vector>
++
++using server_kv_swap_handle = uint64_t;
++
++struct server_kv_swap_payload {
++    int64_t sequence_id = -1;
++    std::vector<server_kv_physical_block_id> physical_blocks;
++    server_kv_host_blocks data;
++};
++
++struct server_kv_swap_result {
++    bool ok = false;
++    server_kv_swap_handle handle = 0;
++    std::string error;
++};
++
++struct server_kv_swap_store_stats {
++    uint64_t saves = 0;
++    uint64_t restores = 0;
++    uint64_t erases = 0;
++    uint64_t save_failures = 0;
++    uint64_t restore_failures = 0;
++    uint64_t bytes_current = 0;
++    uint64_t bytes_peak = 0;
++};
++
++enum class server_kv_swap_fault : uint8_t {
++    none,
++    next_save,
++    next_restore,
++};
++
++// Durable seam between preemption policy and physical KV bytes. Implementations
++// commit a complete payload or leave the previous handle untouched.
++class server_kv_swap_store {
++public:
++    virtual ~server_kv_swap_store() = default;
++    virtual server_kv_swap_result save(const server_kv_swap_payload & payload) = 0;
++    virtual bool restore(server_kv_swap_handle handle, server_kv_swap_payload & payload,
++            std::string * error = nullptr) = 0;
++    virtual bool erase(server_kv_swap_handle handle) = 0;
++    virtual void inject(server_kv_swap_fault fault) = 0;
++    virtual server_kv_swap_store_stats stats() const = 0;
++};
++
++std::unique_ptr<server_kv_swap_store> server_kv_create_host_swap_store(size_t budget_bytes);
++std::unique_ptr<server_kv_swap_store> server_kv_create_file_swap_store(
++        const std::filesystem::path & directory, size_t budget_bytes);
+diff --git a/tools/server/server-model-cost-model.cpp b/tools/server/server-model-cost-model.cpp
+new file mode 100644
+index 0000000..f004865
+--- /dev/null
++++ b/tools/server/server-model-cost-model.cpp
+@@ -0,0 +1,92 @@
++#include "server-model-cost-model.h"
++
++#include <algorithm>
++#include <cmath>
++
++server_model_cost_model::server_model_cost_model(double decay) :
++        decay_(std::clamp(decay, 0.5, 0.999)) {
++    reset();
++}
++
++void server_model_cost_model::reset() {
++    observations_ = 0;
++    for (auto & row : normal_) for (double & value : row) value = 0.0;
++    for (double & value : rhs_) value = 0.0;
++}
++
++void server_model_cost_model::observe(
++        size_t decode_tokens, size_t prefill_tokens, double elapsed_ms) {
++    if (elapsed_ms <= 0.0 || (decode_tokens == 0 && prefill_tokens == 0)) return;
++    const double features[3] = {
++        (double) decode_tokens,
++        (double) prefill_tokens,
++        1.0,
++    };
++    for (size_t row = 0; row < 3; ++row) {
++        rhs_[row] = decay_ * rhs_[row] + features[row] * elapsed_ms;
++        for (size_t column = 0; column < 3; ++column) {
++            normal_[row][column] = decay_ * normal_[row][column] +
++                    features[row] * features[column];
++        }
++    }
++    observations_++;
++}
++
++server_model_cost_state server_model_cost_model::solve() const {
++    double matrix[3][4]{};
++    for (size_t row = 0; row < 3; ++row) {
++        for (size_t column = 0; column < 3; ++column) {
++            matrix[row][column] = normal_[row][column];
++        }
++        matrix[row][row] += 1e-6;
++        matrix[row][3] = rhs_[row];
++    }
++    for (size_t pivot = 0; pivot < 3; ++pivot) {
++        size_t best = pivot;
++        for (size_t row = pivot + 1; row < 3; ++row) {
++            if (std::abs(matrix[row][pivot]) > std::abs(matrix[best][pivot])) best = row;
++        }
++        if (best != pivot) {
++            for (size_t column = pivot; column < 4; ++column) {
++                std::swap(matrix[pivot][column], matrix[best][column]);
++            }
++        }
++        const double divisor = matrix[pivot][pivot];
++        if (std::abs(divisor) < 1e-9) continue;
++        for (size_t column = pivot; column < 4; ++column) matrix[pivot][column] /= divisor;
++        for (size_t row = 0; row < 3; ++row) {
++            if (row == pivot) continue;
++            const double factor = matrix[row][pivot];
++            for (size_t column = pivot; column < 4; ++column) {
++                matrix[row][column] -= factor * matrix[pivot][column];
++            }
++        }
++    }
++    return {
++        std::max(0.0, matrix[0][3]),
++        std::max(0.0, matrix[1][3]),
++        std::max(0.0, matrix[2][3]),
++        observations_,
++        std::min(1.0, observations_ / 12.0),
++    };
++}
++
++server_model_cost_state server_model_cost_model::state() const {
++    return solve();
++}
++
++size_t server_model_cost_model::recommend_prefill_chunk(
++        double target_iteration_ms,
++        size_t decode_tokens,
++        size_t active_prefill_sequences,
++        size_t minimum,
++        size_t maximum) const {
++    const auto estimate = solve();
++    if (estimate.observations < 3 || estimate.prefill_ms_per_token <= 1e-6) return maximum;
++    const double decode_cost = estimate.fixed_ms + decode_tokens * estimate.decode_ms_per_token;
++    const double available = std::max(0.0, target_iteration_ms - decode_cost);
++    const double total_tokens = available / estimate.prefill_ms_per_token;
++    const size_t sequences = std::max<size_t>(1, active_prefill_sequences);
++    const size_t per_sequence = (size_t) std::floor(total_tokens / sequences);
++    return std::clamp(per_sequence, minimum, maximum);
++}
+diff --git a/tools/server/server-model-cost-model.h b/tools/server/server-model-cost-model.h
+new file mode 100644
+index 0000000..a5cc17d
+--- /dev/null
++++ b/tools/server/server-model-cost-model.h
+@@ -0,0 +1,36 @@
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++
++struct server_model_cost_state {
++    double decode_ms_per_token = 0.0;
++    double prefill_ms_per_token = 0.0;
++    double fixed_ms = 0.0;
++    uint64_t observations = 0;
++    double confidence = 0.0;
++};
++
++// Online exponentially weighted latency model:
++// elapsed = decode_tokens * D + prefill_tokens * P + fixed.
++class server_model_cost_model {
++public:
++    explicit server_model_cost_model(double decay = 0.95);
++    void reset();
++    void observe(size_t decode_tokens, size_t prefill_tokens, double elapsed_ms);
++    server_model_cost_state state() const;
++    size_t recommend_prefill_chunk(
++            double target_iteration_ms,
++            size_t decode_tokens,
++            size_t active_prefill_sequences,
++            size_t minimum,
++            size_t maximum) const;
++
++private:
++    double decay_;
++    double normal_[3][3]{};
++    double rhs_[3]{};
++    uint64_t observations_ = 0;
++
++    server_model_cost_state solve() const;
++};
+diff --git a/tools/server/server-runtime-adapter.cpp b/tools/server/server-runtime-adapter.cpp
+new file mode 100644
+index 0000000..056ed91
+--- /dev/null
++++ b/tools/server/server-runtime-adapter.cpp
+@@ -0,0 +1,63 @@
++#include "server-runtime-adapter.h"
++
++#include "ggml.h"
++
++#include <algorithm>
++#include <chrono>
++#include <cstdlib>
++#include <thread>
++#include <utility>
++
++namespace {
++
++class server_llama_runtime final : public server_runtime_adapter {
++public:
++    server_llama_runtime() {
++        if (const char * value = std::getenv("CACHEFLOW_TEST_DECODE_FAILURES")) {
++            failures_remaining_ = std::max(0, std::atoi(value));
++        }
++        if (const char * value = std::getenv("CACHEFLOW_TEST_DECODE_FAILURE_CODE")) {
++            failure_code_ = std::atoi(value);
++        }
++    }
++
++    server_runtime_decode_result decode(llama_context * context, llama_batch batch) override {
++        const int64_t started = ggml_time_us();
++        int code = 0;
++        if (failures_remaining_ > 0) {
++            --failures_remaining_;
++            code = failure_code_;
++        } else {
++            code = llama_decode(context, batch);
++        }
++        return { code, code == 0, (uint64_t) (ggml_time_us() - started) };
++    }
++
++private:
++    int failures_remaining_ = 0;
++    int failure_code_ = 1;
++};
++
++} // namespace
++
++server_deterministic_runtime::server_deterministic_runtime(
++        server_deterministic_runtime_config config) : config_(std::move(config)) {}
++
++server_runtime_decode_result server_deterministic_runtime::decode(
++        llama_context *, llama_batch) {
++    const auto started = std::chrono::steady_clock::now();
++    if (config_.fixed_delay_us > 0) {
++        std::this_thread::sleep_for(std::chrono::microseconds(config_.fixed_delay_us));
++    }
++    const int code = calls_ < config_.decode_results.size()
++            ? config_.decode_results[calls_]
++            : 0;
++    ++calls_;
++    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
++            std::chrono::steady_clock::now() - started).count();
++    return { code, code == 0, (uint64_t) elapsed };
++}
++
++std::unique_ptr<server_runtime_adapter> server_create_llama_runtime() {
++    return std::make_unique<server_llama_runtime>();
++}
+diff --git a/tools/server/server-runtime-adapter.h b/tools/server/server-runtime-adapter.h
+new file mode 100644
+index 0000000..b99df52
+--- /dev/null
++++ b/tools/server/server-runtime-adapter.h
+@@ -0,0 +1,39 @@
++#pragma once
++
++#include "llama.h"
++
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <vector>
++
++struct server_runtime_decode_result {
++    int code = 0;
++    bool committed = false;
++    uint64_t elapsed_us = 0;
++};
++
++// Narrow production/test seam around state-changing llama runtime calls.
++class server_runtime_adapter {
++public:
++    virtual ~server_runtime_adapter() = default;
++    virtual server_runtime_decode_result decode(llama_context * context, llama_batch batch) = 0;
++};
++
++struct server_deterministic_runtime_config {
++    std::vector<int> decode_results;
++    uint64_t fixed_delay_us = 0;
++};
++
++class server_deterministic_runtime final : public server_runtime_adapter {
++public:
++    explicit server_deterministic_runtime(server_deterministic_runtime_config config);
++    server_runtime_decode_result decode(llama_context * context, llama_batch batch) override;
++    size_t calls() const { return calls_; }
++
++private:
++    server_deterministic_runtime_config config_;
++    size_t calls_ = 0;
++};
++
++std::unique_ptr<server_runtime_adapter> server_create_llama_runtime();
 diff --git a/tools/server/server-speculation-controller.cpp b/tools/server/server-speculation-controller.cpp
 new file mode 100644
-index 0000000..ccd2068
+index 0000000..1418d06
 --- /dev/null
 +++ b/tools/server/server-speculation-controller.cpp
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,94 @@
 +#include "server-speculation-controller.h"
 +
 +#include <algorithm>
@@ -3601,6 +6286,7 @@ index 0000000..ccd2068
 +    config.kv_pressure_threshold = std::clamp(config.kv_pressure_threshold, 0.0, 1.0);
 +    config_ = config;
 +    states_.clear();
++    disabled_low_acceptance_total_ = 0;
 +}
 +
 +server_speculation_state & server_speculation_controller::get_or_create(int sequence_id) {
@@ -3644,15 +6330,20 @@ index 0000000..ccd2068
 +    value.observations++;
 +    if (!config_.adaptive) return;
 +
-+    if (value.observations >= config_.warmup_observations &&
++    const bool has_evidence = value.observations >= config_.warmup_observations &&
++            value.drafted_total >= config_.min_evidence_tokens;
++    if (has_evidence &&
 +            value.acceptance_ewma < config_.disable_below_acceptance) {
++        if (!value.disabled && value.cooldown_remaining == 0) {
++            disabled_low_acceptance_total_++;
++        }
 +        value.cooldown_remaining = config_.cooldown_iterations;
 +        value.disabled = true;
 +        value.draft_tokens = config_.min_draft_tokens;
 +        return;
 +    }
 +    if (observation.kv_pressure >= config_.kv_pressure_threshold ||
-+            value.acceptance_ewma < 0.40) {
++            (has_evidence && value.acceptance_ewma < 0.40)) {
 +        value.draft_tokens = std::max(config_.min_draft_tokens, value.draft_tokens / 2);
 +    } else if (value.acceptance_ewma >= config_.grow_above_acceptance) {
 +        value.draft_tokens = std::min(config_.max_draft_tokens, value.draft_tokens + 1);
@@ -3672,10 +6363,10 @@ index 0000000..ccd2068
 +}
 diff --git a/tools/server/server-speculation-controller.h b/tools/server/server-speculation-controller.h
 new file mode 100644
-index 0000000..08065a3
+index 0000000..3b0b46a
 --- /dev/null
 +++ b/tools/server/server-speculation-controller.h
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,56 @@
 +#pragma once
 +
 +#include <cstddef>
@@ -3692,6 +6383,7 @@ index 0000000..08065a3
 +    double kv_pressure_threshold = 0.85;
 +    size_t cooldown_iterations = 8;
 +    size_t warmup_observations = 4;
++    size_t min_evidence_tokens = 24;
 +};
 +
 +struct server_speculation_observation {
@@ -3721,16 +6413,18 @@ index 0000000..08065a3
 +    size_t recommend(int sequence_id, size_t configured_max, double kv_pressure);
 +    void observe(const server_speculation_observation & observation);
 +    server_speculation_state state(int sequence_id) const;
++    uint64_t disabled_low_acceptance_total() const { return disabled_low_acceptance_total_; }
 +    void reset(int sequence_id);
 +
 +private:
 +    server_speculation_config config_;
 +    std::unordered_map<int, server_speculation_state> states_;
++    uint64_t disabled_low_acceptance_total_ = 0;
 +
 +    server_speculation_state & get_or_create(int sequence_id);
 +};
 diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
-index 72a4bd0..66e2dce 100644
+index 72a4bd0..987121b 100644
 --- a/tools/server/server-task.cpp
 +++ b/tools/server/server-task.cpp
 @@ -1895,6 +1895,7 @@ json server_task_result_metrics::to_json() {
@@ -3749,7 +6443,7 @@ index 72a4bd0..66e2dce 100644
          { "t_prompt_processing",             t_prompt_processing },
          { "n_tokens_predicted",              n_tokens_predicted },
          { "t_tokens_generation",             t_tokens_generation },
-@@ -1909,6 +1911,26 @@ json server_task_result_metrics::to_json() {
+@@ -1909,6 +1911,29 @@ json server_task_result_metrics::to_json() {
          { "n_decode_total",                  n_decode_total },
          { "n_busy_slots_total",              n_busy_slots_total },
  
@@ -3761,6 +6455,9 @@ index 72a4bd0..66e2dce 100644
 +        { "n_decode_tokens_scheduled_total",  n_decode_tokens_scheduled_total },
 +        { "n_prefill_tokens_scheduled_total", n_prefill_tokens_scheduled_total },
 +        { "n_prefill_chunks_scheduled_total", n_prefill_chunks_scheduled_total },
++        { "batch_tokens", batch_tokens },
++        { "batch_sequences", batch_sequences },
++        { "prefill_starvation_ms", prefill_starvation_ms },
 +        { "n_kv_admission_pressure_total", n_kv_admission_pressure_total },
 +        { "n_kv_proactive_evictions_total", n_kv_proactive_evictions_total },
 +        { "n_kv_proactive_reclaimed_tokens_total", n_kv_proactive_reclaimed_tokens_total },
@@ -3777,10 +6474,61 @@ index 72a4bd0..66e2dce 100644
      };
  }
 diff --git a/tools/server/server-task.h b/tools/server/server-task.h
-index bdadcff..2ee89bd 100644
+index bdadcff..4d1df2d 100644
 --- a/tools/server/server-task.h
 +++ b/tools/server/server-task.h
-@@ -517,6 +517,7 @@ struct server_task_result_metrics : server_task_result {
+@@ -11,6 +11,10 @@
+ // TODO: prevent including the whole server-common.h as we only use server_tokens
+ #include "server-common.h"
+ 
++#include "ggml.h"
++
++#include <array>
++
+ using json = nlohmann::ordered_json;
+ 
+ enum server_task_type {
+@@ -132,6 +136,7 @@ struct task_result_state {
+ 
+ struct server_task {
+     int id = -1; // to be filled by server_queue
++    int64_t t_queued_us = ggml_time_us();
+ 
+     // TODO @ngxson : remove this field and implement a mapping task_id -> idx in the response_reader
+     size_t index = 0; // used when there are multiple prompts (batch request)
+@@ -234,6 +239,7 @@ struct server_task {
+ 
+         copy.id        = id_child;
+         copy.id_parent = id_parent;
++        copy.t_queued_us = t_queued_us;
+         copy.params    = params;
+         copy.type      = type;
+         copy.tokens    = tokens.clone();
+@@ -263,6 +269,23 @@ struct server_task {
+     }
+ };
+ 
++struct server_latency_histogram {
++    static constexpr std::array<double, 11> bounds = {
++        0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0,
++    };
++    std::array<uint64_t, bounds.size() + 1> buckets{};
++    uint64_t count = 0;
++    double sum = 0.0;
++
++    void observe(double seconds) {
++        size_t bucket = 0;
++        while (bucket < bounds.size() && seconds > bounds[bucket]) bucket++;
++        buckets[bucket]++;
++        count++;
++        sum += seconds;
++    }
++};
++
+ struct result_timings {
+     int32_t cache_n = -1;
+ 
+@@ -517,6 +540,7 @@ struct server_task_result_metrics : server_task_result {
  
      // TODO: somehow reuse server_metrics in the future, instead of duplicating the fields
      uint64_t n_prompt_tokens_processed_total = 0;
@@ -3788,7 +6536,7 @@ index bdadcff..2ee89bd 100644
      uint64_t t_prompt_processing_total       = 0;
      uint64_t n_tokens_predicted_total        = 0;
      uint64_t t_tokens_generation_total       = 0;
-@@ -524,6 +525,7 @@ struct server_task_result_metrics : server_task_result {
+@@ -524,6 +548,7 @@ struct server_task_result_metrics : server_task_result {
      uint64_t n_tokens_max = 0;
  
      uint64_t n_prompt_tokens_processed = 0;
@@ -3796,7 +6544,7 @@ index bdadcff..2ee89bd 100644
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -532,6 +534,26 @@ struct server_task_result_metrics : server_task_result {
+@@ -532,6 +557,49 @@ struct server_task_result_metrics : server_task_result {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -3808,13 +6556,36 @@ index bdadcff..2ee89bd 100644
 +    uint64_t n_decode_tokens_scheduled_total  = 0;
 +    uint64_t n_prefill_tokens_scheduled_total = 0;
 +    uint64_t n_prefill_chunks_scheduled_total = 0;
++    uint64_t batch_tokens = 0;
++    uint64_t batch_sequences = 0;
++    double prefill_starvation_ms = 0.0;
 +    uint64_t n_kv_admission_pressure_total = 0;
 +    uint64_t n_kv_proactive_evictions_total = 0;
 +    uint64_t n_kv_proactive_reclaimed_tokens_total = 0;
 +    uint64_t n_kv_admission_failures_total = 0;
++    uint64_t n_requests_preempted_total = 0;
++    uint64_t n_requests_swapped_total = 0;
++    uint64_t n_requests_restored_total = 0;
++    uint64_t n_requests_recomputed_total = 0;
++    uint64_t n_draft_tokens_total = 0;
++    uint64_t n_draft_tokens_accepted_total = 0;
++    uint64_t n_speculation_disabled_low_acceptance_total = 0;
++    double speculation_net_saved_ms = 0.0;
 +
 +    uint64_t kv_cache_tokens          = 0;
 +    uint64_t kv_cache_capacity_tokens = 0;
++    uint64_t kv_blocks_used = 0;
++    uint64_t kv_blocks_free = 0;
++    uint64_t kv_shared_blocks = 0;
++    uint64_t kv_copy_on_write_total = 0;
++    uint64_t adaptive_prefill_chunk = 0;
++    double adaptive_prefill_iteration_ms = 0.0;
++    uint64_t adaptive_draft_length = 0;
++    llama_cacheflow_cuda_stats cuda_kv{};
++    server_latency_histogram time_to_first_token;
++    server_latency_histogram time_per_output_token;
++    server_latency_histogram request_latency;
++    server_latency_histogram request_queue;
 +
 +    uint64_t memory_model_bytes   = 0;
 +    uint64_t memory_context_bytes = 0;

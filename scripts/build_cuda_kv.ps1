@@ -3,7 +3,7 @@ param([switch]$Sanitize)
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $sourceRoot = Join-Path $projectRoot "vendor\llama.cpp"
-$buildRoot = Join-Path $projectRoot "build\patched-cuda-ninja"
+$buildRoot = Join-Path $projectRoot "build\patched-cuda-ninja3"
 $toolkitRoot = Join-Path $projectRoot "runtime\cuda-dev\Library"
 $nvcc = Join-Path $toolkitRoot "bin\nvcc.exe"
 $vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"

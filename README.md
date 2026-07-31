@@ -1,46 +1,54 @@
-# Cache-aware llama.cpp 推理实验台
+# CacheFlow Runtime
 
-这是一个面向推免面试的可复现 AI Infra 项目。项目不只调用上游二进制：它直接修改 `llama-server` 的 C++ slot 调度和 metrics 数据路径，实现 eviction-cost-aware KV Cache 调度，再用可控冲突 workload 与上游策略做 A/B。量化、CUDA/CPU、TTFT/TPOT 和质量实验作为完整验证底座。
+CacheFlow Runtime 是一个直接重构 llama.cpp 推理热路径的单机 LLM Serving / AI Infra 项目。它不是 Python 包装层，也不把 `vendor/` 中的上游源码算作个人工作量：个人实现以固定上游 `acd79d603` 为基线，通过可重放 patch 进入真实 `llama-server -> llama_decode -> KV memory -> CUDA` 调用链。
 
-个人核心贡献集中在 [engine patch](patches/0001-cache-aware-slot-scheduler.patch)：新增独立 C++ 调度模块、CLI 参数、原生测试，以及 KV/内存/缓存复用指标。完整上游源码继续放在 `vendor/`，个人 patch 单独提交，避免用第三方代码体量冒充本人工作。
+当前 fork 相对上游涉及 50 个文件，新增 5,798 行、删除 54 行 C/C++/CUDA；外层 Python 仅负责固定实验、故障注入和报告。
 
-## 当前复现结果
-
-环境：Windows 11、RTX 4050 Laptop 6GB、Intel i5-13500H、llama.cpp `b9632`、Qwen2.5-0.5B-Instruct GGUF 固定 revision。
-
-- Q4_K_M 权重约为 F16 的 38.5%，实测峰值显存为 625 MiB（Q8 753 MiB、F16 1241 MiB），CUDA decode 速度约为 F16 的 1.97 倍。
-- Q4 CUDA decode 速度约为 12 线程 CPU-only 的 4.66 倍。
-- 并发从 1 增至 4 时，聚合输出吞吐约提高至 2.37 倍，但单请求 TPOT 和尾延迟变差。
-- 在 5 次 cache-conflict A/B 中，新调度减少 91.6% 的重复 prefill、减少 97.5% 的缓存淘汰，使两请求序列中位延迟从 1372.28 ms 降至 138.85 ms（9.88 倍）。
-- 0.5B 模型在简单专业题上仍会产生事实错误；量化性能提升不能替代质量评测。
-
-完整数值见 [results/report.md](results/report.md)。结果只代表固定环境，不能直接外推到其他模型和硬件。
-
-## 系统结构
+## 实现了什么
 
 ```mermaid
 flowchart LR
-    A[artifacts.json] --> B[bootstrap.ps1]
-    B --> C[固定 llama.cpp 源码]
-    K[个人 C++ engine patch] --> C
-    B --> D[同源 Q4/Q8/F16 GGUF]
-    C --> E[离线 llama-bench]
-    D --> E
-    C --> F[patched llama-server]
-    D --> F
-    E --> G[baseline.csv]
-    F --> H[SSE TTFT/TPOT 与质量护栏]
-    G --> I[自动报告]
-    H --> I
-    D --> J[KV Cache 内存推荐器]
-    F --> L[Cache-aware slot scheduler]
-    L --> M[冲突 workload A/B]
-    M --> I
+    HTTP[OpenAI HTTP/SSE] --> Engine[Transactional Engine Iteration]
+    Engine --> Scheduler[Token-level Scheduler]
+    Scheduler --> Cost[Online Cost Model]
+    Engine --> KV[KV Runtime]
+    KV --> Blocks[Block Table + Prefix Index]
+    KV --> Admission[Admission + Preemption]
+    KV --> Swap[Host/File Transactional Swap]
+    KV --> Adapter[llama Memory Adapter]
+    Adapter --> CUDA[CUDA KV Backend]
+    CUDA --> Kernels[Gather / Scatter / Tail COW]
+    CUDA --> Async[Pinned Memory / Streams / Events]
+    Engine --> Spec[Adaptive Speculation]
+    Engine --> Decode[llama_decode]
 ```
+
+- Serving：Token-level Continuous Batching、Decode 优先、Chunked Prefill、公平轮转、取消、Deadline、背压和 OpenAI 流式/非流式接口。
+- Runtime：不可变 iteration plan 与 prepare/execute/commit/abort 事务；统一 KV 容量规划；Prefix Block Table、引用计数、COW、抢占与恢复。
+- 模型侧控制：按 CPU/CUDA、并发和上下文在线更新成本模型，自适应选择 Prefill Chunk；按接受率证据、迟滞和 KV 压力调整 Speculative Draft 长度。
+- GPU Backend：自研 FP16 K/V Gather、Scatter、Snapshot-safe 重叠拷贝和 Tail COW CUDA Kernel；异步 Pinned Host Swap、独立 Stream/Event、`cudaMallocAsync`、错误回滚与统计。
+- 存储：有容量预算、校验和、临时文件原子提交及故障注入的 Host/File KV Swap Store。
+- 可观测性：原生 TTFT/TPOT/请求/排队 Histogram，以及 Scheduler、KV、Speculation、CUDA Kernel、传输字节、Event 时间和 Pinned Pool 指标。
+
+详细状态所有权、接口、失败语义和复杂度见 [架构文档](docs/architecture.md)，验收证据见 [验收报告](docs/acceptance-report.md)。
+
+## 可复现结果
+
+固定环境：Windows 11、RTX 4050 Laptop 6 GiB、i5-13500H、CUDA sm_89、Qwen2.5-0.5B-Instruct Q4/Q8/F16。
+
+- 真实 Tail COW：64 个 Block 的整序列复制替换为单 Tail Block，P95 从 0.999 ms 降至 0.024 ms；复制量/额外显存从 12,582,912 B 降至 196,608 B，launch 从 128 降至 1。
+- 真实 CUDA Swap：Qwen KV 经 D2H/H2D Pinned Memory 往返后序列状态逐字节一致，Event 时间和 319,488 B Pinned 峰值来自实际运行。
+- 上游兼容：固定相同 MSVC 工具链、模型和 seed，`upstream` policy 5/5 输出 SHA-256 一致。
+- 模型矩阵：Q4/Q8/F16 × CPU/CUDA、并发 1/2/4/8、约 128/512/2K/4K 上下文共 14 个真实服务 case 通过。
+- Adaptive Speculation：当前 CUDA trace 的 wall-time 中位数 196.18 ms，fixed 为 202.58 ms；CPU adaptive 中位数也略优于 fixed。
+- Adaptive Prefill：避免了错误 fixed-64 参数，但没有稳定击败 CUDA greedy / fixed-256；这是保留的负结果，不宣称普遍收益。
+- Gather/Scatter：完全不重叠时 per-block memcpy 更快，因此生产实现只在重叠/重复映射需要 snapshot 语义时使用 staging kernel。
+
+所有结论至少 3 次 fresh-process trial；汇总位于 `results/`，原始 trial 位于 `results/raw/`。硬件、模型和负结果边界见 [实验限制](docs/experiment-limitations.md)。
 
 ## 一键复现
 
-项目首次初始化约下载 3GB 模型和 650MB Windows CUDA 运行包。构建 patched server 需要 Visual Studio 2022 C++ workload 和 CMake。所有制品都固定 URL、revision、大小和 SHA-256；bootstrap 会把个人 patch 幂等应用到固定上游提交。
+依赖：PowerShell、Git、Python 3、CMake、Ninja、Visual Studio 2022 C++ workload。仓库已在 `runtime/cuda-dev` 固定 CUDA 12.6 开发环境；模型和预编译基线由 SHA-256 清单固定。
 
 ```powershell
 cd D:\llama
@@ -48,103 +56,72 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 ```
 
-`-Full` 将依次运行：
+`verify.ps1 -Full` 会依次执行：
 
-1. Python 单元测试与语法编译；
-2. 编译 patched C++ server 并运行原生调度测试；
-3. 运行上游策略/新策略的 KV Cache 冲突 A/B；
-4. 制品 SHA-256、Q4/Q8/F16 和 CPU/GPU benchmark；
-5. 并发 1/2/4 在线测试与质量护栏；
-6. 自动生成 Markdown 报告。
+1. Python 测试、语法检查、制品 SHA-256 和设备检查；
+2. CPU fork、同工具链 upstream、CUDA sm_89 全部目标构建；
+3. 10 个个人 C++ 原生测试与随机状态/映射性质测试；
+4. Prefix 分享、抢占恢复、真实 CUDA Tensor/Swap、OOM/Compute/Store 故障注入；
+5. OpenAI/SSE、取消、Deadline、背压和恢复；
+6. 上游输出兼容、模型/后端/并发/上下文矩阵；
+7. CUDA Transport/COW、Adaptive Prefill/Spec、Scheduler、在线/离线/质量 A/B；
+8. 从原始数据重新生成报告。
 
-只验证环境和测试：
+只做快速环境与 Python 验证：
 
 ```powershell
 .\scripts\verify.ps1
 ```
 
-## 分步运行
+单独执行 CUDA 内存检查：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build_patched_server.ps1
-python .\scripts\run_engine_ab.py
-python .\scripts\run_benchmarks.py
-python .\scripts\run_server_benchmark.py
-python .\scripts\run_quality.py
-python .\scripts\generate_report.py
+.\scripts\build_cuda_kv.ps1 -Sanitize
 ```
 
-显存预算建议器示例：
+Windows WDDM 需要先以管理员身份运行 CUDA Toolkit 的 `EnableDebuggerInterface.bat`。当前非提权机器无法 attach Compute Sanitizer；常规全量验收会运行 canary、随机映射、逐元素对照和 allocation failpoint 等等效边界检查，但报告不会把 Sanitizer 本身写成通过。
 
-```powershell
-python .\scripts\memory_advisor.py `
-  --model .\models\qwen2.5-0.5b-instruct-q4_k_m.gguf `
-  --available-mib 5075 `
-  --slots 4
-```
-
-## 实验设计
-
-### C++ Cache-aware slot 调度
-
-上游策略在空闲 slot 中选择与新 prompt 最相似的缓存。它只最大化当前请求复用，可能为了多复用少量 token 而破坏一个长会话。新增策略使用：
+## 策略开关
 
 ```text
-score = reusable_prefix_tokens - eviction_penalty × discarded_cached_tokens
+--scheduler-policy upstream|cacheflow
+--prefill-policy greedy|fixed|adaptive
+--spec-policy fixed|adaptive
+--kv-block-runtime
+--kv-block-size N
+--kv-admission-reserve-tokens N
 ```
 
-`--slot-cache-eviction-penalty 0` 严格保留最长公共前缀行为；正值考虑缓存机会成本，得分非正时回退 LRU。相同得分使用 LRU 打破平局。纯函数调度模块有原生 C++ 边界测试，metrics 同时暴露选择次数、估计复用/淘汰 token、KV 占用和 llama.cpp 内部分配内存。
+`upstream` 模式关闭行为变化。最终生效配置会导出到 Prometheus，避免实验参数被静默忽略。完整参数和约束见 [架构文档](docs/architecture.md)。
 
-`config/engine_ab.json` 固定两个 slot：一个保存 480-token 长会话，一个保存 70-token 短会话。冲突请求在“当前多复用 20 token”和“保护 400 token 长缓存”之间选择，随后立即访问长会话，从而测量整个序列而非只挑单请求指标。
-
-### 离线吞吐
-
-`config/experiment.json` 固定 prompt 256 tokens、generation 64 tokens 和三次重复。GPU 比较 Q4_K_M/Q8_0/F16；CPU-only 比较 6/12 线程。`pp` 是 prompt processing，`tg` 是 token generation。官方 `llama-bench` 不含 tokenization 和 sampling 时间，因此不能用它代替在线延迟。
-
-### 在线流式指标
-
-`config/server_benchmark.json` 启动四个服务 slot，分别施加并发 1/2/4 的固定请求，每档至少 30 个样本。脚本从 SSE 第一个非空 content 事件计算 TTFT（首 token 的接口近似），并以首 token 后的生成 token 计算 TPOT；聚合 TPS 使用整组完成 token 数除以墙钟时间。
-
-### 质量护栏
-
-`config/quality.json` 使用固定温度 0、固定任务和正/负规则。它能发现显然错误，但只有五题，不能代替 perplexity、标准评测集或人工事实核验。每条完整输出保存在 `quality_results.csv`，不能只汇报通过率。
-
-### 内存估算
-
-对 decoder-only Transformer，F16 KV Cache 近似为：
+## 代码边界
 
 ```text
-2 × layers × kv_heads × head_dim × context × slots × 2 bytes
+vendor/llama.cpp/                 固定上游 fork；个人实现所在的真实 C++/CUDA 热路径
+patches/0001-*.patch              相对固定上游的完整个人可重放差异
+scripts/                         构建、真实服务测试、A/B 和报告编排
+results/                         可提交汇总；raw/ 保存 fresh-process 原始数据
+docs/                            架构、验收、实验限制和面试深挖
+src/cacheflow/                   早期 Python 控制面原型，不计最终 Runtime 核心
+models/ runtime/ build/          下载模型、工具链和本机构建产物，均不计个人源码
 ```
 
-推荐器再加 GGUF 文件大小、固定 runtime 预留和 15% 安全余量。它是容量规划估算；基准脚本同时轮询 `nvidia-smi` 给出整卡基线、峰值和增量，但最终的精细归因仍应使用 NVML 或 profiler 验证。
+复用的上游部分包括 GGUF、模型 Graph、GGML 通用算子、既有 CPU/CUDA/Metal/Vulkan Backend、HTTP 基础设施和 Sampling。个人部分是 Scheduler、事务 Engine Seam、KV 资源模型、CUDA KV Kernel/Adapter、控制算法、原生 Metrics、故障注入与实验体系。不要在面试中声称“重写了 llama.cpp”。
 
-Windows 预编译包即使使用 `-ngl 0` 也会加载 CUDA backend 并创建上下文，因此 CPU-only case 可能显示数百 MiB 的 CUDA 运行时占用；`execution=CPU-only` 表示模型层未 offload，不表示进程完全不初始化 CUDA。
+## 面试演示主线
 
-## 目录
+三分钟版本：
 
-```text
-config/       固定制品、离线、在线和质量配置
-patches/      可审查、可重放的个人 llama.cpp C++ 改动
-docs/         架构与面试追问
-models/       下载的 GGUF，Git 忽略
-runtime/      官方预编译运行包，Git 忽略
-scripts/      初始化、实验、报告和验证入口
-src/          指标、SSE、benchmark、质量和推荐器实现
-tests/        无外部依赖的单元测试
-results/      可提交的汇总结果；raw 日志被忽略
-vendor/       固定版本 llama.cpp 源码，Git 忽略
-build/        本机构建的 patched server，Git 忽略
-```
+1. 展示 `server_inference_iteration` 如何禁止半执行计划提交；
+2. 展示 Block Table 的共享、COW 和容量守恒随机测试；
+3. 展示 `llama-kv-cache-paged.cu` 中真实 K/V Tensor 的 CUDA Copy/Swap；
+4. 运行 OpenAI SSE smoke 并读取原生 Histogram/CUDA Metrics；
+5. 对比 Tail COW 的 bytes、launch、P95，再主动解释 Gather/Scatter 和 Adaptive Prefill 的负结果。
 
-## 面试演示建议
-
-三分钟演示顺序：先展示独立 C++ 调度函数和原生测试，再用日志解释惩罚 0 为什么淘汰 400 token、惩罚 0.5 为什么只淘汰 10 token，随后展示 5 次 A/B 的累计延迟与 prefill 差异。最后再用 CUDA/量化数据说明实验底座如何验证改动。应表述为“修改 llama.cpp slot 调度与可观测性”，而不是“实现了整个 llama.cpp”。
-
-进一步追问与回答框架见 [docs/interview-notes.md](docs/interview-notes.md)。
+追问框架见 [面试笔记](docs/interview-notes.md)。
 
 ## 来源与许可证
 
-- [llama.cpp](https://github.com/ggml-org/llama.cpp)：MIT；本项目固定 `b9632/acd79d603cb2e1c84c0886137b80f1ad649b6857`。
-- [Qwen2.5-0.5B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF)：Apache-2.0；固定 revision `9217f5db79a29953eb74d5343926648285ec7e67`。
-- 第三方源码、二进制和模型不进入本仓库提交；各自许可证独立生效。
+- llama.cpp：MIT，固定 `b9632 / acd79d603cb2e1c84c0886137b80f1ad649b6857`。
+- Qwen2.5-0.5B-Instruct-GGUF：Apache-2.0，固定 revision `9217f5db79a29953eb74d5343926648285ec7e67`。
+- 第三方源码、模型和构建产物不计个人工作量；各自许可证独立生效。

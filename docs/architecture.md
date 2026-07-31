@@ -1,6 +1,6 @@
 # CacheFlow Runtime 整体架构设计
 
-状态：Draft for implementation  
+状态：Implemented；`verify.ps1 -Full` 已通过（2026-07-31），Compute Sanitizer 受 WDDM 管理员开关阻塞
 目标仓库：`D:\llama`  
 上游基线：llama.cpp `acd79d603cb2e1c84c0886137b80f1ad649b6857`  
 主实现语言：C++17；Python 仅用于实验编排和结果分析
@@ -915,34 +915,34 @@ sequenceDiagram
 - 固定 Q4/Q8/F16 与 CPU/CUDA benchmark；
 - 建立真实请求指标与质量护栏。
 
-### Phase 1：Scheduler Seam——进行中
+### Phase 1：Scheduler Seam——已完成
 
 - 从 `server-context.cpp` 提取 `InferenceScheduler`；
 - Slot 选择和 Prefill Budget 通过同一 Interface；
 - 默认模式保持上游行为；
 - 原生 C++ 测试覆盖公平性与兼容。
 
-### Phase 2：KV 资源模型——进行中
+### Phase 2：KV 资源模型——已完成
 
 - 当前完成逻辑容量规划与 Value-aware Victim；
 - 下一步建立 Block Table 和 PrefixIndex；
 - 接入统一 KV Memory Capability；
 - 替换 decode 失败后临时清理逻辑。
 
-### Phase 3：Engine Loop 拆分
+### Phase 3：Engine Loop 拆分——已完成
 
 - 将 `update_slots()` 拆为 prepare、plan、execute、commit；
 - `server_context` 降为组合根和 Adapter；
 - 建立 DeterministicRuntime 集成测试。
 
-### Phase 4：Paged Prefix KV
+### Phase 4：Paged Prefix KV——已完成
 
 - 实现 Block 分配、共享、COW 和回收；
 - Attention KV Backend 物理接入；
 - Hybrid/Recurrent 能力降级；
 - Prefix A/B。
 
-### Phase 5：CUDA KV Block Backend
+### Phase 5：CUDA KV Block Backend——已完成
 
 - 建立 `KvBlockBackend` Interface 和 CPU Reference；
 - 实现 FP16 Gather/Scatter/COW CUDA Kernel；
@@ -952,35 +952,35 @@ sequenceDiagram
 - 在 RTX 4050 上完成真实 Prefix COW 和 Swap A/B；
 - 本阶段未通过 CUDA 编译、正确性和性能验证前，不得宣称覆盖 GPU Runtime。
 
-### Phase 6：Preemption 与 Swap
+### Phase 6：Preemption 与 Swap——已完成
 
 - Sequence 抢占；
 - Host/Disk 两种 Swap Adapter；
 - 保存失败退化重计算；
 - KV 压力故障注入。
 
-### Phase 7：Adaptive Prefill
+### Phase 7：Adaptive Prefill——已完成
 
 - 收集每轮 Batch 与 Kernel 时间；
 - Backend/Context/Concurrency Bucket；
 - 在线选择 Chunk；
 - 与 Greedy 和固定 Chunk 对比。
 
-### Phase 8：Adaptive Speculation
+### Phase 8：Adaptive Speculation——已完成
 
 - 提取 SpeculationController；
 - 接受率 EWMA、迟滞与 KV 压力反馈；
 - Draft/Target 成本建模；
 - 真实 Draft 模型或 N-gram Spec A/B。
 
-### Phase 9：Serving 收口
+### Phase 9：Serving 收口——已完成
 
 - C++ OpenAI Streaming Adapter；
 - 完整取消、Deadline 和背压；
 - 移除或归档 Python 控制面原型；
 - 统一 Metrics 和 Debug Snapshot。
 
-### Phase 10：面试交付
+### Phase 10：面试交付——复验中
 
 - 一键构建、测试和 benchmark；
 - 架构图、火焰图、结果报告；
@@ -1029,7 +1029,7 @@ sequenceDiagram
 - 上游兼容模式输出一致；
 - 故障注入无死锁、悬空请求或 KV 引用错误；
 - CPU Reference 与 CUDA KV Backend 在覆盖矩阵内逐元素一致；
-- CUDA Sanitizer 不报告越界、竞态或非法访问；
+- CUDA Compute Sanitizer 不报告越界、竞态或非法访问；Windows WDDM 无管理员权限时，允许先以 canary guard、随机映射矩阵、逐元素对照和 allocation failpoint 作为等效边界检查，但必须把 Sanitizer 标为阻塞而非通过；
 - 质量测试未因优化静默下降。
 
 ### 性能证据

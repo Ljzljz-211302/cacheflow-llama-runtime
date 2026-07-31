@@ -32,6 +32,15 @@ def render_report(results_dir: Path, output_path: Path) -> None:
     environment = json.loads(
         (results_dir / "environment.json").read_text(encoding="utf-8")
     )
+    cow = json.loads((results_dir / "cuda-kv-cow-summary.json").read_text(encoding="utf-8"))
+    with (results_dir / "adaptive_prefill_summary.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as handle:
+        adaptive_prefill = list(csv.DictReader(handle))
+    with (results_dir / "adaptive_speculation_summary.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as handle:
+        adaptive_speculation = list(csv.DictReader(handle))
     build_commit = baseline[0].get("build_commit", "unknown") if baseline else "unknown"
     build_number = baseline[0].get("build_number", "unknown") if baseline else "unknown"
 
@@ -98,7 +107,7 @@ def render_report(results_dir: Path, output_path: Path) -> None:
     quality_total = max((int(row["total"]) for row in quality), default=0)
 
     lines = [
-        "# llama.cpp 可复现基线报告",
+        "# CacheFlow Runtime 可复现验收报告",
         "",
         "> 该报告由实验脚本从原始 JSON/CSV 自动生成；速度只代表当前机器、固定版本和固定配置。",
         "",
@@ -182,6 +191,56 @@ def render_report(results_dir: Path, output_path: Path) -> None:
                 "",
                 "惩罚 0 等价于上游最长公共前缀选择；正惩罚使用本项目新增的净收益评分。当前请求可能少复用 token，但能避免破坏更有价值的长会话缓存，因此必须比较请求序列而非单请求。",
             ]
+        )
+    cow_by_method = {case["method"]: case for case in cow["cases"]}
+    lines.extend(
+        [
+            "",
+            "## 真实 CUDA Tail COW",
+            "",
+            "| 方法 | Median E2E ms | P95 E2E ms | Bytes/op | Launch/op | Extra device bytes |",
+            "|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for method in ("tail_block_cow", "whole_sequence_copy"):
+        row = cow_by_method[method]
+        lines.append(
+            f"| {method} | {row['median_end_to_end_ms']:.4f} | "
+            f"{row['p95_end_to_end_ms']:.4f} | {row['bytes_per_operation']} | "
+            f"{row['copy_launches_per_operation']} | {row['extra_device_bytes']} |"
+        )
+    lines.extend(
+        [
+            "",
+            f"3 个 fresh process、每个方法 300 samples；Tail COW P95 改善 "
+            f"{cow['p95_improvement_percent']:.2f}%。",
+            "",
+            "## Adaptive Prefill",
+            "",
+            "| Backend | Mode | Median wall ms | P95 wall ms | Effective chunk median |",
+            "|---|---|---:|---:|---:|",
+        ]
+    )
+    for row in adaptive_prefill:
+        lines.append(
+            f"| {row['backend']} | {row['mode']} | {float(row['decode_wall_ms_median']):.2f} | "
+            f"{float(row['decode_wall_ms_p95']):.2f} | {float(row['effective_chunk_median']):.0f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "Adaptive 能避开错误 fixed-64，但当前 CUDA trace 未稳定击败 greedy/fixed-256；该负结果保留。",
+            "",
+            "## Adaptive Speculation",
+            "",
+            "| Backend | Mode | Median wall ms | P95 wall ms | Acceptance |",
+            "|---|---|---:|---:|---:|",
+        ]
+    )
+    for row in adaptive_speculation:
+        lines.append(
+            f"| {row['backend']} | {row['mode']} | {float(row['wall_ms_median']):.2f} | "
+            f"{float(row['wall_ms_p95']):.2f} | {float(row['acceptance_ratio_median']):.1%} |"
         )
     lines.extend(
         [
