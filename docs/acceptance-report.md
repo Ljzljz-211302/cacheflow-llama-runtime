@@ -1,4 +1,4 @@
-# CacheFlow Runtime 严格验收报告
+# CacheFlow Runtime 验收进度报告
 
 验收基线：llama.cpp `acd79d603cb2e1c84c0886137b80f1ad649b6857`  
 个人 fork：`codex/cacheflow-runtime`  
@@ -7,14 +7,14 @@
 
 ## 结论状态
 
-2026-07-31 从唯一入口执行 `verify.ps1 -Full`，545 秒后以退出码 0 完成。功能、正确性、性能证据和工程复现项均通过自动化入口。启用 WDDM debugger interface 后，额外执行 `build_cuda_kv.ps1 -Sanitize`：memcheck 为 0 errors，racecheck 为 0 hazards、0 errors、0 warnings，脚本退出码 0。
+2026-07-31 从唯一入口执行 `verify.ps1 -Full`，545 秒后以退出码 0 完成；Compute Sanitizer memcheck/racecheck 也通过。这只证明当前自动化覆盖范围通过，不代表 `architecture.md` 的所有生产接入要求已满足。当前仍未通过最终严格验收：独立 CUDA Block/COW Backend 和 Host/File Swap Store 尚未接入生产 Engine，`update_slots()` 尚未完成模块拆分，Profiler/Flame Graph 与新版面试材料尚缺失。
 
 ## 架构与个人贡献
 
 | 项目 | 证据 | 状态 |
 |---|---|---|
 | Scheduler / KV / Spec 独立模块 | `server-inference-scheduler.*`、`server-kv-*`、`server-speculation-controller.*` | 通过 |
-| Engine 事务边界 | prepare → immutable plan → execute → commit/abort；半执行禁止提交 | 通过 |
+| Engine 事务边界 | 状态机已接入；`update_slots()` 仍未拆成独立 prepare/plan/execute/commit 模块 | 部分通过 |
 | 生产/测试同一 Seam | `server_runtime_adapter` 与 `KvBlockBackend` Interface | 通过 |
 | 第三方边界 | 固定上游 + 单独 patch；不统计 `vendor/` 原仓库 | 通过 |
 | 个人 C++/CUDA 差异 | 50 files，+5,798 / -54（相对固定上游） | 通过 |
@@ -27,9 +27,9 @@
 | Token-level batching / chunked prefill | `test-inference-scheduler`、`run_adaptive_prefill_ab.py` | 通过 |
 | Prefix Block 分享 / COW | `test-kv-block-manager` 随机性质测试、`run_kv_block_smoke.py --mode share` | 通过 |
 | Admission / Preemption / Restore | `test-kv-capacity-planner`、preempt smoke、真实 CUDA swap smoke | 通过 |
-| Host/File 事务 Swap | checksum、原子 rename、budget、save/restore failpoint | 通过 |
+| Host/File 事务 Swap | checksum、原子 rename、budget、save/restore failpoint 已通过独立测试，尚无生产调用者 | 未通过生产验收 |
 | Adaptive Prefill / Speculation | 独立开关、在线模型、EWMA/证据/迟滞测试及 CPU/CUDA A/B | 通过 |
-| CUDA Gather/Scatter/COW/Swap | sm_89 编译、随机逐元素矩阵、真实 Qwen K/V 往返 | 通过 |
+| CUDA Gather/Scatter/COW/Swap | Swap 与 Stream Copy 进入真实 Qwen K/V；独立 Block Gather/Scatter/Tail COW 仅在测试和微基准调用 | 部分通过 |
 | OpenAI 非流式 / SSE | schema、标准 chunk、`[DONE]`、同 prompt cache hit | 通过 |
 | 取消 / Deadline / 背压 | 断流取消后恢复、并发 deferred、10 ms deadline 后恢复 | 通过 |
 | 故障回滚 | KV OOM、compute failure、host/file save/restore、CUDA allocation | 通过 |
