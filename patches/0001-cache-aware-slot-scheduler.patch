@@ -1364,10 +1364,10 @@ index 0000000..3af8e59
 +}
 diff --git a/tests/test-inference-engine.cpp b/tests/test-inference-engine.cpp
 new file mode 100644
-index 0000000..0e390b4
+index 0000000..1d8cc4c
 --- /dev/null
 +++ b/tests/test-inference-engine.cpp
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,47 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -1399,6 +1399,14 @@ index 0000000..0e390b4
 +    assert(snapshot.iteration_plan.decode_tokens == 1);
 +    assert(snapshot.iteration_plan.prefill_tokens == 7);
 +    assert(snapshot.block_runtime_enabled && snapshot.swap_store_enabled);
++
++    server_sequence_state sequence;
++    assert(engine.transition(sequence, SLOT_STATE_STARTED));
++    assert(engine.transition(sequence, SLOT_STATE_PROCESSING_PROMPT));
++    assert(engine.transition(sequence, SLOT_STATE_DONE_PROMPT));
++    assert(engine.transition(sequence, SLOT_STATE_GENERATING));
++    assert(!engine.transition(sequence, SLOT_STATE_STARTED));
++    assert(engine.transition(sequence, SLOT_STATE_IDLE));
 +
 +    // Starting another iteration discards no committed state, but creates a
 +    // fresh transaction boundary owned by the engine.
@@ -2524,7 +2532,7 @@ index 7d42743..a18ab1b 100644
  
  set(TARGET llama-server-impl)
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..f5d6e33 100644
+index 986b2f1..ce56de3 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -4,6 +4,14 @@
@@ -2542,8 +2550,29 @@ index 986b2f1..f5d6e33 100644
  
  #include "build-info.h"
  #include "common.h"
-@@ -129,6 +137,9 @@ struct server_slot {
-     slot_state state = SLOT_STATE_IDLE;
+@@ -57,16 +65,6 @@ static uint32_t server_n_outputs_max(const common_params & params) {
+     return std::max<uint32_t>(1, std::min<uint64_t>(n_batch, n_outputs));
+ }
+ 
+-// state diagram: https://github.com/ggml-org/llama.cpp/pull/9283
+-enum slot_state {
+-    SLOT_STATE_IDLE,
+-    SLOT_STATE_WAIT_OTHER, // after assigning a task, but waiting for parent slot to process prompt
+-    SLOT_STATE_STARTED,    // after assigning a task and about to process prompt
+-    SLOT_STATE_PROCESSING_PROMPT,
+-    SLOT_STATE_DONE_PROMPT,
+-    SLOT_STATE_GENERATING,
+-};
+-
+ enum server_state {
+     SERVER_STATE_LOADING_MODEL,  // Server is starting up, model not fully loaded yet
+     SERVER_STATE_READY,          // Server is ready and model is loaded
+@@ -126,9 +124,12 @@ struct server_slot {
+     std::string stopping_word;
+ 
+     // state
+-    slot_state state = SLOT_STATE_IDLE;
++    server_sequence_state lifecycle;
  
      server_prompt prompt;
 +    llama_tokens cuda_swapped_tokens;
@@ -2552,7 +2581,34 @@ index 986b2f1..f5d6e33 100644
  
      bool prompt_save(server_prompt_cache & prompt_cache) const {
          if (prompt.tokens.size() == 0) {
-@@ -685,6 +696,7 @@ struct server_metrics {
+@@ -325,7 +326,7 @@ struct server_slot {
+     }
+ 
+     bool is_processing() const {
+-        return state != SLOT_STATE_IDLE;
++        return lifecycle.phase() != SLOT_STATE_IDLE;
+     }
+ 
+     bool can_speculate() const {
+@@ -403,8 +404,6 @@ struct server_slot {
+             t_last_used        =  ggml_time_us();
+             t_token_generation = (ggml_time_us() - t_start_generation) / 1e3;
+ 
+-            state = SLOT_STATE_IDLE;
+-
+             // do not keep context of the child slots - the parent's context is enough
+             if (task->is_child()) {
+                 prompt_clear(false);
+@@ -570,7 +569,7 @@ struct server_slot {
+     }
+ 
+     void copy_state_to(server_slot & other) const {
+-        GGML_ASSERT(state == SLOT_STATE_DONE_PROMPT);
++        GGML_ASSERT(lifecycle.phase() == SLOT_STATE_DONE_PROMPT);
+ 
+         common_context_seq_rm(ctx_tgt, other.id,     -1, -1);
+         common_context_seq_cp(ctx_tgt, id, other.id, -1, -1);
+@@ -685,6 +684,7 @@ struct server_metrics {
      int64_t t_start = 0;
  
      uint64_t n_prompt_tokens_processed_total = 0;
@@ -2560,7 +2616,7 @@ index 986b2f1..f5d6e33 100644
      uint64_t t_prompt_processing_total       = 0;
      uint64_t n_tokens_predicted_total        = 0;
      uint64_t t_tokens_generation_total       = 0;
-@@ -692,6 +704,7 @@ struct server_metrics {
+@@ -692,6 +692,7 @@ struct server_metrics {
      uint64_t n_tokens_max = 0;
  
      uint64_t n_prompt_tokens_processed = 0;
@@ -2568,7 +2624,7 @@ index 986b2f1..f5d6e33 100644
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -700,6 +713,33 @@ struct server_metrics {
+@@ -700,6 +701,33 @@ struct server_metrics {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -2602,7 +2658,7 @@ index 986b2f1..f5d6e33 100644
      void init() {
          t_start = ggml_time_us();
      }
-@@ -707,6 +747,8 @@ struct server_metrics {
+@@ -707,6 +735,8 @@ struct server_metrics {
      void on_prompt_eval(const server_slot & slot) {
          n_prompt_tokens_processed_total += slot.n_prompt_tokens_processed;
          n_prompt_tokens_processed       += slot.n_prompt_tokens_processed;
@@ -2611,7 +2667,7 @@ index 986b2f1..f5d6e33 100644
          t_prompt_processing             += slot.t_prompt_processing;
          t_prompt_processing_total       += slot.t_prompt_processing;
  
-@@ -730,8 +772,63 @@ struct server_metrics {
+@@ -730,8 +760,63 @@ struct server_metrics {
          }
      }
  
@@ -2675,7 +2731,7 @@ index 986b2f1..f5d6e33 100644
          t_prompt_processing       = 0;
          n_tokens_predicted        = 0;
          t_tokens_generation       = 0;
-@@ -816,8 +913,7 @@ private:
+@@ -816,8 +901,7 @@ private:
      json json_ui_settings = json::object();    // Primary: new name
      json json_webui_settings = json::object();    // Deprecated: use json_ui_settings instead (kept for compat)
  
@@ -2685,7 +2741,7 @@ index 986b2f1..f5d6e33 100644
  
      std::string model_name; // name of the loaded model, to be used by API
      std::set<std::string> model_aliases; // additional names for the model
-@@ -1114,8 +1210,59 @@ private:
+@@ -1114,8 +1198,59 @@ private:
  
          n_swa = params_base.swa_full ? 0 : llama_model_n_swa(model_tgt);
  
@@ -2747,7 +2803,17 @@ index 986b2f1..f5d6e33 100644
  
          // setup slots
          SRV_INF("initializing slots, n_slots = %d\n", params_base.n_parallel);
-@@ -1383,9 +1530,10 @@ private:
+@@ -1178,6 +1313,9 @@ private:
+             SLT_INF(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
+ 
+             slot.callback_on_release = [this](int id_slot) {
++                auto * released = get_slot_by_id(id_slot);
++                GGML_ASSERT(released != nullptr);
++                GGML_ASSERT(inference_engine.transition(released->lifecycle, SLOT_STATE_IDLE));
+                 queue_tasks.pop_deferred_task(id_slot);
+             };
+ 
+@@ -1383,9 +1521,10 @@ private:
  
          bool update_cache = false;
  
@@ -2761,7 +2827,7 @@ index 986b2f1..f5d6e33 100644
  
              for (server_slot & slot : slots) {
                  // skip the slot if it is not available
-@@ -1393,29 +1541,41 @@ private:
+@@ -1393,29 +1532,41 @@ private:
                      continue;
                  }
  
@@ -2823,7 +2889,7 @@ index 986b2f1..f5d6e33 100644
  
                  // if we are about to lose a large portion of the existing context - save it in the prompt cache
                  if (f_keep < 0.5f) {
-@@ -1443,12 +1603,16 @@ private:
+@@ -1443,12 +1594,16 @@ private:
  
              if (ret != nullptr) {
                  SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
@@ -2840,7 +2906,7 @@ index 986b2f1..f5d6e33 100644
              update_cache = update_cache && prompt_cache;
  
              // cache prompts only for completion tasks
-@@ -1469,41 +1633,114 @@ private:
+@@ -1469,41 +1624,114 @@ private:
  
                  SRV_INF("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
              }
@@ -2976,7 +3042,7 @@ index 986b2f1..f5d6e33 100644
      }
  
      std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
-@@ -1519,7 +1756,234 @@ private:
+@@ -1519,7 +1747,234 @@ private:
          return output;
      }
  
@@ -3211,7 +3277,7 @@ index 986b2f1..f5d6e33 100644
          // process per-request lora adapters
          if (!task.params.lora.empty()) {
              auto task_loras = construct_lora_list(task.params.lora);
-@@ -1590,6 +2054,8 @@ private:
+@@ -1590,6 +2045,8 @@ private:
              return false;
          }
  
@@ -3220,7 +3286,19 @@ index 986b2f1..f5d6e33 100644
          SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
  
          // initialize samplers
-@@ -1966,6 +2432,7 @@ private:
+@@ -1629,9 +2086,10 @@ private:
+ 
+         slot.task = std::make_unique<const server_task>(std::move(task));
+ 
+-        slot.state = slot.task->is_child()
++        const slot_state initial_phase = slot.task->is_child()
+             ? SLOT_STATE_WAIT_OTHER // wait for the parent to process prompt
+             : SLOT_STATE_STARTED;
++        GGML_ASSERT(inference_engine.transition(slot.lifecycle, initial_phase));
+ 
+         // reset server kill-switch counter
+         n_empty_consecutive = 0;
+@@ -1966,6 +2424,7 @@ private:
  
          res->generation_params = slot.task->params; // copy the parameters
  
@@ -3228,7 +3306,7 @@ index 986b2f1..f5d6e33 100644
          queue_results.send(std::move(res));
      }
  
-@@ -2214,12 +2681,14 @@ private:
+@@ -2214,12 +2673,14 @@ private:
                              if (!slot.is_processing()) {
                                  SLT_INF(slot, "%s", "saving idle slot to prompt cache\n");
  
@@ -3245,7 +3323,7 @@ index 986b2f1..f5d6e33 100644
                                      // [TAG_IDLE_SLOT_CLEAR]
                                      slot.prompt_clear(false);
                                  }
-@@ -2301,6 +2770,7 @@ private:
+@@ -2301,6 +2762,7 @@ private:
                      res->t_start             = metrics.t_start;
  
                      res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
@@ -3253,7 +3331,7 @@ index 986b2f1..f5d6e33 100644
                      res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
                      res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
                      res->t_tokens_generation_total       = metrics.t_tokens_generation_total;
-@@ -2308,12 +2778,95 @@ private:
+@@ -2308,12 +2770,95 @@ private:
                      res->n_tokens_max = metrics.n_tokens_max;
  
                      res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
@@ -3349,7 +3427,7 @@ index 986b2f1..f5d6e33 100644
  
                      if (task.metrics_reset_bucket) {
                          metrics.reset_bucket();
-@@ -2479,7 +3032,7 @@ private:
+@@ -2479,7 +3024,7 @@ private:
          }
      }
  
@@ -3358,7 +3436,7 @@ index 986b2f1..f5d6e33 100644
          // check if all slots are idle
          {
              bool all_idle = true;
-@@ -2494,7 +3047,7 @@ private:
+@@ -2494,7 +3039,7 @@ private:
              if (all_idle) {
                  SRV_INF("%s", "all slots are idle\n");
  
@@ -3367,7 +3445,16 @@ index 986b2f1..f5d6e33 100644
              }
          }
  
-@@ -2572,6 +3125,10 @@ private:
+@@ -2509,7 +3054,7 @@ private:
+         // apply context-shift if needed
+         // TODO: simplify and improve
+         for (server_slot & slot : slots) {
+-            if (slot.state == SLOT_STATE_GENERATING && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
++            if (slot.lifecycle.phase() == SLOT_STATE_GENERATING && slot.prompt.n_tokens() + 1 >= slot.n_ctx) {
+                 if (!params_base.ctx_shift) {
+                     // this check is redundant (for good)
+                     // we should never get here, because generation should already stopped in process_token()
+@@ -2572,6 +3117,10 @@ private:
              }
          }
  
@@ -3378,7 +3465,16 @@ index 986b2f1..f5d6e33 100644
          // start populating the batch for this iteration
          common_batch_clear(batch);
  
-@@ -2602,7 +3159,9 @@ private:
+@@ -2583,7 +3132,7 @@ private:
+ 
+         // determine which slots are generating and drafting
+         for (auto & slot : slots) {
+-            if (slot.state != SLOT_STATE_GENERATING) {
++            if (slot.lifecycle.phase() != SLOT_STATE_GENERATING) {
+                 continue;
+             }
+ 
+@@ -2602,7 +3151,9 @@ private:
                  const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                  const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
  
@@ -3389,7 +3485,7 @@ index 986b2f1..f5d6e33 100644
  
                  if (n_draft_max > 0) {
                      GGML_ASSERT(slot.can_speculate());
-@@ -2643,7 +3202,12 @@ private:
+@@ -2643,7 +3194,12 @@ private:
  
          // generate the actual drafts (if any)
          {
@@ -3402,7 +3498,7 @@ index 986b2f1..f5d6e33 100644
          }
  
          // make checkpoints if needed
-@@ -2705,6 +3269,54 @@ private:
+@@ -2705,6 +3261,55 @@ private:
          int32_t n_batch  = llama_n_batch(ctx_tgt);
          int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
  
@@ -3414,7 +3510,8 @@ index 986b2f1..f5d6e33 100644
 +            if (!slot.is_processing() || !slot.can_split()) {
 +                continue;
 +            }
-+            if (slot.state != SLOT_STATE_STARTED && slot.state != SLOT_STATE_PROCESSING_PROMPT) {
++            if (slot.lifecycle.phase() != SLOT_STATE_STARTED &&
++                    slot.lifecycle.phase() != SLOT_STATE_PROCESSING_PROMPT) {
 +                continue;
 +            }
 +            if (slot_batched && !slot_batched->can_batch_with(slot)) {
@@ -3422,7 +3519,7 @@ index 986b2f1..f5d6e33 100644
 +            }
 +
 +            size_t cached = slot.prompt.tokens.size();
-+            if (slot.state == SLOT_STATE_STARTED) {
++            if (slot.lifecycle.phase() == SLOT_STATE_STARTED) {
 +                cached = slot.task->params.cache_prompt
 +                        ? slot.prompt.tokens.get_common_prefix(slot.task->tokens)
 +                        : 0;
@@ -3457,8 +3554,20 @@ index 986b2f1..f5d6e33 100644
          float  alora_scale       = -1.0f;
          size_t alora_disabled_id = 0;
  
-@@ -2730,6 +3342,13 @@ private:
-                 if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
+@@ -2721,24 +3326,33 @@ private:
+                 }
+ 
+                 // check if this is a child slot
+-                if (slot.state == SLOT_STATE_WAIT_OTHER) {
++                if (slot.lifecycle.phase() == SLOT_STATE_WAIT_OTHER) {
+                     SLT_DBG(slot, "%s", "waiting for parent slot to complete\n");
+                     continue;
+                 }
+ 
+                 // this slot still has a prompt to be processed
+-                if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
++                if (slot.lifecycle.phase() == SLOT_STATE_PROCESSING_PROMPT ||
++                        slot.lifecycle.phase() == SLOT_STATE_STARTED) {
                      const auto & input_tokens = slot.task->tokens;
  
 +                    const size_t prefill_quota = slot.can_split()
@@ -3471,7 +3580,19 @@ index 986b2f1..f5d6e33 100644
                      // used to determine the number of tokens added to the batch for the current slot
                      const auto n_tokens_prev = batch.n_tokens;
  
-@@ -3110,7 +3729,9 @@ private:
+                     // TODO: maybe move branch to outside of this loop in the future
+-                    if (slot.state == SLOT_STATE_STARTED) {
++                    if (slot.lifecycle.phase() == SLOT_STATE_STARTED) {
+                         slot.t_start_process_prompt = ggml_time_us();
+                         slot.t_start_generation = 0;
+ 
+-                        slot.state = SLOT_STATE_PROCESSING_PROMPT;
++                        GGML_ASSERT(inference_engine.transition(
++                                slot.lifecycle, SLOT_STATE_PROCESSING_PROMPT));
+ 
+                         SLT_TRC(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
+                                 slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
+@@ -3110,7 +3724,9 @@ private:
                      const bool n_before_user_known = n_before_user > 0;
  
                      // add prompt tokens for processing in the current batch
@@ -3482,7 +3603,17 @@ index 986b2f1..f5d6e33 100644
                          // get next token to process
                          llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                          if (cur_tok == LLAMA_TOKEN_NULL) {
-@@ -3249,6 +3870,13 @@ private:
+@@ -3173,7 +3789,8 @@ private:
+ 
+                     // entire prompt has been processed
+                     if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
+-                        slot.state = SLOT_STATE_DONE_PROMPT;
++                        GGML_ASSERT(inference_engine.transition(
++                                slot.lifecycle, SLOT_STATE_DONE_PROMPT));
+ 
+                         GGML_ASSERT(batch.n_tokens > 0);
+ 
+@@ -3249,6 +3866,13 @@ private:
  
          SRV_DBG("decoding batch, n_tokens = %d\n", batch.n_tokens);
  
@@ -3496,7 +3627,7 @@ index 986b2f1..f5d6e33 100644
          auto accept_special_token = [&](server_slot & slot, llama_token token) {
              return params_base.special ||
                  slot.task->params.sampling.preserved_tokens.find(token) != slot.task->params.sampling.preserved_tokens.end();
-@@ -3294,7 +3922,8 @@ private:
+@@ -3294,7 +3918,8 @@ private:
                  batch.logits   + i,
              };
  
@@ -3506,7 +3637,7 @@ index 986b2f1..f5d6e33 100644
  
              metrics.on_decoded(slots);
  
-@@ -3320,6 +3949,7 @@ private:
+@@ -3320,6 +3945,7 @@ private:
                      // TODO: handle ret == 2 (abort) when we start aborting
  
                      if (!err.empty()) {
@@ -3514,7 +3645,7 @@ index 986b2f1..f5d6e33 100644
                          SRV_ERR("%s i = %d, n_batch = %d, ret = %d\n", err.c_str(), i, n_batch, ret);
  
                          for (auto & slot : slots) {
-@@ -3394,6 +4024,7 @@ private:
+@@ -3394,6 +4020,7 @@ private:
              //}
              if (!common_speculative_process(spec.get(), batch_view)) {
                  SRV_ERR("%s", "failed to process speculative batch\n");
@@ -3522,6 +3653,77 @@ index 986b2f1..f5d6e33 100644
  
                  // TODO: handle error
                  break;
+@@ -3407,10 +4034,11 @@ private:
+ 
+             // handle `n_cmpl > 1` tasks - when the main prompt is processed, activate all child tasks too
+             for (auto & slot : slots) {
+-                if (slot.state == SLOT_STATE_DONE_PROMPT && slot.task->is_parent()) {
++                if (slot.lifecycle.phase() == SLOT_STATE_DONE_PROMPT && slot.task->is_parent()) {
+                     std::vector<server_slot *> children;
+                     for (auto & other : slots) {
+-                        if (other.state == SLOT_STATE_WAIT_OTHER && slot.task->id == other.task->id_parent) {
++                        if (other.lifecycle.phase() == SLOT_STATE_WAIT_OTHER &&
++                                slot.task->id == other.task->id_parent) {
+                             children.push_back(&other);
+                         }
+                     }
+@@ -3420,17 +4048,19 @@ private:
+                     for (auto & child : children) {
+                         SLT_INF(slot, " - copying state to child %d\n", child->id);
+ 
+-                        GGML_ASSERT(child->state == SLOT_STATE_WAIT_OTHER);
++                        GGML_ASSERT(child->lifecycle.phase() == SLOT_STATE_WAIT_OTHER);
+ 
+                         slot.copy_state_to(*child);
+-                        child->state = SLOT_STATE_DONE_PROMPT;
++                        GGML_ASSERT(inference_engine.transition(
++                                child->lifecycle, SLOT_STATE_DONE_PROMPT));
+                     }
+                 }
+             }
+ 
+             for (auto & slot : slots) {
+                 // optionally send prompt processing progress
+-                if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_DONE_PROMPT) {
++                if (slot.lifecycle.phase() == SLOT_STATE_PROCESSING_PROMPT ||
++                        slot.lifecycle.phase() == SLOT_STATE_DONE_PROMPT) {
+                     if (slot.task->params.stream && slot.task->params.return_progress) {
+                         send_partial_response(slot, {}, true);
+                     }
+@@ -3440,7 +4070,7 @@ private:
+                     continue; // continue loop of slots
+                 }
+ 
+-                if (slot.state == SLOT_STATE_DONE_PROMPT) {
++                if (slot.lifecycle.phase() == SLOT_STATE_DONE_PROMPT) {
+                     if (slot.task->type == SERVER_TASK_TYPE_EMBEDDING) {
+                         // prompt evaluated for embedding
+                         send_embedding(slot, batch_view);
+@@ -3459,12 +4089,12 @@ private:
+                     GGML_ASSERT(slot.task->need_sampling());
+ 
+                     // prompt evaluated for next-token prediction
+-                    slot.state = SLOT_STATE_GENERATING;
++                    GGML_ASSERT(inference_engine.transition(slot.lifecycle, SLOT_STATE_GENERATING));
+ 
+                     if (slot.can_speculate()) {
+                         common_speculative_begin(spec.get(), slot.id, slot.prompt.tokens.get_text_tokens());
+                     }
+-                } else if (slot.state != SLOT_STATE_GENERATING) {
++                } else if (slot.lifecycle.phase() != SLOT_STATE_GENERATING) {
+                     continue; // continue loop of slots
+                 }
+ 
+@@ -3517,7 +4147,8 @@ private:
+ 
+             // speculative decoding - main model sample and accept
+             for (auto & slot : slots) {
+-                if (slot.state != SLOT_STATE_GENERATING || !slot.can_speculate() || slot.spec_draft.empty()) {
++                if (slot.lifecycle.phase() != SLOT_STATE_GENERATING ||
++                        !slot.can_speculate() || slot.spec_draft.empty()) {
+                     continue;
+                 }
+ 
 @@ -3593,6 +4224,13 @@ private:
  
                  // update how many tokens out of those tested were accepted
@@ -3903,10 +4105,10 @@ index 986b2f1..f5d6e33 100644
          res->status = 200;
 diff --git a/tools/server/server-inference-engine.cpp b/tools/server/server-inference-engine.cpp
 new file mode 100644
-index 0000000..9696ecf
+index 0000000..8a8f4eb
 --- /dev/null
 +++ b/tools/server/server-inference-engine.cpp
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,52 @@
 +#include "server-inference-engine.h"
 +
 +#include <stdexcept>
@@ -3931,6 +4133,20 @@ index 0000000..9696ecf
 +    return &iteration == &iteration_ && iteration.begin_commit() && iteration.commit();
 +}
 +
++bool server_inference_engine::transition(server_sequence_state & sequence, slot_state next) {
++    const slot_state current = sequence.phase_;
++    const bool valid =
++            (current == SLOT_STATE_IDLE && (next == SLOT_STATE_STARTED || next == SLOT_STATE_WAIT_OTHER)) ||
++            (current == SLOT_STATE_WAIT_OTHER && next == SLOT_STATE_DONE_PROMPT) ||
++            (current == SLOT_STATE_STARTED && next == SLOT_STATE_PROCESSING_PROMPT) ||
++            (current == SLOT_STATE_PROCESSING_PROMPT && next == SLOT_STATE_DONE_PROMPT) ||
++            (current == SLOT_STATE_DONE_PROMPT && next == SLOT_STATE_GENERATING) ||
++            (current != SLOT_STATE_IDLE && next == SLOT_STATE_IDLE);
++    if (!valid) return false;
++    sequence.phase_ = next;
++    return true;
++}
++
 +server_engine_snapshot server_inference_engine::snapshot() const {
 +    return {
 +        iteration_.phase(),
@@ -3947,10 +4163,10 @@ index 0000000..9696ecf
 +}
 diff --git a/tools/server/server-inference-engine.h b/tools/server/server-inference-engine.h
 new file mode 100644
-index 0000000..d614b5c
+index 0000000..926e44d
 --- /dev/null
 +++ b/tools/server/server-inference-engine.h
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,87 @@
 +#pragma once
 +
 +#include "server-inference-iteration.h"
@@ -3964,6 +4180,24 @@ index 0000000..d614b5c
 +#include <memory>
 +#include <stdexcept>
 +#include <utility>
++
++enum slot_state : uint8_t {
++    SLOT_STATE_IDLE,
++    SLOT_STATE_WAIT_OTHER,
++    SLOT_STATE_STARTED,
++    SLOT_STATE_PROCESSING_PROMPT,
++    SLOT_STATE_DONE_PROMPT,
++    SLOT_STATE_GENERATING,
++};
++
++class server_sequence_state {
++public:
++    slot_state phase() const { return phase_; }
++
++private:
++    friend class server_inference_engine;
++    slot_state phase_ = SLOT_STATE_IDLE;
++};
 +
 +struct server_engine_snapshot {
 +    server_iteration_phase iteration_phase = server_iteration_phase::created;
@@ -3992,6 +4226,7 @@ index 0000000..d614b5c
 +    }
 +
 +    bool commit(server_inference_iteration & iteration);
++    bool transition(server_sequence_state & sequence, slot_state next);
 +    server_engine_snapshot snapshot() const;
 +
 +    server_inference_scheduler & scheduler() { return scheduler_; }
