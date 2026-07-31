@@ -49,6 +49,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "real CUDA tensor adapter smoke failed" }
         python scripts\run_cuda_swap_server_smoke.py
         if ($LASTEXITCODE -ne 0) { throw "real CUDA server swap smoke failed" }
+        python scripts\run_kv_store_server_smoke.py
+        if ($LASTEXITCODE -ne 0) { throw "production host/file KV store and failure fallback smoke failed" }
         python scripts\run_runtime_fault_injection.py
         if ($LASTEXITCODE -ne 0) { throw "runtime fault injection failed" }
         python scripts\run_openai_compat_smoke.py

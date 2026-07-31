@@ -18,10 +18,10 @@ index 9e7b125..6195e3f 100644
  license_add_file("llama.cpp" "LICENSE")
  
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 8382c1d..0e1d77a 100644
+index 8382c1d..c3b51eb 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -3256,6 +3256,132 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3256,6 +3256,164 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.slot_prompt_similarity = std::stof(value);
          }
      ).set_examples({LLAMA_EXAMPLE_SERVER}));
@@ -104,6 +104,38 @@ index 8382c1d..0e1d77a 100644
 +        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
++        {"--kv-swap-path"}, "memory|PATH",
++        "enable transactional KV swap in host memory or in the specified directory",
++        [](common_params & params, const std::string & value) {
++            if (value.empty()) {
++                throw std::invalid_argument("KV swap path must be 'memory' or a directory");
++            }
++            params.kv_swap_path = value;
++            if (params.kv_swap_budget_mib == 0) params.kv_swap_budget_mib = 1024;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--kv-swap-budget-mib"}, "N",
++        "maximum host/file KV swap capacity in MiB (0 = disabled unless --kv-swap-path is set)",
++        [](common_params & params, int value) {
++            if (value < 0) {
++                throw std::invalid_argument("KV swap budget must be non-negative");
++            }
++            params.kv_swap_budget_mib = value;
++            if (value > 0 && params.kv_swap_path.empty()) params.kv_swap_path = "memory";
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--kv-swap-fault"}, "none|next-save|next-restore",
++        "inject one transactional KV-store failure for runtime validation",
++        [](common_params & params, const std::string & value) {
++            if (value != "none" && value != "next-save" && value != "next-restore") {
++                throw std::invalid_argument("KV swap fault must be none, next-save, or next-restore");
++            }
++            params.kv_swap_fault = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
 +        {"--prefill-chunk-size"}, "N",
 +        string_format(
 +            "maximum prompt tokens scheduled per slot in one decode iteration (default: %d; 0 = upstream greedy prefill)",
@@ -154,7 +186,7 @@ index 8382c1d..0e1d77a 100644
      add_opt(common_arg(
          {"--lora-init-without-apply"},
          string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),
-@@ -3413,6 +3539,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3413,6 +3571,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
  
      //
      // speculative parameters
@@ -209,10 +241,10 @@ index 8382c1d..0e1d77a 100644
  
      add_opt(common_arg(
 diff --git a/common/common.h b/common/common.h
-index 0b284cb..66356a1 100644
+index 0b284cb..1189199 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -653,6 +653,21 @@ struct common_params {
+@@ -653,6 +653,24 @@ struct common_params {
      std::string media_path; // path to directory for loading media files
  
      float slot_prompt_similarity = 0.1f;
@@ -231,6 +263,9 @@ index 0b284cb..66356a1 100644
 +    int32_t speculative_cooldown = 8;
 +    bool    kv_block_runtime = false;
 +    int32_t kv_block_size = 16;
++    std::string kv_swap_path;
++    int32_t kv_swap_budget_mib = 0;
++    std::string kv_swap_fault = "none";
  
      // batched-bench params
      bool is_pp_shared   = false;
@@ -690,7 +725,7 @@ index 0000000..81ea6db
 +    return success;
 +}
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 2802103..1d14624 100644
+index 2802103..383c75f 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
 @@ -376,6 +376,57 @@ llama_kv_cache::llama_kv_cache(
@@ -751,7 +786,41 @@ index 2802103..1d14624 100644
  void llama_kv_cache::clear(bool data) {
      for (uint32_t s = 0; s < n_stream; ++s) {
          v_cells[s].reset();
-@@ -840,6 +891,18 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
+@@ -502,17 +553,15 @@ void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, ll
+ 
+     // cross-stream sequence copies require to copy the actual buffer data
+ 
+-    bool is_full = true;
+-
+-    if (p0 > 0 && p0 + 1 < (int) get_size()) {
+-        is_full = false;
++    if (p0 < 0) {
++        p0 = 0;
+     }
+-
+-    if (p1 > 0 && p1 + 1 < (int) get_size()) {
+-        is_full = false;
++    if (p1 < 0) {
++        p1 = std::numeric_limits<llama_pos>::max();
++    }
++    if (p0 >= p1) {
++        return;
+     }
+-
+-    GGML_ASSERT(is_full && "seq_cp() is only supported for full KV buffers");
+ 
+     // enqueue the copy operation - the buffer copy will be performed during the next update
+     sc_info.ssrc.push_back(s0);
+@@ -520,7 +569,7 @@ void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, ll
+ 
+     v_cells[s1].reset();
+     for (uint32_t i = 0; i < v_cells[s0].size(); ++i) {
+-        if (v_cells[s0].seq_has(i, seq_id_src)) {
++        if (v_cells[s0].seq_has(i, seq_id_src) && v_cells[s0].pos_in(i, p0, p1)) {
+             llama_pos pos   = v_cells[s0].pos_get(i);
+             llama_pos shift = v_cells[s0].get_shift(i);
+ 
+@@ -840,6 +889,18 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
  
          const size_t n_copy = sc_info.ssrc.size();
  
@@ -770,7 +839,7 @@ index 2802103..1d14624 100644
          for (size_t i = 0; i < n_copy; ++i) {
              const auto ssrc = sc_info.ssrc[i];
              const auto sdst = sc_info.sdst[i];
-@@ -861,6 +924,7 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
+@@ -861,6 +922,7 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
                  }
              }
          }
@@ -2013,10 +2082,10 @@ index 0000000..41b5719
 +}
 diff --git a/tests/test-kv-swap-store.cpp b/tests/test-kv-swap-store.cpp
 new file mode 100644
-index 0000000..b9a92fd
+index 0000000..efec1ba
 --- /dev/null
 +++ b/tests/test-kv-swap-store.cpp
-@@ -0,0 +1,73 @@
+@@ -0,0 +1,97 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -2039,6 +2108,25 @@ index 0000000..b9a92fd
 +    return result;
 +}
 +
++static server_kv_swap_payload opaque_payload() {
++    server_kv_swap_payload result;
++    result.sequence_id = 23;
++    result.opaque_state = {0, 1, 2, 3, 5, 8, 13, 21};
++    return result;
++}
++
++static void exercise_opaque(server_kv_swap_store & store) {
++    const auto source = opaque_payload();
++    const auto saved = store.save(source);
++    assert(saved.ok);
++    server_kv_swap_payload restored;
++    assert(store.restore(saved.handle, restored));
++    assert(restored.sequence_id == source.sequence_id);
++    assert(restored.opaque_state == source.opaque_state);
++    assert(restored.physical_blocks.empty() && restored.data.k.empty() && restored.data.v.empty());
++    assert(store.erase(saved.handle));
++}
++
 +static void exercise(server_kv_swap_store & store) {
 +    const auto source = payload();
 +    const auto saved = store.save(source);
@@ -2059,6 +2147,7 @@ index 0000000..b9a92fd
 +    const auto stats = store.stats();
 +    assert(stats.saves == 1 && stats.restores == 1 && stats.erases == 1);
 +    assert(stats.restore_failures == 2 && stats.bytes_current == 0 && stats.bytes_peak > 0);
++    assert(stats.bytes_saved_total > 0 && stats.bytes_restored_total == stats.bytes_saved_total);
 +}
 +
 +int main() {
@@ -2068,6 +2157,8 @@ index 0000000..b9a92fd
 +    assert(!host->save(payload()).ok);
 +    auto tiny = server_kv_create_host_swap_store(1);
 +    assert(!tiny->save(payload()).ok);
++    auto opaque_host = server_kv_create_host_swap_store(1 << 20);
++    exercise_opaque(*opaque_host);
 +
 +    const auto directory = std::filesystem::temp_directory_path() / "cacheflow-kv-swap-test";
 +    std::filesystem::remove_all(directory);
@@ -2087,6 +2178,8 @@ index 0000000..b9a92fd
 +    assert(!file->restore(saved.handle, untouched));
 +    assert(untouched.sequence_id == 123);
 +    assert(file->erase(saved.handle));
++    auto opaque_file = server_kv_create_file_swap_store(directory, 1 << 20);
++    exercise_opaque(*opaque_file);
 +    std::filesystem::remove_all(directory);
 +    return 0;
 +}
@@ -2267,10 +2360,10 @@ index 7d42743..b8656bb 100644
  
  set(TARGET llama-server-impl)
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..121948f 100644
+index 986b2f1..3c79cfb 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
-@@ -4,6 +4,12 @@
+@@ -4,6 +4,13 @@
  #include "server-http.h"
  #include "server-task.h"
  #include "server-queue.h"
@@ -2278,20 +2371,23 @@ index 986b2f1..121948f 100644
 +#include "server-inference-iteration.h"
 +#include "server-kv-capacity-planner.h"
 +#include "server-kv-runtime.h"
++#include "server-kv-swap-store.h"
 +#include "server-speculation-controller.h"
 +#include "server-runtime-adapter.h"
  
  #include "build-info.h"
  #include "common.h"
-@@ -129,6 +135,7 @@ struct server_slot {
+@@ -129,6 +136,9 @@ struct server_slot {
      slot_state state = SLOT_STATE_IDLE;
  
      server_prompt prompt;
 +    llama_tokens cuda_swapped_tokens;
++    llama_tokens store_swapped_tokens;
++    server_kv_swap_handle store_swap_handle = 0;
  
      bool prompt_save(server_prompt_cache & prompt_cache) const {
          if (prompt.tokens.size() == 0) {
-@@ -685,6 +692,7 @@ struct server_metrics {
+@@ -685,6 +695,7 @@ struct server_metrics {
      int64_t t_start = 0;
  
      uint64_t n_prompt_tokens_processed_total = 0;
@@ -2299,7 +2395,7 @@ index 986b2f1..121948f 100644
      uint64_t t_prompt_processing_total       = 0;
      uint64_t n_tokens_predicted_total        = 0;
      uint64_t t_tokens_generation_total       = 0;
-@@ -692,6 +700,7 @@ struct server_metrics {
+@@ -692,6 +703,7 @@ struct server_metrics {
      uint64_t n_tokens_max = 0;
  
      uint64_t n_prompt_tokens_processed = 0;
@@ -2307,7 +2403,7 @@ index 986b2f1..121948f 100644
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -700,6 +709,33 @@ struct server_metrics {
+@@ -700,6 +712,33 @@ struct server_metrics {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -2341,7 +2437,7 @@ index 986b2f1..121948f 100644
      void init() {
          t_start = ggml_time_us();
      }
-@@ -707,6 +743,8 @@ struct server_metrics {
+@@ -707,6 +746,8 @@ struct server_metrics {
      void on_prompt_eval(const server_slot & slot) {
          n_prompt_tokens_processed_total += slot.n_prompt_tokens_processed;
          n_prompt_tokens_processed       += slot.n_prompt_tokens_processed;
@@ -2350,7 +2446,7 @@ index 986b2f1..121948f 100644
          t_prompt_processing             += slot.t_prompt_processing;
          t_prompt_processing_total       += slot.t_prompt_processing;
  
-@@ -730,8 +768,63 @@ struct server_metrics {
+@@ -730,8 +771,63 @@ struct server_metrics {
          }
      }
  
@@ -2414,7 +2510,7 @@ index 986b2f1..121948f 100644
          t_prompt_processing       = 0;
          n_tokens_predicted        = 0;
          t_tokens_generation       = 0;
-@@ -816,8 +909,11 @@ private:
+@@ -816,8 +912,12 @@ private:
      json json_ui_settings = json::object();    // Primary: new name
      json json_webui_settings = json::object();    // Deprecated: use json_ui_settings instead (kept for compat)
  
@@ -2423,12 +2519,13 @@ index 986b2f1..121948f 100644
 +    server_inference_scheduler inference_scheduler;
 +    server_kv_capacity_planner kv_capacity_planner;
 +    std::unique_ptr<server_kv_runtime> kv_runtime;
++    std::unique_ptr<server_kv_swap_store> kv_swap_store;
 +    std::unique_ptr<server_runtime_adapter> runtime_adapter = server_create_llama_runtime();
 +    server_speculation_controller speculation_controller;
  
      std::string model_name; // name of the loaded model, to be used by API
      std::set<std::string> model_aliases; // additional names for the model
-@@ -1114,8 +1210,39 @@ private:
+@@ -1114,8 +1214,58 @@ private:
  
          n_swa = params_base.swa_full ? 0 : llama_model_n_swa(model_tgt);
  
@@ -2467,10 +2564,29 @@ index 986b2f1..121948f 100644
 +        } else {
 +            kv_runtime.reset();
 +        }
++        kv_swap_store.reset();
++        if (params_base.kv_swap_budget_mib > 0) {
++            const size_t budget_bytes = (size_t) params_base.kv_swap_budget_mib * 1024 * 1024;
++            if (params_base.kv_swap_path.empty() || params_base.kv_swap_path == "memory") {
++                kv_swap_store = server_kv_create_host_swap_store(budget_bytes);
++                SRV_INF("host KV swap enabled: budget = %d MiB\n", params_base.kv_swap_budget_mib);
++            } else {
++                kv_swap_store = server_kv_create_file_swap_store(params_base.kv_swap_path, budget_bytes);
++                SRV_INF("file KV swap enabled: path = %s, budget = %d MiB\n",
++                        params_base.kv_swap_path.c_str(), params_base.kv_swap_budget_mib);
++            }
++            if (params_base.kv_swap_fault == "next-save") {
++                kv_swap_store->inject(server_kv_swap_fault::next_save);
++                SRV_WRN("%s\n", "injecting the next transactional KV-store save failure");
++            } else if (params_base.kv_swap_fault == "next-restore") {
++                kv_swap_store->inject(server_kv_swap_fault::next_restore);
++                SRV_WRN("%s\n", "injecting the next transactional KV-store restore failure");
++            }
++        }
  
          // setup slots
          SRV_INF("initializing slots, n_slots = %d\n", params_base.n_parallel);
-@@ -1383,9 +1510,10 @@ private:
+@@ -1383,9 +1533,10 @@ private:
  
          bool update_cache = false;
  
@@ -2484,7 +2600,7 @@ index 986b2f1..121948f 100644
  
              for (server_slot & slot : slots) {
                  // skip the slot if it is not available
-@@ -1393,29 +1521,38 @@ private:
+@@ -1393,29 +1544,41 @@ private:
                      continue;
                  }
  
@@ -2503,17 +2619,19 @@ index 986b2f1..121948f 100644
 -                    sim_best = sim_cur;
 -
 -                    ret = &slot;
++                const llama_tokens & swapped_tokens = slot.store_swapped_tokens.empty()
++                        ? slot.cuda_swapped_tokens : slot.store_swapped_tokens;
 +                size_t swapped_prefix = 0;
-+                while (swapped_prefix < slot.cuda_swapped_tokens.size() &&
++                while (swapped_prefix < swapped_tokens.size() &&
 +                        swapped_prefix < task.tokens.size() &&
-+                        slot.cuda_swapped_tokens[swapped_prefix] == task.tokens[swapped_prefix]) {
++                        swapped_tokens[swapped_prefix] == task.tokens[swapped_prefix]) {
 +                    ++swapped_prefix;
                  }
 +                const size_t resident_prefix = slot.prompt.tokens.get_common_prefix(task.tokens);
 +                candidates.push_back({
 +                    slot.id,
 +                    std::max(resident_prefix, swapped_prefix),
-+                    std::max(slot.prompt.tokens.size(), slot.cuda_swapped_tokens.size()),
++                    std::max(slot.prompt.tokens.size(), swapped_tokens.size()),
 +                    slot.t_last_used,
 +                });
              }
@@ -2529,7 +2647,8 @@ index 986b2f1..121948f 100644
 +                GGML_ASSERT(ret != nullptr);
 +                const float similarity = (float) selected.reused_tokens / task.tokens.size();
 +                const size_t retained_tokens = std::max(
-+                        ret->prompt.tokens.size(), ret->cuda_swapped_tokens.size());
++                        ret->prompt.tokens.size(), std::max(
++                            ret->cuda_swapped_tokens.size(), ret->store_swapped_tokens.size()));
 +                const float f_keep = retained_tokens > 0
 +                        ? (float) selected.reused_tokens / retained_tokens
 +                        : 0.0f;
@@ -2543,7 +2662,7 @@ index 986b2f1..121948f 100644
  
                  // if we are about to lose a large portion of the existing context - save it in the prompt cache
                  if (f_keep < 0.5f) {
-@@ -1443,12 +1580,15 @@ private:
+@@ -1443,12 +1606,16 @@ private:
  
              if (ret != nullptr) {
                  SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
@@ -2554,12 +2673,13 @@ index 986b2f1..121948f 100644
          }
  
          if (ret) {
-+            const bool cuda_restored = try_restore_cuda_swap(*ret, task.tokens);
-+            if (cuda_restored) update_cache = false;
++            const bool store_restored = try_restore_store_swap(*ret, task.tokens);
++            const bool cuda_restored = !store_restored && try_restore_cuda_swap(*ret, task.tokens);
++            if (store_restored || cuda_restored) update_cache = false;
              update_cache = update_cache && prompt_cache;
  
              // cache prompts only for completion tasks
-@@ -1469,41 +1609,114 @@ private:
+@@ -1469,41 +1636,114 @@ private:
  
                  SRV_INF("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
              }
@@ -2644,7 +2764,7 @@ index 986b2f1..121948f 100644
 +                saved = victim->prompt_save(*prompt_cache);
 +                if (saved) prompt_cache->update();
 +            }
-+            if (saved) mark_slot_preempted(*victim);
++            mark_slot_preempted(*victim);
 +            victim->prompt_clear(false);
 +        }
 +        if (!plan.fits()) {
@@ -2689,18 +2809,18 @@ index 986b2f1..121948f 100644
 +            saved = victim->prompt_save(*prompt_cache);
 +            if (saved) prompt_cache->update();
 +        }
-+        if (saved) mark_slot_preempted(*victim);
++        mark_slot_preempted(*victim);
 +        victim->prompt_clear(false);
 +        return true;
      }
  
      std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
-@@ -1519,7 +1732,128 @@ private:
+@@ -1519,7 +1759,226 @@ private:
          return output;
      }
  
 +    void try_adopt_shared_prefix(server_slot & destination, const server_task & task) {
-+        if (!kv_runtime || !params_base.kv_unified || !task.params.cache_prompt ||
++        if (!kv_runtime || !task.params.cache_prompt ||
 +                destination.prompt.tokens.has_mtmd || task.tokens.has_mtmd) {
 +            return;
 +        }
@@ -2759,18 +2879,110 @@ index 986b2f1..121948f 100644
 +        GGML_ASSERT(invalid.empty());
 +    }
 +
++    bool try_swap_out_store(server_slot & slot) {
++        if (!kv_swap_store || ctx_dft || slot.prompt.tokens.empty()) return false;
++
++        server_kv_swap_payload payload;
++        payload.sequence_id = slot.id;
++        const size_t state_size = llama_state_seq_get_size_ext(
++                ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_NONE);
++        if (state_size == 0) return false;
++        payload.opaque_state.resize(state_size);
++        const size_t written = llama_state_seq_get_data_ext(
++                ctx_tgt, payload.opaque_state.data(), payload.opaque_state.size(),
++                slot.id, LLAMA_STATE_SEQ_FLAGS_NONE);
++        if (written != state_size) {
++            SRV_WRN("failed to serialize KV state for slot %d: expected %zu bytes, got %zu\n",
++                    slot.id, state_size, written);
++            return false;
++        }
++
++        // Save is transactional: resident KV remains untouched until the store
++        // has committed a complete checksummed record.
++        const auto saved = kv_swap_store->save(payload);
++        if (!saved.ok) {
++            SRV_WRN("KV store swap-out failed for slot %d; keeping resident KV: %s\n",
++                    slot.id, saved.error.c_str());
++            return false;
++        }
++        const auto previous = slot.store_swap_handle;
++        slot.store_swap_handle = saved.handle;
++        slot.store_swapped_tokens = slot.prompt.tokens.get_tokens();
++        common_context_seq_rm(ctx_tgt, slot.id, -1, -1);
++        if (previous != 0) kv_swap_store->erase(previous);
++        SRV_INF("stored KV state for slot %d with %zu tokens and %zu bytes\n",
++                slot.id, slot.store_swapped_tokens.size(), state_size);
++        return true;
++    }
++
++    bool try_restore_store_swap(server_slot & slot, const server_tokens & requested) {
++        if (!kv_swap_store || slot.store_swap_handle == 0 ||
++                slot.store_swapped_tokens.empty() ||
++                requested.size() < slot.store_swapped_tokens.size()) {
++            return false;
++        }
++        for (size_t i = 0; i < slot.store_swapped_tokens.size(); ++i) {
++            if (slot.store_swapped_tokens[i] != requested[i]) return false;
++        }
++
++        server_kv_swap_payload payload;
++        std::string error;
++        if (!kv_swap_store->restore(slot.store_swap_handle, payload, &error) ||
++                payload.sequence_id != slot.id || payload.opaque_state.empty()) {
++            SRV_WRN("KV store restore failed for slot %d; request will recompute: %s\n",
++                    slot.id, error.c_str());
++            kv_swap_store->erase(slot.store_swap_handle);
++            slot.store_swap_handle = 0;
++            slot.store_swapped_tokens.clear();
++            metrics.n_requests_recomputed_total++;
++            return false;
++        }
++        const size_t consumed = llama_state_seq_set_data_ext(
++                ctx_tgt, payload.opaque_state.data(), payload.opaque_state.size(),
++                slot.id, LLAMA_STATE_SEQ_FLAGS_NONE);
++        if (consumed != payload.opaque_state.size()) {
++            SRV_WRN("KV store state rejected for slot %d; request will recompute\n", slot.id);
++            common_context_seq_rm(ctx_tgt, slot.id, -1, -1);
++            kv_swap_store->erase(slot.store_swap_handle);
++            slot.store_swap_handle = 0;
++            slot.store_swapped_tokens.clear();
++            metrics.n_requests_recomputed_total++;
++            return false;
++        }
++
++        slot.prompt.tokens.clear();
++        slot.prompt.tokens.insert(slot.store_swapped_tokens);
++        if (!slot.prompt.tokens.empty()) {
++            slot.prompt.tokens.keep_first(slot.prompt.tokens.size() - 1);
++            common_context_seq_rm(ctx_tgt, slot.id, slot.prompt.tokens.pos_next(), -1);
++        }
++        kv_swap_store->erase(slot.store_swap_handle);
++        slot.store_swap_handle = 0;
++        slot.store_swapped_tokens.clear();
++        metrics.n_requests_restored_total++;
++        if (kv_runtime && kv_runtime->is_swapped(slot.id)) {
++            std::string logical_error;
++            if (!kv_runtime->restore(slot.id, (uint64_t) ggml_time_us(), &logical_error)) {
++                SRV_WRN("logical KV restore failed for slot %d: %s\n", slot.id, logical_error.c_str());
++            }
++        }
++        SRV_INF("restored KV state from transactional store for slot %d with %zu prompt tokens\n",
++                slot.id, slot.prompt.tokens.size());
++        return true;
++    }
++
 +    bool mark_slot_preempted(server_slot & slot) {
 +        if (slot.prompt.tokens.empty()) return false;
-+        bool cuda_swapped = false;
++        bool physically_swapped = try_swap_out_store(slot);
 +        auto * memory = llama_get_memory(ctx_tgt);
-+        if (!ctx_dft && llama_memory_seq_can_swap_cuda(memory, slot.id)) {
++        if (!physically_swapped && !ctx_dft && llama_memory_seq_can_swap_cuda(memory, slot.id)) {
 +            llama_synchronize(ctx_tgt);
-+            cuda_swapped = llama_memory_seq_swap_out_cuda(memory, slot.id);
-+            if (cuda_swapped) slot.cuda_swapped_tokens = slot.prompt.tokens.get_tokens();
++            physically_swapped = llama_memory_seq_swap_out_cuda(memory, slot.id);
++            if (physically_swapped) slot.cuda_swapped_tokens = slot.prompt.tokens.get_tokens();
 +        }
 +        metrics.n_requests_preempted_total++;
-+        metrics.n_requests_swapped_total += cuda_swapped ? 1 : 0;
-+        if (!kv_runtime) return cuda_swapped;
++        metrics.n_requests_swapped_total += physically_swapped ? 1 : 0;
++        if (!kv_runtime) return physically_swapped;
 +        if (!kv_runtime->preempt(slot.id, (uint64_t) ggml_time_us())) {
 +            // The logical snapshot may lag a just-completed request by one
 +            // iteration. Synchronize it before retrying the transition.
@@ -2781,7 +2993,7 @@ index 986b2f1..121948f 100644
 +                kv_runtime->preempt(slot.id, (uint64_t) ggml_time_us());
 +            }
 +        }
-+        return cuda_swapped;
++        return physically_swapped;
 +    }
 +
 +    bool try_restore_cuda_swap(server_slot & slot, const server_tokens & requested) {
@@ -2815,6 +3027,12 @@ index 986b2f1..121948f 100644
 +    }
 +
      bool launch_slot_with_task(server_slot & slot, server_task && task) {
++        if (slot.store_swap_handle != 0) {
++            if (kv_swap_store) kv_swap_store->erase(slot.store_swap_handle);
++            slot.store_swap_handle = 0;
++            slot.store_swapped_tokens.clear();
++            metrics.n_requests_recomputed_total++;
++        }
 +        if (!slot.cuda_swapped_tokens.empty()) {
 +            llama_memory_seq_swap_erase_cuda(llama_get_memory(ctx_tgt), slot.id);
 +            slot.cuda_swapped_tokens.clear();
@@ -2824,7 +3042,7 @@ index 986b2f1..121948f 100644
          // process per-request lora adapters
          if (!task.params.lora.empty()) {
              auto task_loras = construct_lora_list(task.params.lora);
-@@ -1590,6 +1924,8 @@ private:
+@@ -1590,6 +2049,8 @@ private:
              return false;
          }
  
@@ -2833,7 +3051,7 @@ index 986b2f1..121948f 100644
          SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
  
          // initialize samplers
-@@ -1966,6 +2302,7 @@ private:
+@@ -1966,6 +2427,7 @@ private:
  
          res->generation_params = slot.task->params; // copy the parameters
  
@@ -2841,7 +3059,7 @@ index 986b2f1..121948f 100644
          queue_results.send(std::move(res));
      }
  
-@@ -2214,12 +2551,14 @@ private:
+@@ -2214,12 +2676,14 @@ private:
                              if (!slot.is_processing()) {
                                  SLT_INF(slot, "%s", "saving idle slot to prompt cache\n");
  
@@ -2853,12 +3071,12 @@ index 986b2f1..121948f 100644
                                  }
  
 -                                if (params_base.kv_unified) {
-+                                const bool cuda_swapped = saved && mark_slot_preempted(slot);
-+                                if (params_base.kv_unified || cuda_swapped) {
++                                const bool physically_swapped = mark_slot_preempted(slot);
++                                if (params_base.kv_unified || physically_swapped) {
                                      // [TAG_IDLE_SLOT_CLEAR]
                                      slot.prompt_clear(false);
                                  }
-@@ -2301,6 +2640,7 @@ private:
+@@ -2301,6 +2765,7 @@ private:
                      res->t_start             = metrics.t_start;
  
                      res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
@@ -2866,7 +3084,7 @@ index 986b2f1..121948f 100644
                      res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
                      res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
                      res->t_tokens_generation_total       = metrics.t_tokens_generation_total;
-@@ -2308,12 +2648,84 @@ private:
+@@ -2308,12 +2773,95 @@ private:
                      res->n_tokens_max = metrics.n_tokens_max;
  
                      res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
@@ -2928,6 +3146,17 @@ index 986b2f1..121948f 100644
 +                        res->kv_shared_blocks = kv_snapshot.shared_blocks;
 +                        res->kv_copy_on_write_total = kv_snapshot.copy_on_write_total;
 +                    }
++                    if (kv_swap_store) {
++                        const auto store_stats = kv_swap_store->stats();
++                        res->kv_store_save_failures = store_stats.save_failures;
++                        res->kv_store_restore_failures = store_stats.restore_failures;
++                        res->kv_store_bytes_saved_total = store_stats.bytes_saved_total;
++                        res->kv_store_bytes_restored_total = store_stats.bytes_restored_total;
++                        res->kv_store_bytes_current = store_stats.bytes_current;
++                        res->kv_store_bytes_peak = store_stats.bytes_peak;
++                        res->kv_store_save_microseconds = store_stats.save_microseconds;
++                        res->kv_store_restore_microseconds = store_stats.restore_microseconds;
++                    }
 +
 +                    auto memory = llama_get_memory(ctx_tgt);
 +                    if (memory) {
@@ -2951,7 +3180,7 @@ index 986b2f1..121948f 100644
  
                      if (task.metrics_reset_bucket) {
                          metrics.reset_bucket();
-@@ -2602,7 +3014,9 @@ private:
+@@ -2602,7 +3150,9 @@ private:
                  const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                  const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
  
@@ -2962,7 +3191,7 @@ index 986b2f1..121948f 100644
  
                  if (n_draft_max > 0) {
                      GGML_ASSERT(slot.can_speculate());
-@@ -2643,7 +3057,12 @@ private:
+@@ -2643,7 +3193,12 @@ private:
  
          // generate the actual drafts (if any)
          {
@@ -2975,7 +3204,7 @@ index 986b2f1..121948f 100644
          }
  
          // make checkpoints if needed
-@@ -2705,6 +3124,55 @@ private:
+@@ -2705,6 +3260,55 @@ private:
          int32_t n_batch  = llama_n_batch(ctx_tgt);
          int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
  
@@ -3031,7 +3260,7 @@ index 986b2f1..121948f 100644
          float  alora_scale       = -1.0f;
          size_t alora_disabled_id = 0;
  
-@@ -2730,6 +3198,13 @@ private:
+@@ -2730,6 +3334,13 @@ private:
                  if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
                      const auto & input_tokens = slot.task->tokens;
  
@@ -3045,7 +3274,7 @@ index 986b2f1..121948f 100644
                      // used to determine the number of tokens added to the batch for the current slot
                      const auto n_tokens_prev = batch.n_tokens;
  
-@@ -3110,7 +3585,9 @@ private:
+@@ -3110,7 +3721,9 @@ private:
                      const bool n_before_user_known = n_before_user > 0;
  
                      // add prompt tokens for processing in the current batch
@@ -3056,7 +3285,7 @@ index 986b2f1..121948f 100644
                          // get next token to process
                          llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                          if (cur_tok == LLAMA_TOKEN_NULL) {
-@@ -3249,6 +3726,13 @@ private:
+@@ -3249,6 +3862,13 @@ private:
  
          SRV_DBG("decoding batch, n_tokens = %d\n", batch.n_tokens);
  
@@ -3070,7 +3299,7 @@ index 986b2f1..121948f 100644
          auto accept_special_token = [&](server_slot & slot, llama_token token) {
              return params_base.special ||
                  slot.task->params.sampling.preserved_tokens.find(token) != slot.task->params.sampling.preserved_tokens.end();
-@@ -3294,7 +3778,8 @@ private:
+@@ -3294,7 +3914,8 @@ private:
                  batch.logits   + i,
              };
  
@@ -3080,7 +3309,7 @@ index 986b2f1..121948f 100644
  
              metrics.on_decoded(slots);
  
-@@ -3320,6 +3805,7 @@ private:
+@@ -3320,6 +3941,7 @@ private:
                      // TODO: handle ret == 2 (abort) when we start aborting
  
                      if (!err.empty()) {
@@ -3088,7 +3317,7 @@ index 986b2f1..121948f 100644
                          SRV_ERR("%s i = %d, n_batch = %d, ret = %d\n", err.c_str(), i, n_batch, ret);
  
                          for (auto & slot : slots) {
-@@ -3394,6 +3880,7 @@ private:
+@@ -3394,6 +4016,7 @@ private:
              //}
              if (!common_speculative_process(spec.get(), batch_view)) {
                  SRV_ERR("%s", "failed to process speculative batch\n");
@@ -3096,7 +3325,7 @@ index 986b2f1..121948f 100644
  
                  // TODO: handle error
                  break;
-@@ -3593,6 +4080,13 @@ private:
+@@ -3593,6 +4216,13 @@ private:
  
                  // update how many tokens out of those tested were accepted
                  slot.n_draft_accepted += ids.size() - 1;
@@ -3110,7 +3339,7 @@ index 986b2f1..121948f 100644
  
                  // add accepted tokens to the prompt
                  slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - n_draft);
-@@ -3631,7 +4125,24 @@ private:
+@@ -3631,7 +4261,24 @@ private:
  
                  SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) ids.size() - 1, (int) n_draft, slot.prompt.n_tokens());
              }
@@ -3135,7 +3364,7 @@ index 986b2f1..121948f 100644
  
          SRV_DBG("%s", "run slots completed\n");
      }
-@@ -4127,6 +4638,133 @@ void server_routes::init_routes() {
+@@ -4127,6 +4774,147 @@ void server_routes::init_routes() {
                      {"name",  "prompt_tokens_total"},
                      {"help",  "Number of prompt tokens processed."},
                      {"value",  (uint64_t) res_task->n_prompt_tokens_processed_total}
@@ -3204,23 +3433,37 @@ index 986b2f1..121948f 100644
 +                            : 0}
 +            }, {
 +                    {"name",  "kv_swap_bytes_total"},
-+                    {"help",  "Cumulative bytes moved between device KV and pinned host storage."},
-+                    {"value",  res_task->cuda_kv.swap_bytes}
++                    {"help",  "Cumulative bytes moved by CUDA and transactional host/file KV swap."},
++                    {"value",  res_task->cuda_kv.swap_bytes +
++                            res_task->kv_store_bytes_saved_total + res_task->kv_store_bytes_restored_total}
 +            }, {
 +                    {"name",  "kv_restore_seconds"},
-+                    {"help",  "Cumulative CUDA-event time spent restoring KV blocks."},
-+                    {"value",  res_task->cuda_kv.swap_in_microseconds / 1.e6}
++                    {"help",  "Cumulative time spent restoring CUDA and transactional KV state."},
++                    {"value",  (res_task->cuda_kv.swap_in_microseconds +
++                            res_task->kv_store_restore_microseconds) / 1.e6}
++            }, {
++                    {"name",  "kv_store_bytes_current"},
++                    {"help",  "Bytes currently resident in the transactional host/file KV store."},
++                    {"value",  res_task->kv_store_bytes_current}
++            }, {
++                    {"name",  "kv_store_bytes_peak"},
++                    {"help",  "Peak bytes resident in the transactional host/file KV store."},
++                    {"value",  res_task->kv_store_bytes_peak}
++            }, {
++                    {"name",  "kv_store_failures_total"},
++                    {"help",  "Transactional host/file KV save and restore failures."},
++                    {"value",  res_task->kv_store_save_failures + res_task->kv_store_restore_failures}
 +            }, {
 +                    {"name",  "requests_preempted_total"},
 +                    {"help",  "Sequences selected for KV preemption."},
 +                    {"value",  res_task->n_requests_preempted_total}
 +            }, {
 +                    {"name",  "requests_swapped_total"},
-+                    {"help",  "Sequences physically swapped through the CUDA pinned-memory path."},
++                    {"help",  "Sequences physically swapped through CUDA or transactional host/file storage."},
 +                    {"value",  res_task->n_requests_swapped_total}
 +            }, {
 +                    {"name",  "requests_restored_total"},
-+                    {"help",  "CUDA-swapped sequences restored without full prefill recomputation."},
++                    {"help",  "Swapped sequences restored without full prefill recomputation."},
 +                    {"value",  res_task->n_requests_restored_total}
 +            }, {
 +                    {"name",  "requests_recomputed_total"},
@@ -3269,7 +3512,7 @@ index 986b2f1..121948f 100644
              }, {
                      {"name",  "prompt_seconds_total"},
                      {"help",  "Prompt process time"},
-@@ -4149,6 +4787,18 @@ void server_routes::init_routes() {
+@@ -4149,6 +4937,18 @@ void server_routes::init_routes() {
                      {"value",  res_task->n_tokens_max}
              }}},
              {"gauge", {{
@@ -3288,7 +3531,7 @@ index 986b2f1..121948f 100644
                      {"name",  "prompt_tokens_seconds"},
                      {"help",  "Average prompt throughput in tokens/s."},
                      {"value",  res_task->n_prompt_tokens_processed ? 1.e3 / res_task->t_prompt_processing * res_task->n_prompt_tokens_processed : 0.}
-@@ -4156,6 +4806,115 @@ void server_routes::init_routes() {
+@@ -4156,6 +4956,115 @@ void server_routes::init_routes() {
                      {"name",  "predicted_tokens_seconds"},
                      {"help",  "Average generation throughput in tokens/s."},
                      {"value",  res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}
@@ -3404,7 +3647,7 @@ index 986b2f1..121948f 100644
              },{
                      {"name",  "requests_processing"},
                      {"help",  "Number of requests processing."},
-@@ -4188,6 +4947,38 @@ void server_routes::init_routes() {
+@@ -4188,6 +5097,38 @@ void server_routes::init_routes() {
              }
          }
  
@@ -5673,13 +5916,14 @@ index 0000000..ed288a0
 +};
 diff --git a/tools/server/server-kv-swap-store.cpp b/tools/server/server-kv-swap-store.cpp
 new file mode 100644
-index 0000000..02074f2
+index 0000000..d36d7f3
 --- /dev/null
 +++ b/tools/server/server-kv-swap-store.cpp
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,309 @@
 +#include "server-kv-swap-store.h"
 +
 +#include <algorithm>
++#include <chrono>
 +#include <cstring>
 +#include <fstream>
 +#include <limits>
@@ -5688,11 +5932,19 @@ index 0000000..02074f2
 +
 +namespace {
 +
++using swap_clock = std::chrono::steady_clock;
++
++uint64_t elapsed_us(swap_clock::time_point start) {
++    return (uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(
++            swap_clock::now() - start).count();
++}
++
 +constexpr uint64_t swap_magic = 0x31505753464b5643ULL; // "CVKFSWP1"
 +
 +size_t payload_bytes(const server_kv_swap_payload & payload) {
 +    return payload.physical_blocks.size() * sizeof(server_kv_physical_block_id) +
-+            (payload.data.k.size() + payload.data.v.size()) * sizeof(uint16_t);
++            (payload.data.k.size() + payload.data.v.size()) * sizeof(uint16_t) +
++            payload.opaque_state.size();
 +}
 +
 +uint64_t checksum(const server_kv_swap_payload & payload) {
@@ -5709,13 +5961,22 @@ index 0000000..02074f2
 +            payload.physical_blocks.size() * sizeof(payload.physical_blocks[0]));
 +    if (!payload.data.k.empty()) add(payload.data.k.data(), payload.data.k.size() * sizeof(uint16_t));
 +    if (!payload.data.v.empty()) add(payload.data.v.data(), payload.data.v.size() * sizeof(uint16_t));
++    if (!payload.opaque_state.empty()) add(payload.opaque_state.data(), payload.opaque_state.size());
 +    return value;
 +}
 +
 +void validate_payload(const server_kv_swap_payload & payload) {
++    if (payload.sequence_id < 0) throw std::invalid_argument("invalid KV swap sequence");
++    if (!payload.opaque_state.empty()) {
++        if (!payload.physical_blocks.empty() || payload.data.block_count != 0 ||
++                !payload.data.k.empty() || !payload.data.v.empty()) {
++            throw std::invalid_argument("opaque and structured KV swap payloads cannot be mixed");
++        }
++        return;
++    }
 +    payload.data.layout.validate();
 +    const size_t elements = payload.data.layout.elements_per_plane_block() * payload.data.block_count;
-+    if (payload.sequence_id < 0 || payload.physical_blocks.size() != payload.data.block_count ||
++    if (payload.physical_blocks.size() != payload.data.block_count ||
 +            payload.data.k.size() != elements || payload.data.v.size() != elements) {
 +        throw std::invalid_argument("invalid KV swap payload");
 +    }
@@ -5726,6 +5987,7 @@ index 0000000..02074f2
 +    explicit host_swap_store(size_t budget_bytes) : budget_bytes_(budget_bytes) {}
 +
 +    server_kv_swap_result save(const server_kv_swap_payload & payload) override {
++        const auto started = swap_clock::now();
 +        if (consume(server_kv_swap_fault::next_save)) return save_error("injected host save failure");
 +        try { validate_payload(payload); } catch (const std::exception & error) { return save_error(error.what()); }
 +        const size_t bytes = payload_bytes(payload);
@@ -5735,17 +5997,22 @@ index 0000000..02074f2
 +        const auto handle = next_handle_++;
 +        records_.emplace(handle, payload);
 +        stats_.saves++;
++        stats_.bytes_saved_total += bytes;
++        stats_.save_microseconds += elapsed_us(started);
 +        stats_.bytes_current += bytes;
 +        stats_.bytes_peak = std::max(stats_.bytes_peak, stats_.bytes_current);
 +        return {true, handle, {}};
 +    }
 +
 +    bool restore(server_kv_swap_handle handle, server_kv_swap_payload & payload, std::string * error) override {
++        const auto started = swap_clock::now();
 +        if (consume(server_kv_swap_fault::next_restore)) return restore_error("injected host restore failure", error);
 +        const auto found = records_.find(handle);
 +        if (found == records_.end()) return restore_error("unknown host swap handle", error);
 +        payload = found->second;
 +        stats_.restores++;
++        stats_.bytes_restored_total += payload_bytes(payload);
++        stats_.restore_microseconds += elapsed_us(started);
 +        return true;
 +    }
 +
@@ -5790,6 +6057,7 @@ index 0000000..02074f2
 +    int64_t sequence_id;
 +    uint64_t physical_count;
 +    uint64_t block_count;
++    uint64_t opaque_bytes;
 +    uint32_t layers;
 +    uint32_t kv_heads;
 +    uint32_t head_dim;
@@ -5807,6 +6075,7 @@ index 0000000..02074f2
 +    }
 +
 +    server_kv_swap_result save(const server_kv_swap_payload & payload) override {
++        const auto started = swap_clock::now();
 +        if (consume(server_kv_swap_fault::next_save)) return save_error("injected file save failure");
 +        try { validate_payload(payload); } catch (const std::exception & error) { return save_error(error.what()); }
 +        const size_t bytes = payload_bytes(payload);
@@ -5819,6 +6088,7 @@ index 0000000..02074f2
 +        file_header header {
 +            swap_magic, checksum(payload), payload.sequence_id,
 +            payload.physical_blocks.size(), payload.data.block_count,
++            payload.opaque_state.size(),
 +            payload.data.layout.layers, payload.data.layout.kv_heads,
 +            payload.data.layout.head_dim, payload.data.layout.block_tokens,
 +            (uint8_t) payload.data.layout.element_type,
@@ -5831,6 +6101,7 @@ index 0000000..02074f2
 +            write_vector(output, payload.physical_blocks);
 +            write_vector(output, payload.data.k);
 +            write_vector(output, payload.data.v);
++            write_vector(output, payload.opaque_state);
 +            output.close();
 +            std::filesystem::rename(temporary_path, final_path);
 +        } catch (const std::exception & error) {
@@ -5840,12 +6111,15 @@ index 0000000..02074f2
 +        }
 +        sizes_[handle] = bytes;
 +        stats_.saves++;
++        stats_.bytes_saved_total += bytes;
++        stats_.save_microseconds += elapsed_us(started);
 +        stats_.bytes_current += bytes;
 +        stats_.bytes_peak = std::max(stats_.bytes_peak, stats_.bytes_current);
 +        return {true, handle, {}};
 +    }
 +
 +    bool restore(server_kv_swap_handle handle, server_kv_swap_payload & payload, std::string * error) override {
++        const auto started = swap_clock::now();
 +        if (consume(server_kv_swap_fault::next_restore)) return restore_error("injected file restore failure", error);
 +        if (sizes_.count(handle) == 0) return restore_error("unknown file swap handle", error);
 +        try {
@@ -5859,20 +6133,29 @@ index 0000000..02074f2
 +            }
 +            server_kv_swap_payload candidate;
 +            candidate.sequence_id = header.sequence_id;
-+            candidate.data.layout = {
-+                header.layers, header.kv_heads, header.head_dim, header.block_tokens,
-+                (server_kv_element_type) header.element_type,
-+                (server_kv_memory_layout) header.memory_layout,
-+            };
-+            candidate.data.layout.validate();
-+            candidate.data.block_count = (size_t) header.block_count;
-+            const size_t elements = candidate.data.layout.elements_per_plane_block() * candidate.data.block_count;
-+            candidate.physical_blocks.resize((size_t) header.physical_count);
-+            candidate.data.k.resize(elements);
-+            candidate.data.v.resize(elements);
-+            read_vector(input, candidate.physical_blocks);
-+            read_vector(input, candidate.data.k);
-+            read_vector(input, candidate.data.v);
++            if (header.opaque_bytes > 0) {
++                if (header.block_count != 0 || header.physical_count != 0 ||
++                        header.opaque_bytes > std::numeric_limits<size_t>::max()) {
++                    throw std::runtime_error("invalid opaque KV swap file header");
++                }
++                candidate.opaque_state.resize((size_t) header.opaque_bytes);
++                read_vector(input, candidate.opaque_state);
++            } else {
++                candidate.data.layout = {
++                    header.layers, header.kv_heads, header.head_dim, header.block_tokens,
++                    (server_kv_element_type) header.element_type,
++                    (server_kv_memory_layout) header.memory_layout,
++                };
++                candidate.data.layout.validate();
++                candidate.data.block_count = (size_t) header.block_count;
++                const size_t elements = candidate.data.layout.elements_per_plane_block() * candidate.data.block_count;
++                candidate.physical_blocks.resize((size_t) header.physical_count);
++                candidate.data.k.resize(elements);
++                candidate.data.v.resize(elements);
++                read_vector(input, candidate.physical_blocks);
++                read_vector(input, candidate.data.k);
++                read_vector(input, candidate.data.v);
++            }
 +            input.peek();
 +            if (!input.eof() || checksum(candidate) != header.checksum) {
 +                throw std::runtime_error("KV swap checksum or length mismatch");
@@ -5882,6 +6165,8 @@ index 0000000..02074f2
 +            return restore_error(exception.what(), error);
 +        }
 +        stats_.restores++;
++        stats_.bytes_restored_total += payload_bytes(payload);
++        stats_.restore_microseconds += elapsed_us(started);
 +        return true;
 +    }
 +
@@ -5946,10 +6231,10 @@ index 0000000..02074f2
 +}
 diff --git a/tools/server/server-kv-swap-store.h b/tools/server/server-kv-swap-store.h
 new file mode 100644
-index 0000000..7b64440
+index 0000000..b0f8842
 --- /dev/null
 +++ b/tools/server/server-kv-swap-store.h
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,64 @@
 +#pragma once
 +
 +#include "server-kv-block-backend.h"
@@ -5967,6 +6252,9 @@ index 0000000..7b64440
 +    int64_t sequence_id = -1;
 +    std::vector<server_kv_physical_block_id> physical_blocks;
 +    server_kv_host_blocks data;
++    // Serialized llama sequence state used by the production runtime adapter.
++    // It is mutually exclusive with the structured physical-block payload.
++    std::vector<uint8_t> opaque_state;
 +};
 +
 +struct server_kv_swap_result {
@@ -5981,6 +6269,10 @@ index 0000000..7b64440
 +    uint64_t erases = 0;
 +    uint64_t save_failures = 0;
 +    uint64_t restore_failures = 0;
++    uint64_t bytes_saved_total = 0;
++    uint64_t bytes_restored_total = 0;
++    uint64_t save_microseconds = 0;
++    uint64_t restore_microseconds = 0;
 +    uint64_t bytes_current = 0;
 +    uint64_t bytes_peak = 0;
 +};
@@ -6474,7 +6766,7 @@ index 72a4bd0..987121b 100644
      };
  }
 diff --git a/tools/server/server-task.h b/tools/server/server-task.h
-index bdadcff..4d1df2d 100644
+index bdadcff..e32e3cb 100644
 --- a/tools/server/server-task.h
 +++ b/tools/server/server-task.h
 @@ -11,6 +11,10 @@
@@ -6544,7 +6836,7 @@ index bdadcff..4d1df2d 100644
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -532,6 +557,49 @@ struct server_task_result_metrics : server_task_result {
+@@ -532,6 +557,57 @@ struct server_task_result_metrics : server_task_result {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -6581,6 +6873,14 @@ index bdadcff..4d1df2d 100644
 +    uint64_t adaptive_prefill_chunk = 0;
 +    double adaptive_prefill_iteration_ms = 0.0;
 +    uint64_t adaptive_draft_length = 0;
++    uint64_t kv_store_save_failures = 0;
++    uint64_t kv_store_restore_failures = 0;
++    uint64_t kv_store_bytes_saved_total = 0;
++    uint64_t kv_store_bytes_restored_total = 0;
++    uint64_t kv_store_bytes_current = 0;
++    uint64_t kv_store_bytes_peak = 0;
++    uint64_t kv_store_save_microseconds = 0;
++    uint64_t kv_store_restore_microseconds = 0;
 +    llama_cacheflow_cuda_stats cuda_kv{};
 +    server_latency_histogram time_to_first_token;
 +    server_latency_histogram time_per_output_token;
