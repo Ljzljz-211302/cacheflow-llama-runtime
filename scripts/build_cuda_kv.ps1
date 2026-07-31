@@ -52,7 +52,11 @@ if ($Sanitize) {
     }
     & $sanitizer --tool memcheck --error-exitcode 99 $testExe
     if ($LASTEXITCODE -ne 0) {
-        throw "Compute Sanitizer failed; on WDDM run EnableDebuggerInterface.bat as Administrator"
+        throw "Compute Sanitizer memcheck failed; on WDDM run EnableDebuggerInterface.bat as Administrator"
+    }
+    & $sanitizer --tool racecheck --error-exitcode 99 $testExe
+    if ($LASTEXITCODE -ne 0) {
+        throw "Compute Sanitizer racecheck failed"
     }
 }
 

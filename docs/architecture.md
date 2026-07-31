@@ -1,6 +1,6 @@
 # CacheFlow Runtime 整体架构设计
 
-状态：Implemented；`verify.ps1 -Full` 已通过（2026-07-31），Compute Sanitizer 受 WDDM 管理员开关阻塞
+状态：Implemented and accepted（2026-07-31）
 目标仓库：`D:\llama`  
 上游基线：llama.cpp `acd79d603cb2e1c84c0886137b80f1ad649b6857`  
 主实现语言：C++17；Python 仅用于实验编排和结果分析

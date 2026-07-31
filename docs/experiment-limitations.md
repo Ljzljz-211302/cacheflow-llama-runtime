@@ -24,4 +24,4 @@
 
 ## Compute Sanitizer
 
-本机为 Windows WDDM，Compute Sanitizer 需要管理员启用 debugger interface，当前非提权环境不能 attach。验收采用等效检查：GPU K/V 分配前后 canary guard、随机映射矩阵、每轮完整性校验及 CUDA allocation/pinned allocation 故障注入。它能覆盖本项目分配边界，但不等同于在 TCC/Linux 上运行 racecheck；该限制必须在演示中说明。
+本机为 Windows WDDM，首次运行 Compute Sanitizer 前需要管理员启用 debugger interface。2026-07-31 启用后，固定 sm_89 CUDA 正确性矩阵在 memcheck 下得到 `ERROR SUMMARY: 0 errors`，在 racecheck 下得到 `0 hazards displayed (0 errors, 0 warnings)`。此外仍保留 GPU K/V canary guard、随机映射矩阵、每轮完整性校验及 CUDA allocation/pinned allocation 故障注入。该结论限定当前驱动、硬件和测试矩阵，不能代替其他平台的复验。

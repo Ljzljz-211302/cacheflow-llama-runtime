@@ -79,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 .\scripts\build_cuda_kv.ps1 -Sanitize
 ```
 
-Windows WDDM 需要先以管理员身份运行 CUDA Toolkit 的 `EnableDebuggerInterface.bat`。当前非提权机器无法 attach Compute Sanitizer；常规全量验收会运行 canary、随机映射、逐元素对照和 allocation failpoint 等等效边界检查，但报告不会把 Sanitizer 本身写成通过。
+Windows WDDM 首次运行前需要以管理员身份执行 CUDA Toolkit 的 `EnableDebuggerInterface.bat`。当前机器已完成该配置；Compute Sanitizer memcheck 报告 0 errors，racecheck 报告 0 hazards、0 errors、0 warnings。常规全量验收仍会额外运行 canary、随机映射、逐元素对照和 allocation failpoint。
 
 ## 策略开关
 

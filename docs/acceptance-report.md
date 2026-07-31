@@ -7,7 +7,7 @@
 
 ## 结论状态
 
-2026-07-31 从唯一入口执行 `verify.ps1 -Full`，545 秒后以退出码 0 完成。功能、正确性、性能证据和工程复现项均通过自动化入口。Compute Sanitizer 在当前 WDDM 环境因管理员 debugger-interface 开关无法 attach；这项必须在启用开关后重新执行，未被记录为通过。常规验收使用 canary guard、随机映射、逐元素 CPU/CUDA 对照和分配故障注入覆盖本项目边界。
+2026-07-31 从唯一入口执行 `verify.ps1 -Full`，545 秒后以退出码 0 完成。功能、正确性、性能证据和工程复现项均通过自动化入口。启用 WDDM debugger interface 后，额外执行 `build_cuda_kv.ps1 -Sanitize`：memcheck 为 0 errors，racecheck 为 0 hazards、0 errors、0 warnings，脚本退出码 0。
 
 ## 架构与个人贡献
 
@@ -35,7 +35,7 @@
 | 故障回滚 | KV OOM、compute failure、host/file save/restore、CUDA allocation | 通过 |
 | 上游兼容 | 同 MSVC 工具链、固定 seed，5/5 输出 SHA-256 相同 | 通过 |
 | 模型矩阵 | Q4/Q8/F16 × CPU/CUDA；并发 1/2/4/8；128/512/2K/4K | 14/14 通过 |
-| Compute Sanitizer | WDDM debugger interface 需管理员启用 | 阻塞；未伪报通过 |
+| Compute Sanitizer | memcheck 0 errors；racecheck 0 hazards / 0 errors / 0 warnings | 通过 |
 
 随机状态测试持续检查 Block 总量、Reservation、Refcount、Prefix Parent、Runtime Residency 与 Block Table 一致性。CUDA 随机测试覆盖 Block Size 8/16/32/64、非连续/重复/重叠映射、非整除尾部、in-place source 保护和多 Stream Event。
 
@@ -88,12 +88,12 @@ Sanitizer 单独入口：
 powershell -ExecutionPolicy Bypass -File .\scripts\build_cuda_kv.ps1 -Sanitize
 ```
 
-当前 WDDM 阻塞的解除方式：以管理员身份执行 CUDA Toolkit 的 `EnableDebuggerInterface.bat`，重启相关 CUDA 进程后再运行上式。
+Windows WDDM 首次运行前需以管理员身份执行 CUDA Toolkit 的 `EnableDebuggerInterface.bat`；当前验收机器已经启用。
 
 ## 解释边界
 
 - 结果只适用于固定小模型、单机和当前硬件，不能外推到多 GPU 或大模型。
 - 跨 MSVC/Clang 浮点路径出现过一处单词差异；逐字节兼容结论限定同工具链。
 - `speculation_net_saved_ms` 是“接受 token × 当前 target 平均时间 − 实测 draft wall time”的在线估计，不是 profiler 的 causal attribution。
-- WDDM 等效边界测试不等同于 Linux/TCC racecheck；Sanitizer 未运行前保持阻塞状态。
+- Sanitizer 结论限定当前 Windows WDDM 驱动、RTX 4050 sm_89 与固定随机测试矩阵；换平台后需要复验。
 - 负结果和调参历史保留在 `docs/experiment-limitations.md` 及 tuning-history CSV。
