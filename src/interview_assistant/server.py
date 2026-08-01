@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import sqlite3
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -49,7 +50,13 @@ class ApplicationHandler(BaseHTTPRequestHandler):
             })
             return
         if path == "/api/sessions":
-            self._json({"sessions": self.server.service.store.list_sessions()})
+            try:
+                sessions = self.server.service.store.list_sessions()
+            except sqlite3.Error as exc:
+                self.log_error("conversation database operation failed: %s", exc)
+                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "conversation storage is temporarily unavailable")
+                return
+            self._json({"sessions": sessions})
             return
         match = SESSION_MESSAGES_RE.match(path)
         if match:
@@ -57,6 +64,10 @@ class ApplicationHandler(BaseHTTPRequestHandler):
                 messages = self.server.service.store.messages(match.group(1))
             except KeyError:
                 self._error(HTTPStatus.NOT_FOUND, "session not found")
+                return
+            except sqlite3.Error as exc:
+                self.log_error("conversation database operation failed: %s", exc)
+                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "conversation storage is temporarily unavailable")
                 return
             self._json({"messages": messages})
             return
@@ -70,12 +81,26 @@ class ApplicationHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.BAD_REQUEST, str(exc))
             return
         if path == "/api/sessions":
-            session = self.server.service.store.create_session(str(body.get("title", "")))
+            try:
+                session = self.server.service.store.create_session(str(body.get("title", "")))
+            except sqlite3.Error as exc:
+                self.log_error("conversation database operation failed: %s", exc)
+                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "conversation storage is temporarily unavailable")
+                return
             self._json(session, HTTPStatus.CREATED)
             return
         match = SESSION_MESSAGES_RE.match(path)
         if not match:
             self._error(HTTPStatus.NOT_FOUND, "route not found")
+            return
+        try:
+            self.server.service.store.require_session(match.group(1))
+        except KeyError:
+            self._error(HTTPStatus.NOT_FOUND, "session not found")
+            return
+        except sqlite3.Error as exc:
+            self.log_error("conversation database operation failed: %s", exc)
+            self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "conversation storage is temporarily unavailable")
             return
         if not self.server.generation_slots.acquire(blocking=False):
             self._error(HTTPStatus.TOO_MANY_REQUESTS, "all model generation slots are busy")
@@ -96,6 +121,9 @@ class ApplicationHandler(BaseHTTPRequestHandler):
             self._stream_error("session not found")
         except (ValueError, RuntimeError, LlamaUnavailable) as exc:
             self._stream_error(str(exc))
+        except sqlite3.Error as exc:
+            self.log_error("conversation database operation failed: %s", exc)
+            self._stream_error("conversation storage is temporarily unavailable")
         except (BrokenPipeError, ConnectionResetError):
             return
         finally:

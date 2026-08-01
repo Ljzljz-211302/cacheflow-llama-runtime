@@ -1168,8 +1168,8 @@ CLI 支持 `--benefit-policy upstream|always|rule|learned` 及样本、探索、
 
 ## 23. 用户应用消费者
 
-`interview_assistant` 是 CacheFlow Runtime 的首个实际消费者，不进入 llama.cpp 热路径。它拥有资料切分与 IDF 检索、浏览器 SSE 适配和 SQLite 会话；`llama-server` 仍独占模型、调度、KV 与 CUDA。两者只通过带服务端 API key 的 OpenAI chat-completions 协议连接，浏览器无法读取 key。
+`interview_assistant` 是 CacheFlow Runtime 的首个实际消费者，不进入 llama.cpp 热路径。它拥有资料切分与 IDF 检索、浏览器 SSE 适配和 SQLite 会话；`llama-server` 仍独占模型、调度、KV 与 CUDA。两者只通过带服务端 API key 的 OpenAI chat-completions 协议连接，浏览器无法读取 key；模型地址必须是带显式端口的 loopback IP，且客户端拒绝 HTTP 重定向，避免误配置把 key 发往远端。
 
 应用保存的原子边界是单条完整消息和对应 session `updated_at`；SQLite 连接按操作创建并关闭，避免线程式 HTTP 服务长期积累连接。无资料命中 fail closed；客户端断流会依次关闭 application generator 和上游模型流，assistant 仅在完整模型流结束后持久化。
 
-应用验收必须使用 fresh subprocess 重启，不允许直接调用 Service 冒充进程恢复；必须从原生 metrics 同时观测 scheduler iteration、prefill chunk、prompt cache、CUDA KV kernel、CUDA benefit decision、checkpoint 和 `n_busy_slots_per_decode > 1`，并由真实浏览器执行一次输入、发送、引用显示与完整回答旅程。
+应用验收必须使用 fresh subprocess 重启，不允许直接调用 Service 冒充进程恢复；必须从原生 metrics 同时观测 scheduler iteration、prefill chunk、prompt cache、CUDA KV kernel、CUDA benefit decision、checkpoint 和 `n_busy_slots_per_decode > 1`。自动验收还必须执行前端 JavaScript 语法检查；发布证据必须包含真实浏览器完成的一次输入、发送、引用显示与完整回答旅程。

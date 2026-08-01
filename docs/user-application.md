@@ -8,7 +8,7 @@
 
 ## 运行边界
 
-- 应用和 CacheFlow Runtime 都只监听 `127.0.0.1`；外部访问必须经过可信反向代理。
+- 应用和 CacheFlow Runtime 都只监听 `127.0.0.1`；模型 URL 只接受带显式端口的 loopback IP 并拒绝重定向，防止服务端 API key 被误发到远端。外部访问必须经过可信反向代理。
 - 应用使用 SQLite WAL 保存会话和完整回答；每个操作独占短连接，消息与会话更新时间在同一事务提交。流式回答完成后才提交 assistant 消息，断连会关闭上游生成器且不会留下半条答案。
 - 每次回答携带实际检索来源；无检索命中或模型不可用时返回明确错误，不生成无依据或伪造兜底答案。
 - 当前是单用户或可信局域网应用。账号体系、跨设备同步、公共互联网部署和真实用户量需要独立部署后才能声明。
@@ -25,6 +25,6 @@ Browser -> Interview Assistant -> local retrieval -> llama-server /v1/chat/compl
 
 ## 验收证据
 
-`run_user_application_journey.py` 启动两个 fresh application subprocess，而不是在验收进程里直接调用 Service。当前真实 CUDA 旅程观测到 603 个缓存 prompt token、8 次自研 CUDA KV kernel、2 次 CUDA benefit decision、2 次在线策略 checkpoint、18 个 prefill chunk，`n_busy_slots_per_decode=1.19789`；同时验证 429 背压、浏览器断流不保存半条答案和应用进程重启续聊。
+`run_user_application_journey.py` 启动两个 fresh application subprocess，而不是在验收进程里直接调用 Service。当前真实 CUDA 旅程观测到 441 个缓存 prompt token、6 次自研 CUDA KV kernel、2 次 CUDA benefit decision、2 次在线策略 checkpoint、19 个 prefill chunk，`n_busy_slots_per_decode=1.0739`；同时验证 429 背压、应用进程重启续聊，以及浏览器在收到真实模型 token 后断流会触发 llama-server 原生 `cancel task` 且不保存半条答案。
 
 真实 Chromium 浏览器还完成了输入、发送、SSE 增量显示、资料卡片和回答完成状态检查；B+ 树问题的首条检索结果为数据库文档的 `7.1 B+ 树`，而非通用面试题。浏览器证据位于 `results/user-application-browser-qa.json`。这仍不等于已有外部用户采用。

@@ -1,11 +1,14 @@
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from interview_assistant.knowledge import KnowledgeIndex
+from interview_assistant.llama_client import LlamaClient
 from interview_assistant.server import create_server
 from interview_assistant.service import InterviewService
 from interview_assistant.store import ConversationStore
@@ -31,6 +34,23 @@ class ClosingModel(FakeModel):
             yield "不应保存"
         finally:
             self.closed = True
+
+
+class RedirectHandler(BaseHTTPRequestHandler):
+    visited: list[str] = []
+
+    def do_GET(self) -> None:
+        self.visited.append(self.path)
+        if self.path == "/health":
+            self.send_response(302)
+            self.send_header("Location", "/credential-sink")
+            self.end_headers()
+        else:
+            self.send_response(200)
+            self.end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:
+        return None
 
 
 class UserApplicationTests(unittest.TestCase):
@@ -127,6 +147,33 @@ class UserApplicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             create_server("0.0.0.0", 0, self.service)
 
+    def test_model_client_rejects_remote_or_ambiguous_key_destinations(self) -> None:
+        rejected = [
+            "https://example.com:443",
+            "http://localhost:8080",
+            "http://127.0.0.1",
+            "http://127.0.0.1:8080/proxy",
+            "http://user@127.0.0.1:8080",
+        ]
+        for url in rejected:
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                LlamaClient(url, "secret")
+        self.assertEqual(LlamaClient("http://127.0.0.1:8080", "secret").base_url, "http://127.0.0.1:8080")
+
+    def test_model_client_does_not_follow_redirects(self) -> None:
+        RedirectHandler.visited = []
+        redirect_server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        thread = threading.Thread(target=redirect_server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = LlamaClient(f"http://127.0.0.1:{redirect_server.server_port}", "secret")
+            self.assertFalse(client.healthy())
+            self.assertEqual(RedirectHandler.visited, ["/health"])
+        finally:
+            redirect_server.shutdown()
+            redirect_server.server_close()
+            thread.join(timeout=5)
+
     def test_no_retrieval_match_fails_closed_without_calling_model(self) -> None:
         session = self.store.create_session()
         stream = self.service.answer(session["id"], "量子色动力学重整化群")
@@ -155,7 +202,7 @@ class UserApplicationTests(unittest.TestCase):
                    BEGIN SELECT RAISE(ABORT, 'injected update failure'); END"""
             )
         try:
-            with self.assertRaises(KeyError):
+            with self.assertRaises(sqlite3.IntegrityError):
                 self.store.add_message(session["id"], "user", "must roll back")
         finally:
             with self.store._connection() as connection:

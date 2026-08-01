@@ -132,7 +132,7 @@ Windows WDDM 首次运行前需要以管理员身份执行 CUDA Toolkit 的 `Ena
   -KnowledgeRoot D:\exam\tuimian-monitor\docs\study
 ```
 
-访问 `http://127.0.0.1:8766`。真实 CUDA 用户旅程不是单请求 smoke：它启动并重启两个独立应用进程，完成三轮带引用回答、取消、429 背压和两个用户并发，并从原生指标验证 603 个缓存 prompt token、8 次 CUDA KV kernel、2 次 CUDA 收益决策与 2 次 checkpoint。真实 Chromium 浏览器交互也已通过；证据见 `results/user-application-journey.json` 与 `results/user-application-browser-qa.json`，详细边界见 [用户应用说明](docs/user-application.md)。
+访问 `http://127.0.0.1:8766`。真实 CUDA 用户旅程不是单请求 smoke：它启动并重启两个独立应用进程，完成三轮带引用回答、真实模型 token 后取消、429 背压和两个用户并发，并从原生指标验证 441 个缓存 prompt token、6 次 CUDA KV kernel、2 次 CUDA 收益决策与 2 次 checkpoint。真实 Chromium 浏览器交互也已通过；证据见 `results/user-application-journey.json` 与 `results/user-application-browser-qa.json`，详细边界见 [用户应用说明](docs/user-application.md)。
 
 ## 代码边界
 

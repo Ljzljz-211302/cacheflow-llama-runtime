@@ -16,6 +16,11 @@ try {
         throw "compileall failed"
     }
 
+    node --check src\interview_assistant\static\app.js
+    if ($LASTEXITCODE -ne 0) {
+        throw "interview assistant JavaScript syntax check failed"
+    }
+
     python scripts\audit_architecture.py
     if ($LASTEXITCODE -ne 0) {
         throw "architecture ownership audit failed"

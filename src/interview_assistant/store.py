@@ -92,8 +92,11 @@ class ConversationStore:
         citations: list[CitationPayload] | None = None,
     ) -> StoredMessage:
         timestamp = _now()
-        try:
-            with self._connection() as connection:
+        with self._connection() as connection:
+            exists = connection.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if exists is None:
+                raise KeyError(session_id)
+            try:
                 cursor = connection.execute(
                     "INSERT INTO messages(session_id, role, content, citations_json, created_at) VALUES (?, ?, ?, ?, ?)",
                     (session_id, role, content, json.dumps(citations or [], ensure_ascii=False), timestamp),
@@ -103,9 +106,10 @@ class ConversationStore:
                     (timestamp, session_id),
                 )
                 if cursor.rowcount != 1 or updated.rowcount != 1:
-                    raise KeyError(session_id)
-        except sqlite3.IntegrityError as exc:
-            raise KeyError(session_id) from exc
+                    raise RuntimeError("message transaction did not update exactly one row")
+            except sqlite3.Error:
+                connection.rollback()
+                raise
         message_id = cursor.lastrowid
         if message_id is None:
             raise RuntimeError("SQLite did not return a message id")

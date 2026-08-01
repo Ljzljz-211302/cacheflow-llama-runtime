@@ -167,11 +167,47 @@ def cancel_answer(session_id: str, question: str) -> None:
         headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
     )
     response = connection.getresponse()
-    if response.status != 200 or not response.readline().startswith(b"data: "):
+    if response.status != 200:
         raise AssertionError("cancel journey did not begin an SSE response")
+    saw_citations = False
+    saw_injected_header = False
+    saw_model_delta = False
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        raw_line = response.readline()
+        if not raw_line:
+            break
+        line = raw_line.decode("utf-8").strip()
+        if not line.startswith("data: "):
+            continue
+        event = json.loads(line[6:])
+        if event["type"] == "citations":
+            saw_citations = True
+        elif event["type"] == "delta" and not saw_injected_header:
+            saw_injected_header = True
+        elif event["type"] == "delta":
+            saw_model_delta = True
+            break
+    if not (saw_citations and saw_injected_header and saw_model_delta):
+        raise AssertionError("cancel journey disconnected before a real model token")
     if connection.sock is not None:
         connection.sock.shutdown(2)
     connection.close()
+
+
+def native_cancel_count() -> int:
+    if not LOG.is_file():
+        return 0
+    return LOG.read_text(encoding="utf-8", errors="replace").count("cancel task, id_task")
+
+
+def wait_for_native_cancel(previous_count: int) -> None:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if native_cancel_count() > previous_count:
+            return
+        time.sleep(0.05)
+    raise AssertionError("client disconnect did not propagate cancellation to llama-server")
 
 
 def expect_backpressure(session_id: str) -> None:
@@ -257,7 +293,10 @@ def main() -> None:
                 if "偏差" not in first_answer["answer"] or "方差" not in first_answer["answer"]:
                     raise AssertionError("model answer failed the minimum grounded topic contract")
                 cancelled = request_json("/api/sessions", {"title": "取消场景"})
+                log.flush()
+                cancel_count_before = native_cancel_count()
                 cancel_answer(cancelled["id"], "请详细解释数据库索引并给出十个追问。")
+                wait_for_native_cancel(cancel_count_before)
                 time.sleep(0.5)
                 cancelled_history = request_json(f"/api/sessions/{cancelled['id']}/messages")["messages"]
                 if [message["role"] for message in cancelled_history] != ["user"]:
@@ -271,6 +310,7 @@ def main() -> None:
                     "first_answer_chars": first_answer["answer_chars"],
                     "first_citation": first_answer["citations"][0]["source"],
                     "cancel_left_partial_assistant": False,
+                    "native_cancel_propagated": True,
                     "backpressure_rejected": True,
                 })
             finally:
