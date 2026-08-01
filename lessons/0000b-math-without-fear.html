@@ -1,0 +1,20 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>00B 项目所需数学</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/quiz.js"></script></head><body><main>
+<div class="kicker">Foundation 00B · 数学桥接 · 50 min</div><h1>看懂项目公式所需的最少数学</h1><p class="lead">不追求一节课学完线性代数，只建立后续公式每个符号的含义和直觉。</p>
+<h2>1. 标量、向量、矩阵</h2><p><strong>标量</strong>是一个数，例如耗时 12ms。<strong>向量</strong>是一列有顺序的数，例如用 <code>x=[并发数, prompt长度, KV压力]</code> 描述一次系统状态。<strong>矩阵</strong>是按行列排列的数表，可以表示一组数据或一种线性变换。</p>
+<div class="formula">x=[2, 512, 0.7]　　θ=[3, 0.01, 8]<br>xᵀθ = 2×3 + 512×0.01 + 0.7×8 = 16.72</div>
+<p><strong>点积</strong><code>xᵀθ</code>把对应位置相乘再相加。在线成本模型用它把多个特征合成一个预测耗时。</p>
+<h2>2. 矩阵乘法在做什么</h2><p>矩阵乘向量，可以理解为“同时计算多个加权和”。神经网络的线性层正是大量这类计算。GPU 擅长它，因为许多乘加可以并行。</p>
+<p><strong>转置</strong><code>Xᵀ</code>是把行列交换；<strong>单位矩阵</strong><code>I</code>像数字 1；<strong>逆矩阵</strong><code>A⁻¹</code>类似除法，但只有满足条件的方阵存在。后续 Ridge 加上 <code>λI</code>，就是为了让求解更稳定。</p>
+<h2>3. 平均数、中位数和 P95</h2><ul><li><strong>平均数：</strong>总和除以数量，容易受极端值影响；</li><li><strong>中位数：</strong>排序后居中的数，描述“典型一次”；</li><li><strong>P95：</strong>排序后 95% 样本不超过的值，关注较慢尾部；</li><li><strong>方差：</strong>样本相对平均值波动有多大。</li></ul>
+<p>例：耗时 <code>[10,10,11,12,100]</code>，中位数 11，平均数 28.6。只报平均数会被一次 100 强烈拉高；只报中位数又会隐藏严重尾延迟，所以 serving 常同时报告中位和 P95。</p>
+<h2>4. 概率与 softmax</h2><p><strong>概率</strong>在 0 到 1 之间，总和为 1。模型先输出任意实数分数（logits），<strong>softmax</strong>把它们转换成概率：</p><div class="formula">softmax(zᵢ)=e<sup>zᵢ</sup>/Σe<sup>zⱼ</sup></div>
+<p>分数差越大，概率越集中。后续 Attention 也使用 softmax，把 query 与各历史 key 的相似分数变成权重。</p>
+<h2>5. 回归与误差</h2><p><strong>回归</strong>是根据输入特征预测连续数值，例如预测一次迭代耗时。预测值与真实值之差叫<strong>残差</strong>。普通线性回归选择参数，使残差平方和尽量小。</p>
+<div class="formula">预测 ŷ=xᵀθ　　残差 e=y−ŷ　　损失 Σe²</div>
+<p>平方让正负误差不会抵消，也更重罚大误差。Ridge 再加 <code>λ||θ||²</code>，限制参数过大，降低少量数据下的剧烈摆动。</p>
+<h2>6. “置信”不是“保证”</h2><p>估计来自有限数据，因此预测有不确定性。项目用“预测值 ± 半径”表示当前证据范围。数据越少或当前状态越陌生，半径通常越大。它是模型假设下的风险尺度，不是绝对不会超出的法律保证。</p>
+<div class="task"><strong>手算：</strong>对数据 [8,9,10,11,32] 算平均数和中位数；指出哪个更代表典型请求、哪个提示系统总成本。再用 x=[2,4]、θ=[3,5] 算点积。</div>
+<div class="quiz"><h3>检查理解</h3><p>P95 主要帮助观察什么？</p><button data-answer="false">模型参数总量大小</button><button data-answer="true">请求延迟尾部情况</button><button data-answer="false">程序源码文件数量</button><div class="feedback"></div><details><summary>解析</summary>P95 关注较慢的一小部分请求，是交互服务的重要尾延迟指标。</details></div>
+<p class="source">后续原始依据：<a href="https://papers.neurips.cc/paper/7181-attention-is-all-you-need.pdf">Transformer 论文</a>和<a href="https://arxiv.org/abs/1003.0146">LinUCB 论文</a>。此时只需能认公式。</p>
+<nav class="nav"><a href="0000a-from-chat-to-inference.html">← 一次聊天请求</a><a href="0000c-programs-memory-and-concurrency.html">下一课：程序和并发 →</a></nav><p>若矩阵仍显抽象，请让学习助手用二维图和具体数字继续讲，不要急着进入 Ridge。</p>
+</main></body></html>

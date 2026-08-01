@@ -1,6 +1,6 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>05 在线学习与收益门控</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/quiz.js"></script></head><body><main>
 <div class="kicker">Lesson 05 · 机器学习算法 · 70 min</div><h1>在线 Ridge、置信区间与 Conservative Benefit Gating</h1><p class="lead">本节目标：从最小二乘推导项目在线算法，解释为什么“预测平均收益为正”仍不足以启用，以及如何处理探索、漂移和冷启动。</p>
-<h2>1. 问题建模</h2><p>每次调度有两个动作：upstream greedy 与 CacheFlow plan。上下文特征 <code>x</code> 包括 backend、batch width、decode/prefill token、chunk 数、活跃 sequence、KV 压力等；反馈 <code>y</code> 是迭代耗时加 SLO/failure penalty。目标不是预测 token，而是预测<strong>系统动作成本</strong>。</p>
+<h2>1. 问题建模</h2><p>每次调度比较两个动作：<strong>upstream greedy</strong> 是固定上游原有的贪心计划，<strong>CacheFlow plan</strong> 是本项目生成的缓存感知候选计划。“贪心”表示只根据当前状态选眼前可行方案，不搜索很长的未来动作序列。</p><p><strong>特征</strong>是描述当前状态的数字。特征向量 <code>x</code> 包括执行后端（CPU 或 CUDA）、批大小、decode/prefill token、chunk 数、活跃 sequence、KV 压力等；反馈 <code>y</code> 是实际迭代耗时，再加违反 SLO 或执行失败的惩罚。目标不是预测文字 token，而是预测<strong>系统动作成本</strong>。</p>
 <p>为何分别为 backend/action 建模？CPU 与 CUDA 的成本尺度/瓶颈不同；upstream 与 CacheFlow 也产生不同数据分布。混成一个模型需要大量交互特征，少样本更容易错配。</p>
 <h2>2. 从最小二乘到 Ridge</h2><p>普通最小二乘最小化 <code>Σ(yᵢ−xᵢᵀθ)²</code>。在线初期样本少、特征相关，<code>XᵀX</code> 可能不可逆或病态。加入 L2 正则：</p>
 <div class="formula">min<sub>θ</sub> Σ(yᵢ−xᵢᵀθ)² + λ||θ||²<br>A=λI+Σxᵢxᵢᵀ, b=Σxᵢyᵢ, θ̂=A⁻¹b</div>
@@ -15,7 +15,7 @@
 <h2>6. 53-wave 证据如何解释</h2><p>最终 CUDA 单 PID：冷启动 0 次提前启用；稳定阶段 17 次探索、143 次正下界动作，覆盖 39 waves、最长连续 35 waves；终态收益 11.24ms 大于不确定性 5.27ms；切换 throughput-only 后 0 次 CacheFlow、3 次结构安全回退。</p>
 <p>这比“某一时刻最大置信度”强，因为门禁同时要求连续 wave 和终态仍有置信；但它仍只证明当前模型/硬件/workload。分布切换由结构条件直接回退，并未触发统计 drift，这同样是正确结果。</p>
 <div class="task"><strong>手算练习：</strong>设 upstream 预测 20±3ms，CacheFlow 14±2ms，margin=1ms，判断是否启用。再把 CacheFlow 半径改成 6ms，解释为何平均预测仍更好却必须回退。</div>
-<div class="quiz"><h3>主动回忆</h3><p>为什么一次 SLO miss 不应立刻 reset 模型？</p><button data-answer="true">它可能是可预测的高成本，不一定代表关系变化</button><button data-answer="false">因为 SLO 与反馈成本完全没有关系</button><button data-answer="false">因为 Ridge 模型不能处理任何大数值</button><div class="feedback"></div><details><summary>解析</summary>drift 关心预测关系失效，即成熟模型的连续大残差；SLO miss 会加 penalty，但可能早已被模型预测。</details></div>
+<div class="quiz"><h3>主动回忆</h3><p>为什么一次 SLO miss 不应立刻 reset 模型？</p><button data-answer="true">高成本可能已被模型准确预测</button><button data-answer="false">服务目标与反馈成本完全无关</button><button data-answer="false">岭回归模型无法处理较大数值</button><div class="feedback"></div><details><summary>解析</summary>drift 关心预测关系失效，即成熟模型的连续大残差；SLO miss 会加 penalty，但可能早已被模型预测。</details></div>
 <p class="source">主阅读：<a href="https://arxiv.org/abs/1003.0146">Li et al., Contextual Bandit / LinUCB</a>。项目实现：<code>server-benefit-policy.*</code>、<code>test-benefit-policy.cpp</code>。</p>
 <nav class="nav"><a href="0004-cuda-kernels-streams-correctness.html">← CUDA</a><a href="0006-adaptive-prefill-and-speculation.html">下一课：Adaptive 算法 →</a></nav><p>如果矩阵公式不熟，请让学习助手用二维数值例子带你完整算一次 A、b、预测和置信半径。</p>
 </main></body></html>

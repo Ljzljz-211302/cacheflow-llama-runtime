@@ -1,4 +1,4 @@
-# CacheFlow Runtime 推免面试学习路线
+# CacheFlow Runtime 推免面试学习路线（零基础 18 天）
 
 课程入口：[lessons/index.html](../lessons/index.html)；速查：[术语表](../reference/glossary.html)、[公式与代码地图](../reference/formulas-and-code-map.html)。
 
@@ -20,7 +20,18 @@
 - backend-local online Ridge + uncertainty + bounded exploration + drift fallback；
 - paired intervention 把 policy、scheduler、CUDA、Engine、TTFT 串成因果证据。
 
-## 二、前置知识诊断
+## 二、零基础桥接：前 4 天
+
+如果下表里的内容不会，不再要求你“先自行补基础”。课程已提供四节桥接课：
+
+- Day 0A：[一次聊天请求发生了什么](../lessons/0000a-from-chat-to-inference.html)：模型、推理、token、server、CPU/GPU；
+- Day 0B：[看懂项目公式的数学](../lessons/0000b-math-without-fear.html)：向量、矩阵、点积、P95、回归和置信；
+- Day 0C：[程序、内存与并发](../lessons/0000c-programs-memory-and-concurrency.html)：进程、线程、指针、状态机、事务、COW；
+- Day 0D：[GPU 与 CUDA 从零](../lessons/0000d-gpu-from-zero.html)：Host/Device、kernel、thread、stream、event。
+
+每天完成正文、手算/画图任务和末尾小测。四节都能不用术语复述后，再进入原 14 天核心路线。因此完全零基础用 18 天；已有本科基础者可通过小测后从 Day 1 开始。
+
+## 三、进入主课前的诊断表
 
 在开始课程前闭卷回答。任一项不会，先补相应基础，不要直接背项目答案。
 
@@ -36,7 +47,7 @@
 | CUDA | grid/block/thread、global/shared memory、stream/event | 画两 stream 的正确同步时间线 |
 | Transformer | Q/K/V、causal attention、自回归生成、GQA | 推导 KV cache 容量 |
 
-## 三、14 天学习安排
+## 四、14 天核心学习安排
 
 每天建议 2.5–3.5 小时：阅读 45–70 分钟，代码 45 分钟，闭卷输出 30 分钟，间隔复习 20 分钟。
 
@@ -165,7 +176,7 @@
 
 验收：总分至少 36/45，无 0 分题；不能回答时能诚实界定并提出验证方法。
 
-## 四、面试回答通用模板
+## 五、面试回答通用模板
 
 对任何技术点使用“六句法”，避免散乱：
 
@@ -180,7 +191,7 @@
 
 > 共享完整 block 会浪费公共 prompt 的尾部，所以我允许 partial-tail sharing；但追加 token 会污染其他 sequence。写入前检查 refcount，若大于 1 则先分配并复制有效区域，成功后原子切换写者 Block Table，再减少旧引用。CUDA copy 用 stream/event 约束发布时机，allocation/copy 失败保持旧映射。对应单元测试验证 refcount/容量守恒，真实 CUDA smoke 和 sanitizer 验证 tensor 路径。当前是单 GPU block runtime，未实现跨 GPU KV 迁移。
 
-## 五、必须背熟的数据，但不要只背数据
+## 六、必须背熟的数据，但不要只背数据
 
 - 固定上游个人差异：56 files、+7533/−99 C/C++/CUDA；外层实验另计。
 - 长驻 CUDA：53 waves；17 exploration；143 positive；39 positive waves；最长连续 35；终态 11.24ms > 5.27ms；shift 后 0 错误启用、3 fallback。
@@ -190,7 +201,7 @@
 
 每个数字必须同时说出“它回答什么”和“它不能证明什么”。
 
-## 六、进一步提高面试竞争力
+## 七、进一步提高面试竞争力
 
 完成本路线后，优先做以下延伸，而不是继续堆代码量：
 

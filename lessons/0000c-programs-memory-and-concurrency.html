@@ -1,0 +1,28 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>00C 程序、内存与并发</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/quiz.js"></script></head><body><main>
+<div class="kicker">Foundation 00C · 系统桥接 · 55 min</div><h1>程序、内存、状态与“同时发生”</h1><p class="lead">本节解释后续 COW、事务、竞态和所有权所需的最少操作系统/C++概念。</p>
+<h2>1. 程序、进程和线程</h2><p><strong>程序</strong>是磁盘上的代码；运行起来后成为<strong>进程</strong>，拥有自己的地址空间和资源。<strong>线程</strong>是进程内部的一条执行路线；多个线程共享进程内存，因此既能合作，也可能互相破坏数据。</p>
+<p>服务通常有接收请求、执行计算、写响应等并发活动。并发不是“每件事物理上同时”，而是多项任务的执行时间交错；GPU 异步命令又增加一层并发。</p>
+<h2>2. 变量、地址、指针和所有权</h2><p>内存可想成有编号的格子；编号是<strong>地址</strong>。C++ <strong>指针</strong>保存地址。对象被释放后，旧指针仍保存数字，但指向内容已无效，再访问叫 <strong>Use-After-Free（释放后使用，UAF）</strong>。</p>
+<p><strong>所有权</strong>回答“谁负责保证对象活着、谁负责释放”。RAII 是 C++ 常用方式：资源绑定到对象生命周期，离开作用域自动清理。GPU 命令异步时，Host 对象退出作用域并不一定代表 GPU 不再使用底层 buffer。</p>
+<h2>3. 竞态与 happens-before</h2><p>两个执行者访问同一数据，至少一个写入且没有确定顺序，结果依时机变化，这叫<strong>数据竞态</strong>。锁、原子操作、同一队列顺序或事件可以建立“甲完成在乙开始之前”的关系，称 <strong>happens-before</strong>。</p>
+<div class="diagram">错误：线程 A 释放 block ─┐
+                         ├─ 顺序不确定 → GPU 可能读已释放内存
+      GPU stream 读取 ───┘
+
+正确：GPU 读取 → completion event → Host 等待/查询 → 释放 block</div>
+<h2>4. 状态机</h2><p><strong>状态机</strong>把对象可能处于的状态和允许的转换写清楚。例如一次推理迭代只能按下面顺序：</p><div class="diagram">new → prepared → planned → executing → committed
+                               └────────→ aborted</div>
+<p>它防止“未计划就执行”“执行一半却提交”等非法情况。测试不只验证成功，还要故意尝试非法转换。</p>
+<h2>5. 事务和原子性</h2><p><strong>事务</strong>把多步操作视作一个整体。<strong>原子性</strong>要求外界看到“全部完成”或“没有发生”，不能看到半成品。项目中计划 KV 复制、执行 CUDA copy、切换映射是多步操作，因此必须明确哪一步发布结果，失败时如何保持旧状态。</p>
+<p>数据库常用日志，文件系统常用“写临时文件后 rename”。项目不照搬数据库实现，但借用同一原则：先准备完整新状态，再原子发布。</p>
+<h2>6. 引用计数与 COW</h2><p><strong>引用计数</strong>记录多少使用者指向同一对象。计数归零后才可能回收。<strong>写时复制（Copy-on-Write，COW）</strong>允许多人共享只读数据；某人要写时先复制一份，避免影响别人。</p>
+<div class="diagram">A ─┐
+   ├→ shared block，refcount=2
+B ─┘
+
+A 要写：copy → new block；A 改指向 new；old refcount=1；B 仍见 old</div>
+<div class="task"><strong>生活类比：</strong>用“多人共享云文档”和“另存为副本”解释 COW；再指出这个类比哪里不准确，例如真实程序的并发、失败和内存回收。</div>
+<div class="quiz"><h3>检查理解</h3><p>引用计数归零后还需考虑什么？</p><button data-answer="false">模型必须重新开始训练</button><button data-answer="true">异步任务是否仍在访问</button><button data-answer="false">文本是否包含中文字符</button><div class="feedback"></div><details><summary>解析</summary>逻辑引用归零不代表异步 GPU 操作完成；释放前仍需同步关系。</details></div>
+<p class="source">项目对应测试：<code>test-inference-iteration.cpp</code>、<code>test-kv-block-manager.cpp</code>。先读测试，比直接读生产实现更容易理解。</p>
+<nav class="nav"><a href="0000b-math-without-fear.html">← 数学桥接</a><a href="0000d-gpu-from-zero.html">下一课：GPU 从零 →</a></nav><p>如果“并发”和“并行”仍混淆，请让学习助手给你画单核交错与多核同时执行的两条时间线。</p>
+</main></body></html>

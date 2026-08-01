@@ -1,6 +1,6 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>02 Serving 调度</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/quiz.js"></script></head><body><main>
-<div class="kicker">Lesson 02 · 系统基础 · 50 min</div><h1>Iteration-level Scheduling、状态机与服务指标</h1><p class="lead">本节目标：把操作系统中的调度、事务和公平性知识映射到 LLM serving，并能沿项目 Engine 解释一次迭代。</p>
-<h2>1. 为什么不能“凑一批请求，全部跑完”</h2><p>请求长度未知且差异大。request-level batching 会形成 head-of-line blocking：短请求必须等待最长请求完成，期间新请求不能加入。Orca 的核心洞见是把调度粒度降到一次模型迭代：每轮执行后重新观察完成、到达、取消和资源状态。</p>
+<div class="kicker">Lesson 02 · 系统基础 · 55 min</div><h1>系统每一轮该让哪些请求运行</h1><p class="lead">多个用户同时请求时，系统必须选择下一轮处理谁。这个选择过程叫调度；本节从排队开始，再引出按模型迭代调度、状态机和服务指标。</p>
+<h2>1. 为什么不能“凑一批请求，全部跑完”</h2><p><strong>Batch（批）</strong>是把多个请求的数据合在一次模型计算中，让 GPU 同时处理。若一个 batch 中的请求必须全部生成结束后才重新组队，这叫 <strong>request-level batching（按完整请求组批）</strong>。</p><p>请求输出长度未知且差异大，短请求会被排在前面的长请求挡住，这叫 <strong>head-of-line blocking（队首阻塞）</strong>；期间新请求也不能加入。Orca 系统提出把调度粒度降到一次模型迭代：每执行一轮模型后重新观察完成、到达、取消和资源状态，这叫 <strong>iteration-level scheduling（按模型迭代调度）</strong>。</p>
 <div class="diagram">prepare：收集可运行状态、取消/超时、资源快照
    ↓
 plan：选择 slot、decode token、prefill chunk、KV 动作（尚不产生不可逆副作用）
@@ -8,16 +8,17 @@ plan：选择 slot、decode token、prefill chunk、KV 动作（尚不产生不�
 execute：调用 runtime / llama_decode / CUDA
    ↓ success                     ↓ failure
 commit：发布 token、推进状态      abort：丢弃未提交变化、进入恢复路径</div>
-<p>这就是本项目 <code>server_inference_iteration</code> 的状态机。它不是为了“多写几个类”，而是阻止计划、执行和提交互相穿透。核心不变量：<strong>execute 只执行冻结计划；只有 commit 后外界才看见状态推进。</strong></p>
-<h2>2. 调度对象与常见策略</h2><p>请求是用户级生命周期；sequence 是模型中的生成分支；slot 是当前可执行资源。把三者混成一个对象，会让取消、beam/并行分支、swap 恢复和 slot 复用难以保持一致。</p>
-<table><thead><tr><th>策略</th><th>优点</th><th>失败模式</th></tr></thead><tbody><tr><td>FCFS</td><td>简单、到达顺序可解释</td><td>长 prefill 阻塞 decode</td></tr><tr><td>最短剩余优先</td><td>平均延迟低</td><td>长请求可能饥饿，且剩余长度未知</td></tr><tr><td>Cache-aware</td><td>复用 prefix，减少 prefill</td><td>过度追逐 cache 会破坏公平性</td></tr><tr><td>Aging</td><td>等待越久加分，防止饥饿</td><td>权重过大时牺牲局部效率</td></tr><tr><td>SLO-aware</td><td>优先救即将超时请求</td><td>持续过载时所有请求都“紧急”</td></tr></tbody></table>
+<p>这就是本项目 <code>server_inference_iteration</code> 的状态机。<strong>Engine</strong>是组织整轮推理的核心模块；<strong>commit</strong>表示确认并发布成功结果，<strong>abort</strong>表示放弃本轮未提交变化。核心不变量：execute 只执行冻结计划；只有 commit 后外界才看见状态推进。</p>
+<h2>2. 调度对象与常见策略</h2><p><strong>Request</strong>是一次用户请求及其取消/超时生命周期；<strong>sequence</strong>是模型内部正在增长的一条 token 序列；<strong>slot</strong>是 server 里承载一条活跃 sequence 的执行位置。把三者混成一个对象，会让取消、多个生成分支、swap 恢复和 slot 复用难以保持一致。</p>
+<table><thead><tr><th>策略</th><th>优点</th><th>失败模式</th></tr></thead><tbody><tr><td>FCFS（先到先服务）</td><td>简单、到达顺序可解释</td><td>长 prefill 阻塞 decode</td></tr><tr><td>最短剩余优先</td><td>平均延迟低</td><td>长请求可能饥饿，且剩余长度未知</td></tr><tr><td>Cache-aware（缓存感知）</td><td>复用公共开头，减少 prefill</td><td>过度追逐 cache 会破坏公平性</td></tr><tr><td>Aging（等待加分）</td><td>等待越久加分，防止饥饿</td><td>权重过大时牺牲局部效率</td></tr><tr><td>SLO-aware（服务目标感知）</td><td>优先救即将超时请求</td><td>持续过载时所有请求都“紧急”</td></tr></tbody></table>
+<p><strong>SLO（Service Level Objective，服务目标）</strong>是系统承诺努力满足的指标目标，例如“95% 请求 TTFT 不超过 500ms”。它不是每次都绝对满足的硬件定律。</p>
 <p>本项目分数可以用下式解释，而不必声称它是全局最优：</p><div class="formula">score = reuse gain − prefill cost − eviction cost + aging bonus − SLO risk</div>
 <p>面试官若问“为什么不用动态规划求最优”，应答：真实系统状态持续变化、请求长度未知、动作时间受 GPU/batch 影响，精确全局优化成本过高；项目选择可解释在线启发式，并用 shadow plan、回退和实测约束风险。</p>
 <h2>3. 背压、取消、Deadline</h2><p><strong>背压</strong>发生在准入边界：队列满时明确拒绝，避免无限排队导致内存和 latency 崩溃。<strong>取消</strong>要求请求进入 terminal state 后不再被调度，并安全释放/递减 KV 引用。<strong>Deadline</strong>不是简单排序字段：过期请求应在 prepare 阶段清除，不能执行后才发现超时。</p>
 <h2>4. TTFT、TPOT、吞吐为何必须一起看</h2><p>只看总 latency 会掩盖交互体验；只看 TTFT 可能通过让首 token 很快、后续极慢来“作弊”；只看吞吐会牺牲单请求尾延迟。P95 关心尾部，但小样本分位数非常不稳定，因此项目使用 fresh-process 多 trial 并保留原始记录。</p>
 <div class="callout danger"><strong>面试陷阱：</strong>“TPS 提升 10% 所以方案更好”不成立。必须同时给 workload、并发、上下文、TTFT/TPOT/latency 分位数、质量和硬件，并承认 CUDA mixed workload 的历史结论反号。</div>
 <div class="task"><strong>代码练习：</strong>依次打开 <code>server-inference-iteration.h</code>、<code>server-inference-engine.cpp</code>、<code>test-inference-iteration.cpp</code>。画出允许的 phase 转移，并回答：为什么 execute 失败后不能直接 commit 已执行的部分？</div>
-<div class="quiz"><h3>主动回忆</h3><p>iteration-level scheduling 的直接价值是什么？</p><button data-answer="true">每轮都能重组 batch 并响应新状态</button><button data-answer="false">让一个请求在一次 kernel 中全部生成</button><button data-answer="false">消除所有模型自回归串行依赖</button><div class="feedback"></div><details><summary>解析</summary>它提高的是请求之间的调度灵活性，不会消除单个 sequence 的自回归依赖。</details></div>
+<div class="quiz"><h3>主动回忆</h3><p>iteration-level scheduling 的直接价值是什么？</p><button data-answer="true">每轮都能重组批并响应状态</button><button data-answer="false">单请求可在一轮内全部生成</button><button data-answer="false">模型不再具有自回归依赖了</button><div class="feedback"></div><details><summary>解析</summary>它提高的是请求之间的调度灵活性，不会消除单个 sequence 的自回归依赖。</details></div>
 <p class="source">主阅读：<a href="https://www.usenix.org/system/files/osdi22-yu.pdf">Yu et al., Orca, OSDI 2022</a>。</p>
 <nav class="nav"><a href="0001-transformer-inference-foundations.html">← Transformer 基础</a><a href="0003-paged-kv-prefix-cow-swap.html">下一课：Paged KV →</a></nav><p>如果你不能从失败路径解释事务边界，请让学习助手用数据库事务或文件系统日志做类比。</p>
 </main></body></html>

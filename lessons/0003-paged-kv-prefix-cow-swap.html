@@ -1,6 +1,6 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>03 Paged KV</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/quiz.js"></script></head><body><main>
 <div class="kicker">Lesson 03 · AI Infra 核心 · 60 min</div><h1>Paged KV、Prefix Sharing、COW 与 Swap</h1><p class="lead">本节目标：用操作系统页表和引用计数理解项目最核心的内存工作，并能证明 COW/Swap 的正确性。</p>
-<h2>1. 连续 KV 分配的问题</h2><p>若为每个请求预留最大上下文，会产生大量内部碎片；若按实际长度连续增长，扩容和外部碎片又很难管理。Paged KV 把逻辑 token 序列切成固定大小 block，通过 Block Table 映射到不连续物理块。</p>
+<h2>1. 连续 KV 分配的问题</h2><p>如果为每个请求预留“最大可能长度”的连续空间，实际没用到的尾部仍被占着，这叫<strong>内部碎片</strong>。如果只按当前长度分配、之后不断找更大的连续空间，空闲内存可能散落成很多小洞，总量够却找不到足够大的连续区域，这叫<strong>外部碎片</strong>。</p><p><strong>Paged KV（分页式 KV）</strong>借鉴操作系统分页：把一条逻辑 token 序列切成固定大小的 <strong>block（块）</strong>。<strong>Block Table（块表）</strong>记录“sequence 的第几个逻辑块”实际放在哪个物理块，因此物理内存不必连续。</p>
 <div class="diagram">Sequence A logical: [0] [1] [2-tail]
                          │   │    │
 Physical pool:         [7] [3]  [9]
@@ -19,7 +19,7 @@ Sequence B logical: [0] [1] [2-tail]
 <table><thead><tr><th>失败点</th><th>安全结果</th></tr></thead><tbody><tr><td>Host allocation 失败</td><td>保持 resident KV；回退重算或拒绝抢占</td></tr><tr><td>File write 中断</td><td>旧 checkpoint 仍有效；临时文件可清理</td></tr><tr><td>CUDA copy 失败</td><td>不发布新映射；记录错误并保持/回滚旧状态</td></tr><tr><td>恢复时容量不足</td><td>不部分恢复；继续 swapped 或回退 recompute</td></tr></tbody></table>
 <div class="callout"><strong>个人贡献证据：</strong><code>server-kv-block-manager.*</code>、<code>server-kv-capacity-planner.*</code>、<code>server-kv-swap-store.*</code>、<code>src/llama-kv-cache-paged.cu</code> 以及对应 tests/bench。面试时不要把 vLLM 的实现说成自己的；应说“借鉴 paging 思想，在固定 llama.cpp 上游中实现并接入真实 KV 路径”。</div>
 <div class="task"><strong>不变量练习：</strong>写出 allocate/share/append-COW/release 四个操作前后，free_count、refcount 总和和 Block Table 引用数必须满足的关系；再设计一个“CUDA copy 成功但 host commit 前崩溃”的恢复策略。</div>
-<div class="quiz"><h3>主动回忆</h3><p>为什么 partial-tail sharing 比完整块共享更难？</p><button data-answer="false">因为 partial block 不能存放 K 张量</button><button data-answer="true">因为追加写可能修改所有共享者可见内容</button><button data-answer="false">因为 token 数必须始终是 block size 倍数</button><div class="feedback"></div><details><summary>解析</summary>难点是共享可变尾块的隔离，COW 将“共享读”转换为“独占写”。</details></div>
+<div class="quiz"><h3>主动回忆</h3><p>为什么 partial-tail sharing 比完整块共享更难？</p><button data-answer="false">尾块本身无法保存键张量</button><button data-answer="true">追加会修改全部共享内容</button><button data-answer="false">序列长度必须整除块大小</button><div class="feedback"></div><details><summary>解析</summary>难点是共享可变尾块的隔离，COW 将“共享读”转换为“独占写”。</details></div>
 <p class="source">主阅读：<a href="https://doi.org/10.1145/3600006.3613165">Kwon et al., PagedAttention, SOSP 2023</a>。</p>
 <nav class="nav"><a href="0002-serving-scheduling-and-metrics.html">← Serving 调度</a><a href="0004-cuda-kernels-streams-correctness.html">下一课：CUDA →</a></nav><p>如果你无法证明一次失败不会破坏 refcount，请把具体执行序列交给学习助手逐步检查。</p>
 </main></body></html>

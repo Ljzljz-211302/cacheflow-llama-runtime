@@ -1,0 +1,36 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>00A 一次聊天请求发生了什么</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/quiz.js"></script></head><body><main>
+<div class="kicker">Foundation 00A · 无前置要求 · 35 min</div><h1>从你输入一句话开始</h1><p class="lead">本节不假设你知道“大模型推理”。我们从一次聊天请求沿着电脑内部走一遍，先建立全项目的地图。</p>
+<h2>1. “大模型”是什么</h2><p><strong>模型（model）</strong>可以先理解为一个很大的数学函数：输入一串数字，输出“下一个符号分别有多可能”。模型在训练阶段从大量文本中调整内部数字；训练结束后，这些内部数字叫<strong>参数或权重</strong>。</p>
+<p><strong>大语言模型（Large Language Model，LLM）</strong>就是参数很多、主要处理语言的模型。“大”不是一个严格门槛；本项目运行的是 0.5B，即约 5 亿参数的小型 LLM，用它验证系统机制。</p>
+<div class="callout"><strong>推理（inference）</strong>：训练完成后，拿现有模型处理新输入并产生输出。项目做的是推理系统，不负责训练模型。</div>
+<h2>2. 文字为什么要变成 token</h2><p>电脑不能直接把汉字句子送进神经网络。<strong>分词器（tokenizer）</strong>先把文本拆成词、子词或字符片段，每个片段叫 <strong>token</strong>，再把它映射为整数编号。</p>
+<div class="diagram">你输入：“缓存为什么重要？”
+  ↓ tokenizer（具体切法由模型决定）
+["缓存", "为什么", "重要", "？"]
+  ↓ token id
+[18342, 4021, 998, 30]</div>
+<p>token 不是汉字，也不一定是完整单词。同一句可见文字因模型/模板不同可能得到不同 token 序列。因此项目做 prefix（公共开头）复用时必须比较 token，而不能只比较字符串。</p>
+<h2>3. 模型怎样回答</h2><p>模型每次根据“目前已有的全部 token”预测下一个 token。例如已有“天空是”，它可能给“蓝”的概率最高。选出一个 token 后，把它接到末尾，再预测下一个。这个“用过去生成未来”的过程叫<strong>自回归生成</strong>。</p>
+<div class="diagram">[用户输入 tokens] → 预测 token 1
+[输入 + token 1]    → 预测 token 2
+[输入 + token 1+2]  → 预测 token 3
+……直到结束标记或长度上限</div>
+<p>所以生成 100 个 token 至少有 100 个前后依赖的步骤。这就是输出阶段不能像普通矩阵计算那样一次把未来全部算完的根本原因。</p>
+<h2>4. “服务”比单独运行模型多了什么</h2><p><strong>服务器（server）</strong>不是专指一台昂贵机器，也可以是本机上持续运行、等待请求的程序。本项目的 <code>llama-server</code> 接收 HTTP 请求，管理多个用户，调用模型，然后把生成 token 持续返回。</p>
+<p><strong>LLM Serving</strong>就是让语言模型以服务形式稳定处理请求。它要解决：</p><ul><li>多个请求谁先算、能否一起算；</li><li>历史计算结果放在哪里、显存不够怎么办；</li><li>用户取消、超时或程序出错时怎样清理；</li><li>怎样在速度、延迟、内存和正确性之间取舍。</li></ul>
+<h2>5. CPU、GPU、内存和显存</h2><p><strong>CPU</strong>擅长复杂控制和少量强线程；<strong>GPU</strong>有大量较简单的执行单元，擅长对大量数据执行相似数学运算。普通内存通常由 CPU 使用，GPU 自己的高速内存常叫<strong>显存（VRAM）</strong>。</p>
+<p>模型权重和生成过程中保存的历史数据都占显存。显存只有 6GiB 时，管理“哪些数据常驻、哪些共享、哪些移出”就成为系统问题。</p>
+<h2>6. 本项目一句话地图</h2><div class="diagram">文字请求
+→ tokenizer 变 token
+→ Scheduler 决定本轮算哪些请求
+→ Engine 组织计划、执行和提交
+→ KV Manager 管理历史计算数据
+→ CUDA 在 GPU 上复制/整理数据
+→ 模型预测下一个 token
+→ server 把 token 流式返回用户</div>
+<p>后续课程中的所有名词都属于这条链。现在只需记住：<strong>模型负责“算什么”，推理系统负责“怎样让很多请求安全、高效地算”。</strong></p>
+<div class="task"><strong>零基础练习：</strong>不用术语，向家人解释“模型训练”和“模型推理”的区别；再解释为什么生成 100 个 token 不是一次完成。</div>
+<div class="quiz"><h3>检查理解</h3><p>本项目主要解决哪一类问题？</p><button data-answer="false">重新训练语言模型参数</button><button data-answer="true">组织模型在线推理服务</button><button data-answer="false">收集互联网训练语料库</button><div class="feedback"></div><details><summary>解析</summary>项目使用已训练模型，关注请求调度、KV 内存、CUDA 和服务实验。</details></div>
+<p class="source">延伸阅读：<a href="https://github.com/ggml-org/llama.cpp">llama.cpp 官方仓库</a>。暂时不用读代码，只观察它同时提供模型运行和 server 工具。</p>
+<nav class="nav"><span>零基础起点</span><a href="0000b-math-without-fear.html">下一课：数学符号怎么读 →</a></nav><p>任何词看不懂都应立即问学习助手；不要用继续阅读来掩盖概念缺口。</p>
+</main></body></html>

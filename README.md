@@ -127,7 +127,7 @@ models/ runtime/ build/          下载模型、工具链和本机构建产物�
 
 ## 面试演示主线
 
-系统学习入口：[推免面试课程](lessons/index.html)；配套的 [14 天学习路线](docs/interview-study-roadmap.md)、[术语表](reference/glossary.html)、[公式/代码地图](reference/formulas-and-code-map.html) 和 [25 道追问题库](reference/interview-question-bank.html)，从 Transformer/CUDA/机器学习前置基础一直覆盖到项目算法、实验和答辩训练。
+系统学习入口：[推免面试课程](lessons/index.html)；现已增加真正零基础的模型/数学/程序并发/GPU 四节桥接课。配套的 [18 天学习路线](docs/interview-study-roadmap.md)、[术语表](reference/glossary.html)、[公式/代码地图](reference/formulas-and-code-map.html) 和 [25 道追问题库](reference/interview-question-bank.html)，从输入一句话一直覆盖到项目算法、实验和答辩训练。
 
 三分钟版本：
 

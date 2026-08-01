@@ -1,0 +1,25 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>00D GPU 与 CUDA 从零</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/quiz.js"></script></head><body><main>
+<div class="kicker">Foundation 00D · GPU 桥接 · 50 min</div><h1>GPU、CUDA 和异步执行的第一张地图</h1><p class="lead">本节不写复杂 kernel，只解释 GPU 为什么适合模型、CUDA 程序由谁执行，以及 stream/event 到底是什么。</p>
+<h2>1. CPU 与 GPU 的分工</h2><p>CPU 核心较少但单核复杂，擅长分支、操作系统和任务控制；GPU 有大量相对简单的运算单元，适合对很多数据执行相似的乘加。语言模型的大矩阵运算能提供大量同类工作，所以通常交给 GPU。</p>
+<p>但 GPU 不是“任何代码都更快”。把任务送到 GPU、启动计算、搬运数据都有固定成本；任务太小、访问太乱或同步太多时，CPU/专用 memcpy 可能更好。</p>
+<h2>2. Host 与 Device</h2><p>CUDA 文档把 CPU 侧叫 <strong>Host</strong>，GPU 侧叫 <strong>Device</strong>。Host 程序分配显存、复制数据并启动 GPU 函数。运行在 GPU 上、被大量线程执行的函数叫 <strong>kernel（核函数）</strong>。</p>
+<div class="diagram">Host / CPU                      Device / GPU
+准备 mapping ── copy ─────────→ 显存中的 mapping
+启动 kernel ─────────────────→ 大量线程整理 KV
+等待/查询 event ←───────────── 记录完成位置
+发布新映射</div>
+<h2>3. Grid、Block、Thread</h2><p>一次 kernel 启动产生一个 <strong>grid</strong>；grid 分成多个 <strong>thread block</strong>；每个 block 有很多 <strong>thread</strong>。每个线程用自己的编号处理一个或几个元素。</p>
+<pre><code>i = blockIdx.x * blockDim.x + threadIdx.x;
+if (i &lt; n) output[i] = input[i];</code></pre>
+<p>最后一个 block 可能没有装满，所以必须检查 <code>i&lt;n</code>，否则线程会访问数组边界外的内存。</p>
+<h2>4. 显存、带宽和计算量</h2><p><strong>带宽</strong>表示单位时间能搬多少数据；<strong>计算吞吐</strong>表示单位时间能做多少运算。一个操作若每搬一个字节只做很少运算，容易受带宽限制；若复用数据做大量乘加，更可能受算力限制。</p>
+<p>项目的 KV gather/scatter 很像数据搬运，所以地址是否连续、复制次数和临时 buffer 很重要。Transformer 大矩阵乘则更能利用计算单元。</p>
+<h2>5. Stream 是命令队列</h2><p><strong>CUDA stream</strong>可以先理解为 GPU 命令队列。同一 stream 中，先提交的 copy/kernel 在后提交命令之前执行；不同 stream 可能重叠，也可能因资源不足不能重叠。正确性不能依赖“它们大概同时完成”。</p>
+<p>Host 启动 kernel 后通常立即返回，这叫<strong>异步</strong>。若 Host 需要知道 GPU 已执行到某处，可以在 stream 中放一个 <strong>event</strong>。Event 像队列中的里程碑，还可记录设备时间。</p>
+<h2>6. 同步为何既必要又昂贵</h2><p>没有同步，Host 可能读取未完成结果或过早释放内存；同步范围过大，又会让 CPU/GPU 和不同 stream 互相空等。好设计不是“完全不同步”，而是只在发布、复用和释放等正确性边界建立精确依赖。</p>
+<h2>7. CUDA 错误怎样检查</h2><p>越界可能不立即在 kernel 启动处报错，因为执行异步。项目使用 API 返回值检查、同步 smoke、canary、CPU 对照和 NVIDIA Compute Sanitizer。memcheck 主要查越界/未对齐等内存错误，racecheck 主要查 shared memory hazard；工具通过仍不代表所有并发逻辑正确。</p>
+<div class="task"><strong>画图练习：</strong>画 Host、stream A、stream B 三条线，表示 A 复制、记录 event，B 等 event 后恢复，Host 等恢复完成再释放 buffer。</div>
+<div class="quiz"><h3>检查理解</h3><p>CUDA stream 最接近哪种直觉？</p><button data-answer="true">按序提交设备命令的队列</button><button data-answer="false">保存模型文本的普通文件</button><button data-answer="false">自动训练参数的优化算法</button><div class="feedback"></div><details><summary>解析</summary>stream 表达一列有序 GPU 命令及其依赖，不是数据文件或学习算法。</details></div>
+<p class="source">主阅读：NVIDIA 官方 <a href="https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html">CUDA Programming Model</a>。只读 Host/Device、kernel、thread hierarchy 部分。</p>
+<nav class="nav"><a href="0000c-programs-memory-and-concurrency.html">← 程序和并发</a><a href="0001-transformer-inference-foundations.html">进入主课：Transformer 推理 →</a></nav><p>如果 thread/block/stream 混在一起，请让学习助手分别用“工人、班组、任务队列”类比，再指出类比限制。</p>
+</main></body></html>

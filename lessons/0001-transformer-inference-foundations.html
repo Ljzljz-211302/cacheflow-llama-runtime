@@ -1,19 +1,26 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>01 Transformer 推理基础</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/quiz.js"></script></head><body><main>
-<div class="kicker">Lesson 01 · 前置基础 · 45 min</div><h1>从 Attention 到 Prefill / Decode / KV Cache</h1><p class="lead">本节目标：不依赖项目术语，从 Transformer 数学推导出 serving 为什么需要 KV cache、为什么 prefill 与 decode 的性能特征不同。</p>
-<h2>1. 自回归模型到底在算什么</h2><p>语言模型把联合概率分解为 <code>P(x₁…xₙ)=∏P(xₜ|x&lt;t)</code>。生成第 <code>t</code> 个 token 时只能使用已有前缀，因此 decode 天生具有跨 token 的串行依赖；GPU 能并行的是“一次 forward 内的矩阵运算”和“多个 sequence 的同一步”，不能同时知道尚未生成的未来 token。</p>
-<p>每层先把 hidden state 投影为 Q、K、V：</p><div class="formula">Q=XW<sub>Q</sub>, K=XW<sub>K</sub>, V=XW<sub>V</sub><br>Attention(Q,K,V)=softmax(QKᵀ/√d<sub>k</sub>)V</div>
+<div class="kicker">Lesson 01 · 模型主课 · 55 min</div><h1>Transformer 怎样利用历史文字生成下一个 token</h1><p class="lead">00A 已把 token 定义为模型处理的文字片段。本节从“一个 token 怎样参考历史 token”开始，逐步得到 Attention、Prefill、Decode 和 KV Cache，不要求预先认识这些词。</p>
+<h2>0. Transformer 是什么</h2><p><strong>神经网络</strong>可以先理解为许多带参数的数学变换连接起来。<strong>Transformer</strong>是其中一种结构，它的关键能力是让序列中每个位置根据需要读取其他位置的信息。这个“决定应该关注哪些位置并加权汇总”的步骤叫 <strong>Attention（注意力）</strong>。</p>
+<p>token 的整数编号先被查表变成一串实数，叫<strong>向量表示（embedding）</strong>。经过网络层后，每个位置拥有一个包含上下文信息的向量，常称 <strong>hidden state（隐藏状态）</strong>。这里的“隐藏”只表示它是网络内部数值，不表示加密。</p>
+<h3>Q、K、V 的日常直觉</h3><ul><li><strong>Query（Q，查询）：</strong>当前位置想找什么信息；</li><li><strong>Key（K，键）：</strong>历史位置提供什么匹配标签；</li><li><strong>Value（V，值）：</strong>匹配后真正取回什么信息。</li></ul>
+<p>Q、K、V 都不是文字，而是由 hidden state 乘不同参数矩阵得到的向量。Q 与各 K 做点积得到相似分数，softmax 把分数变成总和为 1 的权重，再对 V 加权求和。</p>
+<h2>1. 自回归模型到底在算什么</h2><p><strong>自回归</strong>表示“用已经出现的 token 预测下一个 token”。概率公式 <code>P(x₁…xₙ)=∏P(xₜ|x&lt;t)</code> 的白话是：整段文本出现的可能性，可以拆成每一步“在此前内容条件下，下一个 token 出现的可能性”的乘积。</p>
+<p>生成第 <code>t</code> 个 token 时只能使用已有前缀。后文把“模型执行一次、为活跃请求推进一步”称为一次 <strong>forward（前向计算）</strong>。GPU 能并行一次 forward 内的大量矩阵运算，也能同时处理多个请求，但不能提前知道尚未生成的未来 token。</p>
+<p>数学写法如下；先读变量意义，再记公式：</p><div class="formula">Q=XW<sub>Q</sub>, K=XW<sub>K</sub>, V=XW<sub>V</sub><br>Attention(Q,K,V)=softmax(QKᵀ/√d<sub>k</sub>)V</div>
 <p>除以 <code>√dk</code> 是为了避免维度增大时点积方差过大，使 softmax 过早饱和。causal mask 把未来位置 score 设为负无穷，保证位置 <code>t</code> 不能偷看未来。</p>
-<h2>2. Prefill 和 Decode 为什么是两种 workload</h2>
-<table><thead><tr><th></th><th>Prefill</th><th>Decode</th></tr></thead><tbody><tr><td>输入</td><td>整个 prompt 的大量 token</td><td>每个活跃 sequence 通常 1 token</td></tr><tr><td>并行性</td><td>token 维度高，可形成大矩阵</td><td>跨时间串行，单轮矩阵较“瘦”</td></tr><tr><td>常见瓶颈</td><td>计算量、长迭代阻塞</td><td>KV 读取、内存带宽、launch/batch 效率</td></tr><tr><td>主要服务指标</td><td>TTFT</td><td>TPOT、吞吐、总 latency</td></tr></tbody></table>
+<h2>2. Prefill 和 Decode 是什么</h2><p>一次请求先有用户输入，再逐个产生回答。系统把这两个阶段分别命名：</p>
+<table><thead><tr><th></th><th>Prefill（输入预处理）</th><th>Decode（逐步生成）</th></tr></thead><tbody><tr><td>输入</td><td>一次处理用户输入 prompt（提示文本）的许多 token</td><td>每个活跃 sequence（生成序列）通常增加 1 token</td></tr><tr><td>并行性</td><td>token 维度高，可形成大矩阵</td><td>跨时间串行，单轮矩阵较“瘦”</td></tr><tr><td>常见瓶颈</td><td>计算量、长迭代阻塞</td><td>历史数据读取、显存带宽、启动/批处理效率</td></tr><tr><td>主要指标</td><td>TTFT：从请求到首个输出 token 的时间</td><td>TPOT：首 token 后每个输出 token 的平均间隔</td></tr></tbody></table>
 <p>如果一个 2000-token prefill 和正在 decode 的会话放进同一轮，GPU 利用率可能更高，但 decode 用户会等待一整个长迭代。这就是吞吐—延迟冲突，也是 chunked prefill 的动机。</p>
-<h2>3. KV Cache 推导</h2><p>生成新 token 时，新 query 仍需和所有历史 K/V 做 attention，但历史 token 的 K/V 投影没有变化。缓存它们可避免每步重算整个前缀。对 decoder-only、GQA 模型，粗略容量为：</p>
+<h2>3. KV Cache 推导</h2><p><strong>Cache（缓存）</strong>是保存之后还会复用的计算结果。生成新 token 时，新 Q 仍需和所有历史 K/V 做 attention，但历史 token 的 K/V 已经算过且不会变化。<strong>KV Cache</strong>就是把每层历史 K/V 保存在显存中，避免下一步重新计算整个历史。</p><p><strong>Decoder-only</strong>指只保留 Transformer 生成侧结构的语言模型；<strong>GQA（Grouped-Query Attention）</strong>让多组 Q 共享较少的 K/V heads（注意力头），以减少 KV 容量。粗略容量为：</p>
 <div class="formula">bytes = layers × tokens × 2(K,V) × kv_heads × head_dim × dtype_bytes × sequences</div>
+<p><code>layers</code> 是网络层数；<code>kv_heads</code> 是 K/V 注意力头数；<code>head_dim</code> 是每个头的向量维度；<code>dtype_bytes</code> 是每个数字占多少字节；<code>sequences</code> 是同时保存的生成序列数。公式中的 <code>2</code> 表示 K 与 V。</p>
 <p>例：24 层、4096 token、2 个 KV heads、head_dim=64、FP16、单 sequence：</p><div class="formula">24 × 4096 × 2 × 2 × 64 × 2 = 50,331,648 bytes ≈ 48 MiB</div>
+<p><strong>FP16</strong>表示每个浮点数使用 16 bit，也就是 2 bytes；<strong>MiB</strong>是按 1024×1024 bytes 计算的内存单位。</p>
 <p>注意：不能直接用参数量推 KV；KV 由层数、上下文、KV head 几何和精度决定。GQA/MQA 通过减少 KV heads 显著降低容量，但 query heads 不一定减少。</p>
 <div class="callout"><strong>项目连接：</strong>容量公式进入 <code>server-kv-capacity-planner.*</code>；Block runtime 管理的是这些随 token 增长的 KV，而不是模型权重。模型权重常驻和 KV 动态容量必须分开算。</div>
 <h2>4. 为什么小模型结果不能直接外推大模型</h2><p>模型变大后，权重读取、算力占用、KV 几何、batch 饱和点、kernel 数量都会改变。0.5B 在 RTX 4050 上看到的“某策略有害”，可以证明控制器需要门控，却不能证明 7B/A100 上方向相同。面试时应说“机制可迁移，数值结论需重跑”。</p>
-<div class="task"><strong>白板练习：</strong>给定 L=32、T=8192、Hkv=8、D=128、BF16、并发 4，先独立算 KV 容量；再说明若 block size=16，一个 sequence 需要多少逻辑块，最后一个 partial block 为什么会产生内部碎片。</div>
-<div class="quiz"><h3>主动回忆</h3><p>为什么 decode 有 KV cache 后仍会随上下文变慢？</p><button data-answer="false">因为历史 K/V 每步都会重新投影</button><button data-answer="true">因为新 query 仍需读取并关注历史 K/V</button><button data-answer="false">因为 causal mask 会重新训练模型参数</button><div class="feedback"></div><details><summary>解析</summary>KV cache 省掉历史 K/V 的投影重算，但没有省掉新 query 对历史 K/V 的读取和 attention。</details></div>
+<div class="task"><strong>白板练习：</strong>给定 layers=32、tokens=8192、kv_heads=8、head_dim=128、BF16（同样每个数 2 bytes）、同时 4 个生成序列，独立计算 KV 容量；再说明把 kv_heads 从 8 降到 2 后容量变成原来的几分之一。分块问题留到 Lesson 03。</div>
+<div class="quiz"><h3>主动回忆</h3><p>为什么 decode 有 KV cache 后仍会随上下文变慢？</p><button data-answer="false">历史向量每一步都重新投影</button><button data-answer="true">新查询仍读取全部历史向量</button><button data-answer="false">因果掩码每一步都重新训练</button><div class="feedback"></div><details><summary>解析</summary>KV cache 省掉历史 K/V 的投影重算，但没有省掉新 query 对历史 K/V 的读取和 attention。</details></div>
 <p class="source">主阅读：<a href="https://papers.neurips.cc/paper/7181-attention-is-all-you-need.pdf">Vaswani et al., Attention Is All You Need</a>。</p>
-<nav class="nav"><a href="../reference/glossary.html">← 术语表</a><a href="0002-serving-scheduling-and-metrics.html">下一课：Serving 调度 →</a></nav><p>有任何公式或概念不清楚，直接让你的学习助手换一种方式解释并现场出题。</p>
+<nav class="nav"><a href="0000d-gpu-from-zero.html">← GPU 桥接</a><a href="0002-serving-scheduling-and-metrics.html">下一课：Serving 调度 →</a></nav><p>有任何公式或概念不清楚，直接让你的学习助手换一种方式解释并现场出题。</p>
 </main></body></html>
