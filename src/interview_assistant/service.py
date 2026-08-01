@@ -57,4 +57,3 @@ class InterviewService:
             for index, citation in enumerate(citations, start=1)
         ]
         return "本轮检索资料：\n\n" + "\n\n".join(blocks)
-

@@ -119,4 +119,3 @@ class KnowledgeIndex:
             Citation(chunk.source, chunk.title, chunk.text[:360].replace("\n", " "), score)
             for score, chunk in ranked[:limit]
         ]
-

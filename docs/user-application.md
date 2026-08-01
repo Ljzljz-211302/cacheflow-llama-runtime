@@ -22,4 +22,3 @@ Browser -> Interview Assistant -> local retrieval -> llama-server /v1/chat/compl
 ```
 
 这条链路使 CacheFlow 的共享前缀、多轮 KV 复用、continuous batching、取消、背压和在线收益策略由实际应用请求触发，而不是只由实验脚本触发。
-

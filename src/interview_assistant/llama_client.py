@@ -58,4 +58,3 @@ class LlamaClient:
                             yield content
         except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
             raise LlamaUnavailable(f"model service unavailable: {exc}") from exc
-
