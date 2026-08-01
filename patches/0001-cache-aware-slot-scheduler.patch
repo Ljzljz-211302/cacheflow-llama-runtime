@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 9e7b125..6195e3f 100644
+index 9e7b1253c7264c63cf52a1ca3e58df81fc7f15a3..6195e3f0f9d1592ff06b1f157b596e117a9e9237 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -169,6 +169,14 @@ llama_option_depr(WARNING     LLAMA_SYCL_F16            GGML_SYCL_F16)
@@ -18,10 +18,10 @@ index 9e7b125..6195e3f 100644
  license_add_file("llama.cpp" "LICENSE")
  
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 8382c1d..0a711ab 100644
+index 8382c1d85dde4bdba0fca83a64644e2daf03a353..84c426f37528c0a52e924ad4f54a231a4a4c2f43 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -3256,6 +3256,222 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3256,6 +3256,246 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.slot_prompt_similarity = std::stof(value);
          }
      ).set_examples({LLAMA_EXAMPLE_SERVER}));
@@ -94,6 +94,30 @@ index 8382c1d..0a711ab 100644
 +        [](common_params & params, const std::string & value) {
 +            params.benefit_safety_margin_ms = std::stof(value);
 +            if (params.benefit_safety_margin_ms < 0.0f) throw std::invalid_argument("benefit safety margin must be non-negative");
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--benefit-drift-ratio"}, "RATIO",
++        "residual/prediction ratio required to count a mature-model drift sample",
++        [](common_params & params, const std::string & value) {
++            params.benefit_drift_ratio = std::stof(value);
++            if (params.benefit_drift_ratio <= 0.0f) throw std::invalid_argument("benefit drift ratio must be positive");
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--benefit-drift-consecutive"}, "N",
++        "consecutive severe residuals required before model reset",
++        [](common_params & params, int value) {
++            if (value <= 0) throw std::invalid_argument("benefit drift consecutive count must be positive");
++            params.benefit_drift_consecutive = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--benefit-cooldown-decisions"}, "N",
++        "upstream fallback decisions after a drift reset",
++        [](common_params & params, int value) {
++            if (value < 0) throw std::invalid_argument("benefit cooldown decisions must be non-negative");
++            params.benefit_cooldown_decisions = value;
 +        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
@@ -244,7 +268,7 @@ index 8382c1d..0a711ab 100644
      add_opt(common_arg(
          {"--lora-init-without-apply"},
          string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),
-@@ -3413,6 +3629,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3413,6 +3653,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
  
      //
      // speculative parameters
@@ -299,10 +323,10 @@ index 8382c1d..0a711ab 100644
  
      add_opt(common_arg(
 diff --git a/common/common.h b/common/common.h
-index 0b284cb..1d5b4b1 100644
+index 0b284cbb36c7d039a523e53b47bd63de097683af..1dde43e939aabea2e634676c3da933a4a79d4b8e 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -653,6 +653,30 @@ struct common_params {
+@@ -653,6 +653,33 @@ struct common_params {
      std::string media_path; // path to directory for loading media files
  
      float slot_prompt_similarity = 0.1f;
@@ -313,6 +337,9 @@ index 0b284cb..1d5b4b1 100644
 +    int32_t benefit_exploration_interval = 8;
 +    float benefit_confidence_beta = 1.0f;
 +    float benefit_safety_margin_ms = 0.25f;
++    float benefit_drift_ratio = 2.5f;
++    int32_t benefit_drift_consecutive = 3;
++    int32_t benefit_cooldown_decisions = 16;
 +    std::string spec_policy = "fixed";
 +    float slot_cache_eviction_penalty = 0.0f;
 +    int32_t prefill_chunk_size = 0;
@@ -334,7 +361,7 @@ index 0b284cb..1d5b4b1 100644
      // batched-bench params
      bool is_pp_shared   = false;
 diff --git a/include/llama.h b/include/llama.h
-index 27e4806..49eae1f 100644
+index 27e4806742821cad98ca0302ec0ac5b0a6a6f28e..49eae1f6499106d373c3a729360ca11cd5f57f4d 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -730,6 +730,35 @@ extern "C" {
@@ -374,7 +401,7 @@ index 27e4806..49eae1f 100644
      LLAMA_API void llama_memory_seq_keep(
              llama_memory_t mem,
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index d15ccfd..eb17aab 100644
+index d15ccfd99f143ef1365259f2ad013a6f9c2ff585..eb17aab06d3689e722395825ccd9b8ada201ab28 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -54,6 +54,13 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
@@ -392,7 +419,7 @@ index d15ccfd..eb17aab 100644
      set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
      target_compile_definitions(llama PRIVATE LLAMA_BUILD)
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 168dbab..24b25ec 100644
+index 168dbabd76678cb8f66086147373c919daa13b10..24b25ecba9ca12800386aa1a45e1c9b3dbf77027 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -3849,6 +3849,31 @@ void llama_memory_seq_cp(
@@ -429,7 +456,7 @@ index 168dbab..24b25ec 100644
            llama_seq_id seq_id) {
 diff --git a/src/llama-kv-cache-paged.cu b/src/llama-kv-cache-paged.cu
 new file mode 100644
-index 0000000..20111ef
+index 0000000000000000000000000000000000000000..20111ef6f6b65680f66df663ce98fefbf1409760
 --- /dev/null
 +++ b/src/llama-kv-cache-paged.cu
 @@ -0,0 +1,396 @@
@@ -830,7 +857,7 @@ index 0000000..20111ef
 +    return success;
 +}
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 2802103..c74d73f 100644
+index 2802103bdd82ccb80547e18f456469c9970619df..c74d73f643d6d9c25a30dc006a8e7c1de31b22be 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
 @@ -376,6 +376,63 @@ llama_kv_cache::llama_kv_cache(
@@ -971,7 +998,7 @@ index 2802103..c74d73f 100644
          if (!get_can_shift()) {
              GGML_ABORT("The current KV cache / model configuration does not support K-shift");
 diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
-index 3d68f98..757fa0b 100644
+index 3d68f98c1424d77fbba0090813c872766b3e951c..757fa0b1a68a52d7d0f1cbc345551bd21fd26939 100644
 --- a/src/llama-kv-cache.h
 +++ b/src/llama-kv-cache.h
 @@ -22,11 +22,13 @@ public:
@@ -1040,7 +1067,7 @@ index 3d68f98..757fa0b 100644
      const llama_hparams & hparams;
  
 diff --git a/src/llama-memory.h b/src/llama-memory.h
-index db82539..e749164 100644
+index db825396645e61c94213ca1e94b78d71d1538d67..e749164ddeac0cd9741e9377b6de2765ff61a7a6 100644
 --- a/src/llama-memory.h
 +++ b/src/llama-memory.h
 @@ -116,6 +116,15 @@ struct llama_memory_i {
@@ -1060,7 +1087,7 @@ index db82539..e749164 100644
  
      //
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index e284a58..e97f439 100644
+index e284a58d1c67425382dcdb932e7f5663aa716484..e97f439ab3796ff0a0cd2a241b17bde90a77c581 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
 @@ -116,6 +116,116 @@ function(llama_build_and_test source)
@@ -1182,7 +1209,7 @@ index e284a58..e97f439 100644
  
 diff --git a/tests/bench-kv-block-cuda.cu b/tests/bench-kv-block-cuda.cu
 new file mode 100644
-index 0000000..8c25a56
+index 0000000000000000000000000000000000000000..8c25a567361e8e81aa9f9e9913e24d6e816f124e
 --- /dev/null
 +++ b/tests/bench-kv-block-cuda.cu
 @@ -0,0 +1,176 @@
@@ -1364,7 +1391,7 @@ index 0000000..8c25a56
 +}
 diff --git a/tests/bench-kv-cow-cuda.cpp b/tests/bench-kv-cow-cuda.cpp
 new file mode 100644
-index 0000000..3af8e59
+index 0000000000000000000000000000000000000000..3af8e590d6f0182def3f13e6520c220288880129
 --- /dev/null
 +++ b/tests/bench-kv-cow-cuda.cpp
 @@ -0,0 +1,64 @@
@@ -1434,10 +1461,10 @@ index 0000000..3af8e59
 +}
 diff --git a/tests/test-benefit-policy.cpp b/tests/test-benefit-policy.cpp
 new file mode 100644
-index 0000000..c103f98
+index 0000000000000000000000000000000000000000..46dabda5746985a7f8586fcd54bd2000ac13fe30
 --- /dev/null
 +++ b/tests/test-benefit-policy.cpp
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,141 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -1503,6 +1530,9 @@ index 0000000..c103f98
 +    assert(learned.action == server_benefit_action::cacheflow);
 +    assert(learned.reason == server_benefit_reason::positive_lower_bound);
 +    assert(learned.predicted_benefit_ms > learned.uncertainty_ms);
++    const auto converged = policy.snapshot(server_benefit_backend::cpu);
++    assert(converged.last_predicted_benefit_ms == learned.predicted_benefit_ms);
++    assert(converged.last_uncertainty_ms == learned.uncertainty_ms);
 +
 +    // Inconclusive evidence triggers only a finite number of sparse probes.
 +    auto ambiguous_config = config;
@@ -1578,7 +1608,7 @@ index 0000000..c103f98
 +}
 diff --git a/tests/test-inference-engine.cpp b/tests/test-inference-engine.cpp
 new file mode 100644
-index 0000000..9ba8b55
+index 0000000000000000000000000000000000000000..9ba8b55d5bd814a576e670432d015e10c8760138
 --- /dev/null
 +++ b/tests/test-inference-engine.cpp
 @@ -0,0 +1,93 @@
@@ -1677,7 +1707,7 @@ index 0000000..9ba8b55
 +}
 diff --git a/tests/test-inference-iteration.cpp b/tests/test-inference-iteration.cpp
 new file mode 100644
-index 0000000..298af36
+index 0000000000000000000000000000000000000000..298af3654257ea5d17527b082629e93b24a96b1e
 --- /dev/null
 +++ b/tests/test-inference-iteration.cpp
 @@ -0,0 +1,36 @@
@@ -1719,7 +1749,7 @@ index 0000000..298af36
 +}
 diff --git a/tests/test-inference-scheduler.cpp b/tests/test-inference-scheduler.cpp
 new file mode 100644
-index 0000000..dd36bec
+index 0000000000000000000000000000000000000000..dd36becbf9db64d37adaf5114b3025a1432d28ce
 --- /dev/null
 +++ b/tests/test-inference-scheduler.cpp
 @@ -0,0 +1,130 @@
@@ -1855,7 +1885,7 @@ index 0000000..dd36bec
 +}
 diff --git a/tests/test-kv-block-backend.cpp b/tests/test-kv-block-backend.cpp
 new file mode 100644
-index 0000000..e1bfb1b
+index 0000000000000000000000000000000000000000..e1bfb1b78013c1aa4a1dcd1a26af0c4b4cb5fbc4
 --- /dev/null
 +++ b/tests/test-kv-block-backend.cpp
 @@ -0,0 +1,95 @@
@@ -1956,7 +1986,7 @@ index 0000000..e1bfb1b
 +}
 diff --git a/tests/test-kv-block-cuda.cpp b/tests/test-kv-block-cuda.cpp
 new file mode 100644
-index 0000000..914774f
+index 0000000000000000000000000000000000000000..914774fd136da5f0468cf5c7e1bc4386c43b87ad
 --- /dev/null
 +++ b/tests/test-kv-block-cuda.cpp
 @@ -0,0 +1,162 @@
@@ -2124,7 +2154,7 @@ index 0000000..914774f
 +}
 diff --git a/tests/test-kv-block-manager.cpp b/tests/test-kv-block-manager.cpp
 new file mode 100644
-index 0000000..076f747
+index 0000000000000000000000000000000000000000..076f74783446ce1e57f42d5e4cf3948fad4ec933
 --- /dev/null
 +++ b/tests/test-kv-block-manager.cpp
 @@ -0,0 +1,168 @@
@@ -2298,7 +2328,7 @@ index 0000000..076f747
 +}
 diff --git a/tests/test-kv-capacity-planner.cpp b/tests/test-kv-capacity-planner.cpp
 new file mode 100644
-index 0000000..acabcd2
+index 0000000000000000000000000000000000000000..acabcd20cd800ffc0e7d4c99692dfbd3dd3d6615
 --- /dev/null
 +++ b/tests/test-kv-capacity-planner.cpp
 @@ -0,0 +1,44 @@
@@ -2348,7 +2378,7 @@ index 0000000..acabcd2
 +}
 diff --git a/tests/test-kv-real-cuda-swap.cpp b/tests/test-kv-real-cuda-swap.cpp
 new file mode 100644
-index 0000000..b448bf4
+index 0000000000000000000000000000000000000000..b448bf4cc186ded3b3fcff49945e5faa4b93f185
 --- /dev/null
 +++ b/tests/test-kv-real-cuda-swap.cpp
 @@ -0,0 +1,93 @@
@@ -2447,7 +2477,7 @@ index 0000000..b448bf4
 +}
 diff --git a/tests/test-kv-runtime.cpp b/tests/test-kv-runtime.cpp
 new file mode 100644
-index 0000000..46a6ddb
+index 0000000000000000000000000000000000000000..46a6ddb65520ad536790b2f6723c3f1275694c82
 --- /dev/null
 +++ b/tests/test-kv-runtime.cpp
 @@ -0,0 +1,100 @@
@@ -2553,7 +2583,7 @@ index 0000000..46a6ddb
 +}
 diff --git a/tests/test-kv-swap-store.cpp b/tests/test-kv-swap-store.cpp
 new file mode 100644
-index 0000000..efec1ba
+index 0000000000000000000000000000000000000000..efec1ba0ab8471c94c0c7ada846c20e72aefbd13
 --- /dev/null
 +++ b/tests/test-kv-swap-store.cpp
 @@ -0,0 +1,97 @@
@@ -2656,7 +2686,7 @@ index 0000000..efec1ba
 +}
 diff --git a/tests/test-model-cost-model.cpp b/tests/test-model-cost-model.cpp
 new file mode 100644
-index 0000000..1a944de
+index 0000000000000000000000000000000000000000..1a944debde91b26edd7442f1afeb6ee10695b9e3
 --- /dev/null
 +++ b/tests/test-model-cost-model.cpp
 @@ -0,0 +1,28 @@
@@ -2690,7 +2720,7 @@ index 0000000..1a944de
 +}
 diff --git a/tests/test-runtime-adapter.cpp b/tests/test-runtime-adapter.cpp
 new file mode 100644
-index 0000000..383e0c5
+index 0000000000000000000000000000000000000000..383e0c5bf6b2062ddf3ca33ca95bc70b4883dca3
 --- /dev/null
 +++ b/tests/test-runtime-adapter.cpp
 @@ -0,0 +1,25 @@
@@ -2721,7 +2751,7 @@ index 0000000..383e0c5
 +}
 diff --git a/tests/test-speculation-controller.cpp b/tests/test-speculation-controller.cpp
 new file mode 100644
-index 0000000..297ccfe
+index 0000000000000000000000000000000000000000..297ccfe6640353ad75d7091a8f88689ec6f1d55b
 --- /dev/null
 +++ b/tests/test-speculation-controller.cpp
 @@ -0,0 +1,61 @@
@@ -2787,7 +2817,7 @@ index 0000000..297ccfe
 +    return 0;
 +}
 diff --git a/tools/server/CMakeLists.txt b/tools/server/CMakeLists.txt
-index 7d42743..62b13db 100644
+index 7d427431db936358731fdd27fce147aa929416fb..62b13dbbce26b7435e7447264f554667747de7fc 100644
 --- a/tools/server/CMakeLists.txt
 +++ b/tools/server/CMakeLists.txt
 @@ -11,6 +11,30 @@ add_library(${TARGET} STATIC
@@ -2836,10 +2866,10 @@ index 7d42743..62b13db 100644
  set(TARGET llama-server-impl)
 diff --git a/tools/server/server-benefit-policy.cpp b/tools/server/server-benefit-policy.cpp
 new file mode 100644
-index 0000000..44e9b43
+index 0000000000000000000000000000000000000000..aa009065773815599681aa32c6aac15d8ed60d4b
 --- /dev/null
 +++ b/tools/server/server-benefit-policy.cpp
-@@ -0,0 +1,291 @@
+@@ -0,0 +1,295 @@
 +#include "server-benefit-policy.h"
 +
 +#include <algorithm>
@@ -3053,6 +3083,8 @@ index 0000000..44e9b43
 +    const double cacheflow_radius = backend.cacheflow.radius(decision.model_features, config_.confidence_beta);
 +    decision.predicted_benefit_ms = upstream_cost - cacheflow_cost;
 +    decision.uncertainty_ms = upstream_radius + cacheflow_radius + config_.safety_margin_ms;
++    backend.last_predicted_benefit_ms = decision.predicted_benefit_ms;
++    backend.last_uncertainty_ms = decision.uncertainty_ms;
 +    const bool proven = cacheflow_cost + cacheflow_radius + config_.safety_margin_ms <
 +            std::max(0.0, upstream_cost - upstream_radius);
 +    if (proven) {
@@ -3129,14 +3161,16 @@ index 0000000..44e9b43
 +        backend.cooldown_remaining,
 +        backend.upstream.predict(reference),
 +        backend.cacheflow.predict(reference),
++        backend.last_predicted_benefit_ms,
++        backend.last_uncertainty_ms,
 +    };
 +}
 diff --git a/tools/server/server-benefit-policy.h b/tools/server/server-benefit-policy.h
 new file mode 100644
-index 0000000..f3c0b54
+index 0000000000000000000000000000000000000000..40fc2fb8b8303f2084a651172a94f35193b89212
 --- /dev/null
 +++ b/tools/server/server-benefit-policy.h
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,145 @@
 +#pragma once
 +
 +#include <array>
@@ -3224,6 +3258,8 @@ index 0000000..f3c0b54
 +    size_t cooldown_remaining = 0;
 +    double upstream_cost_ms = 0.0;
 +    double cacheflow_cost_ms = 0.0;
++    double last_predicted_benefit_ms = 0.0;
++    double last_uncertainty_ms = 0.0;
 +};
 +
 +// Conservative contextual policy for the production scheduling seam. It owns
@@ -3267,6 +3303,8 @@ index 0000000..f3c0b54
 +        size_t cacheflow_bad_residuals = 0;
 +        size_t cooldown_remaining = 0;
 +        uint64_t decisions_since_probe = 0;
++        double last_predicted_benefit_ms = 0.0;
++        double last_uncertainty_ms = 0.0;
 +    };
 +
 +    server_benefit_config config_;
@@ -3279,7 +3317,7 @@ index 0000000..f3c0b54
 +    std::array<double, feature_count> normalize(const server_benefit_features & features) const;
 +};
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..698a61a 100644
+index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b1b350aa3 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -4,6 +4,14 @@
@@ -3499,7 +3537,7 @@ index 986b2f1..698a61a 100644
  
          std::string & mmproj_path = params_base.mmproj.path;
          bool has_mmproj = !mmproj_path.empty();
-@@ -1114,8 +1202,79 @@ private:
+@@ -1114,8 +1202,82 @@ private:
  
          n_swa = params_base.swa_full ? 0 : llama_model_n_swa(model_tgt);
  
@@ -3525,6 +3563,9 @@ index 986b2f1..698a61a 100644
 +        benefit_config.exploration_interval = (size_t) params_base.benefit_exploration_interval;
 +        benefit_config.confidence_beta = params_base.benefit_confidence_beta;
 +        benefit_config.safety_margin_ms = params_base.benefit_safety_margin_ms;
++        benefit_config.drift_ratio = params_base.benefit_drift_ratio;
++        benefit_config.drift_consecutive_limit = (size_t) params_base.benefit_drift_consecutive;
++        benefit_config.cooldown_decisions = (size_t) params_base.benefit_cooldown_decisions;
 +        benefit_config.target_iteration_ms = params_base.prefill_target_iteration_ms;
 +        inference_engine.benefit_policy().configure(benefit_config);
 +        SRV_INF("CacheFlow policies: scheduler=%s, prefill=%s, benefit=%s, speculation=%s, kv_blocks=%s\n",
@@ -3581,7 +3622,7 @@ index 986b2f1..698a61a 100644
  
          // setup slots
          SRV_INF("initializing slots, n_slots = %d\n", params_base.n_parallel);
-@@ -1178,6 +1337,9 @@ private:
+@@ -1178,6 +1340,9 @@ private:
              SLT_INF(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
  
              slot.callback_on_release = [this](int id_slot) {
@@ -3591,7 +3632,7 @@ index 986b2f1..698a61a 100644
                  queue_tasks.pop_deferred_task(id_slot);
              };
  
-@@ -1383,9 +1545,10 @@ private:
+@@ -1383,9 +1548,10 @@ private:
  
          bool update_cache = false;
  
@@ -3605,7 +3646,7 @@ index 986b2f1..698a61a 100644
  
              for (server_slot & slot : slots) {
                  // skip the slot if it is not available
-@@ -1393,29 +1556,41 @@ private:
+@@ -1393,29 +1559,41 @@ private:
                      continue;
                  }
  
@@ -3667,7 +3708,7 @@ index 986b2f1..698a61a 100644
  
                  // if we are about to lose a large portion of the existing context - save it in the prompt cache
                  if (f_keep < 0.5f) {
-@@ -1443,12 +1618,16 @@ private:
+@@ -1443,12 +1621,16 @@ private:
  
              if (ret != nullptr) {
                  SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
@@ -3684,7 +3725,7 @@ index 986b2f1..698a61a 100644
              update_cache = update_cache && prompt_cache;
  
              // cache prompts only for completion tasks
-@@ -1469,41 +1648,114 @@ private:
+@@ -1469,41 +1651,114 @@ private:
  
                  SRV_INF("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
              }
@@ -3820,7 +3861,7 @@ index 986b2f1..698a61a 100644
      }
  
      std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
-@@ -1519,7 +1771,234 @@ private:
+@@ -1519,7 +1774,234 @@ private:
          return output;
      }
  
@@ -4055,7 +4096,7 @@ index 986b2f1..698a61a 100644
          // process per-request lora adapters
          if (!task.params.lora.empty()) {
              auto task_loras = construct_lora_list(task.params.lora);
-@@ -1590,6 +2069,8 @@ private:
+@@ -1590,6 +2072,8 @@ private:
              return false;
          }
  
@@ -4064,7 +4105,7 @@ index 986b2f1..698a61a 100644
          SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
  
          // initialize samplers
-@@ -1629,9 +2110,10 @@ private:
+@@ -1629,9 +2113,10 @@ private:
  
          slot.task = std::make_unique<const server_task>(std::move(task));
  
@@ -4076,7 +4117,7 @@ index 986b2f1..698a61a 100644
  
          // reset server kill-switch counter
          n_empty_consecutive = 0;
-@@ -1966,6 +2448,7 @@ private:
+@@ -1966,6 +2451,7 @@ private:
  
          res->generation_params = slot.task->params; // copy the parameters
  
@@ -4084,7 +4125,7 @@ index 986b2f1..698a61a 100644
          queue_results.send(std::move(res));
      }
  
-@@ -2214,12 +2697,14 @@ private:
+@@ -2214,12 +2700,14 @@ private:
                              if (!slot.is_processing()) {
                                  SLT_INF(slot, "%s", "saving idle slot to prompt cache\n");
  
@@ -4101,7 +4142,7 @@ index 986b2f1..698a61a 100644
                                      // [TAG_IDLE_SLOT_CLEAR]
                                      slot.prompt_clear(false);
                                  }
-@@ -2301,6 +2786,7 @@ private:
+@@ -2301,6 +2789,7 @@ private:
                      res->t_start             = metrics.t_start;
  
                      res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
@@ -4109,7 +4150,7 @@ index 986b2f1..698a61a 100644
                      res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
                      res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
                      res->t_tokens_generation_total       = metrics.t_tokens_generation_total;
-@@ -2308,12 +2794,98 @@ private:
+@@ -2308,12 +2797,98 @@ private:
                      res->n_tokens_max = metrics.n_tokens_max;
  
                      res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
@@ -4208,7 +4249,7 @@ index 986b2f1..698a61a 100644
  
                      if (task.metrics_reset_bucket) {
                          metrics.reset_bucket();
-@@ -2479,7 +3051,7 @@ private:
+@@ -2479,7 +3054,7 @@ private:
          }
      }
  
@@ -4217,7 +4258,7 @@ index 986b2f1..698a61a 100644
          // check if all slots are idle
          {
              bool all_idle = true;
-@@ -2494,7 +3066,7 @@ private:
+@@ -2494,7 +3069,7 @@ private:
              if (all_idle) {
                  SRV_INF("%s", "all slots are idle\n");
  
@@ -4226,7 +4267,7 @@ index 986b2f1..698a61a 100644
              }
          }
  
-@@ -2509,7 +3081,7 @@ private:
+@@ -2509,7 +3084,7 @@ private:
          // apply context-shift if needed
          // TODO: simplify and improve
          for (server_slot & slot : slots) {
@@ -4235,7 +4276,7 @@ index 986b2f1..698a61a 100644
                  if (!params_base.ctx_shift) {
                      // this check is redundant (for good)
                      // we should never get here, because generation should already stopped in process_token()
-@@ -2572,6 +3144,10 @@ private:
+@@ -2572,6 +3147,10 @@ private:
              }
          }
  
@@ -4246,7 +4287,7 @@ index 986b2f1..698a61a 100644
          // start populating the batch for this iteration
          common_batch_clear(batch);
  
-@@ -2583,7 +3159,7 @@ private:
+@@ -2583,7 +3162,7 @@ private:
  
          // determine which slots are generating and drafting
          for (auto & slot : slots) {
@@ -4255,7 +4296,7 @@ index 986b2f1..698a61a 100644
                  continue;
              }
  
-@@ -2602,7 +3178,9 @@ private:
+@@ -2602,7 +3181,9 @@ private:
                  const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                  const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
  
@@ -4266,7 +4307,7 @@ index 986b2f1..698a61a 100644
  
                  if (n_draft_max > 0) {
                      GGML_ASSERT(slot.can_speculate());
-@@ -2643,7 +3221,12 @@ private:
+@@ -2643,7 +3224,12 @@ private:
  
          // generate the actual drafts (if any)
          {
@@ -4279,7 +4320,7 @@ index 986b2f1..698a61a 100644
          }
  
          // make checkpoints if needed
-@@ -2705,6 +3288,91 @@ private:
+@@ -2705,6 +3291,91 @@ private:
          int32_t n_batch  = llama_n_batch(ctx_tgt);
          int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
  
@@ -4371,7 +4412,7 @@ index 986b2f1..698a61a 100644
          float  alora_scale       = -1.0f;
          size_t alora_disabled_id = 0;
  
-@@ -2721,24 +3389,33 @@ private:
+@@ -2721,24 +3392,33 @@ private:
                  }
  
                  // check if this is a child slot
@@ -4409,7 +4450,7 @@ index 986b2f1..698a61a 100644
  
                          SLT_TRC(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
                                  slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
-@@ -3110,7 +3787,9 @@ private:
+@@ -3110,7 +3790,9 @@ private:
                      const bool n_before_user_known = n_before_user > 0;
  
                      // add prompt tokens for processing in the current batch
@@ -4420,7 +4461,7 @@ index 986b2f1..698a61a 100644
                          // get next token to process
                          llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                          if (cur_tok == LLAMA_TOKEN_NULL) {
-@@ -3173,7 +3852,8 @@ private:
+@@ -3173,7 +3855,8 @@ private:
  
                      // entire prompt has been processed
                      if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
@@ -4430,7 +4471,7 @@ index 986b2f1..698a61a 100644
  
                          GGML_ASSERT(batch.n_tokens > 0);
  
-@@ -3249,6 +3929,13 @@ private:
+@@ -3249,6 +3932,13 @@ private:
  
          SRV_DBG("decoding batch, n_tokens = %d\n", batch.n_tokens);
  
@@ -4444,7 +4485,7 @@ index 986b2f1..698a61a 100644
          auto accept_special_token = [&](server_slot & slot, llama_token token) {
              return params_base.special ||
                  slot.task->params.sampling.preserved_tokens.find(token) != slot.task->params.sampling.preserved_tokens.end();
-@@ -3294,7 +3981,8 @@ private:
+@@ -3294,7 +3984,8 @@ private:
                  batch.logits   + i,
              };
  
@@ -4454,7 +4495,7 @@ index 986b2f1..698a61a 100644
  
              metrics.on_decoded(slots);
  
-@@ -3320,6 +4008,7 @@ private:
+@@ -3320,6 +4011,7 @@ private:
                      // TODO: handle ret == 2 (abort) when we start aborting
  
                      if (!err.empty()) {
@@ -4462,7 +4503,7 @@ index 986b2f1..698a61a 100644
                          SRV_ERR("%s i = %d, n_batch = %d, ret = %d\n", err.c_str(), i, n_batch, ret);
  
                          for (auto & slot : slots) {
-@@ -3394,6 +4083,7 @@ private:
+@@ -3394,6 +4086,7 @@ private:
              //}
              if (!common_speculative_process(spec.get(), batch_view)) {
                  SRV_ERR("%s", "failed to process speculative batch\n");
@@ -4470,7 +4511,7 @@ index 986b2f1..698a61a 100644
  
                  // TODO: handle error
                  break;
-@@ -3407,10 +4097,11 @@ private:
+@@ -3407,10 +4100,11 @@ private:
  
              // handle `n_cmpl > 1` tasks - when the main prompt is processed, activate all child tasks too
              for (auto & slot : slots) {
@@ -4484,7 +4525,7 @@ index 986b2f1..698a61a 100644
                              children.push_back(&other);
                          }
                      }
-@@ -3420,17 +4111,19 @@ private:
+@@ -3420,17 +4114,19 @@ private:
                      for (auto & child : children) {
                          SLT_INF(slot, " - copying state to child %d\n", child->id);
  
@@ -4507,7 +4548,7 @@ index 986b2f1..698a61a 100644
                      if (slot.task->params.stream && slot.task->params.return_progress) {
                          send_partial_response(slot, {}, true);
                      }
-@@ -3440,7 +4133,7 @@ private:
+@@ -3440,7 +4136,7 @@ private:
                      continue; // continue loop of slots
                  }
  
@@ -4516,7 +4557,7 @@ index 986b2f1..698a61a 100644
                      if (slot.task->type == SERVER_TASK_TYPE_EMBEDDING) {
                          // prompt evaluated for embedding
                          send_embedding(slot, batch_view);
-@@ -3459,12 +4152,12 @@ private:
+@@ -3459,12 +4155,12 @@ private:
                      GGML_ASSERT(slot.task->need_sampling());
  
                      // prompt evaluated for next-token prediction
@@ -4531,7 +4572,7 @@ index 986b2f1..698a61a 100644
                      continue; // continue loop of slots
                  }
  
-@@ -3517,7 +4210,8 @@ private:
+@@ -3517,7 +4213,8 @@ private:
  
              // speculative decoding - main model sample and accept
              for (auto & slot : slots) {
@@ -4541,7 +4582,7 @@ index 986b2f1..698a61a 100644
                      continue;
                  }
  
-@@ -3593,6 +4287,13 @@ private:
+@@ -3593,6 +4290,13 @@ private:
  
                  // update how many tokens out of those tested were accepted
                  slot.n_draft_accepted += ids.size() - 1;
@@ -4555,7 +4596,7 @@ index 986b2f1..698a61a 100644
  
                  // add accepted tokens to the prompt
                  slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - n_draft);
-@@ -3631,11 +4332,51 @@ private:
+@@ -3631,11 +4335,51 @@ private:
  
                  SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) ids.size() - 1, (int) n_draft, slot.prompt.n_tokens());
              }
@@ -4607,7 +4648,7 @@ index 986b2f1..698a61a 100644
      int get_slot_n_ctx() {
          return slots.back().n_ctx;
      }
-@@ -4127,6 +4868,151 @@ void server_routes::init_routes() {
+@@ -4127,6 +4871,151 @@ void server_routes::init_routes() {
                      {"name",  "prompt_tokens_total"},
                      {"help",  "Number of prompt tokens processed."},
                      {"value",  (uint64_t) res_task->n_prompt_tokens_processed_total}
@@ -4759,7 +4800,7 @@ index 986b2f1..698a61a 100644
              }, {
                      {"name",  "prompt_seconds_total"},
                      {"help",  "Prompt process time"},
-@@ -4149,6 +5035,18 @@ void server_routes::init_routes() {
+@@ -4149,6 +5038,18 @@ void server_routes::init_routes() {
                      {"value",  res_task->n_tokens_max}
              }}},
              {"gauge", {{
@@ -4778,7 +4819,7 @@ index 986b2f1..698a61a 100644
                      {"name",  "prompt_tokens_seconds"},
                      {"help",  "Average prompt throughput in tokens/s."},
                      {"value",  res_task->n_prompt_tokens_processed ? 1.e3 / res_task->t_prompt_processing * res_task->n_prompt_tokens_processed : 0.}
-@@ -4156,6 +5054,115 @@ void server_routes::init_routes() {
+@@ -4156,6 +5057,115 @@ void server_routes::init_routes() {
                      {"name",  "predicted_tokens_seconds"},
                      {"help",  "Average generation throughput in tokens/s."},
                      {"value",  res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}
@@ -4894,7 +4935,7 @@ index 986b2f1..698a61a 100644
              },{
                      {"name",  "requests_processing"},
                      {"help",  "Number of requests processing."},
-@@ -4188,6 +5195,80 @@ void server_routes::init_routes() {
+@@ -4188,6 +5198,88 @@ void server_routes::init_routes() {
              }
          }
  
@@ -4921,7 +4962,11 @@ index 986b2f1..698a61a 100644
 +                       << "llamacpp:benefit_drift_total{backend=\"" << backend << "\"} "
 +                       << value.drift_events << "\n"
 +                       << "llamacpp:benefit_cooldown_remaining{backend=\"" << backend << "\"} "
-+                       << value.cooldown_remaining << "\n";
++                       << value.cooldown_remaining << "\n"
++                       << "llamacpp:benefit_predicted_benefit_ms{backend=\"" << backend << "\"} "
++                       << value.last_predicted_benefit_ms << "\n"
++                       << "llamacpp:benefit_uncertainty_ms{backend=\"" << backend << "\"} "
++                       << value.last_uncertainty_ms << "\n";
 +        };
 +        prometheus << "# HELP llamacpp:benefit_decisions_total Conservative benefit-policy decisions.\n"
 +                   << "# TYPE llamacpp:benefit_decisions_total counter\n"
@@ -4936,7 +4981,11 @@ index 986b2f1..698a61a 100644
 +                   << "# HELP llamacpp:benefit_drift_total Model-drift cooldown entries.\n"
 +                   << "# TYPE llamacpp:benefit_drift_total counter\n"
 +                   << "# HELP llamacpp:benefit_cooldown_remaining Remaining safe-mode decisions.\n"
-+                   << "# TYPE llamacpp:benefit_cooldown_remaining gauge\n";
++                   << "# TYPE llamacpp:benefit_cooldown_remaining gauge\n"
++                   << "# HELP llamacpp:benefit_predicted_benefit_ms Last contextual upstream minus CacheFlow predicted cost.\n"
++                   << "# TYPE llamacpp:benefit_predicted_benefit_ms gauge\n"
++                   << "# HELP llamacpp:benefit_uncertainty_ms Last joint confidence radius and safety margin.\n"
++                   << "# TYPE llamacpp:benefit_uncertainty_ms gauge\n";
 +        append_benefit("cpu", res_task->benefit_cpu);
 +        append_benefit("cuda", res_task->benefit_cuda);
 +
@@ -4977,7 +5026,7 @@ index 986b2f1..698a61a 100644
          res->status = 200;
 diff --git a/tools/server/server-inference-engine.cpp b/tools/server/server-inference-engine.cpp
 new file mode 100644
-index 0000000..0314591
+index 0000000000000000000000000000000000000000..0314591633a07035aa7c26817a78b0e8791d7c5a
 --- /dev/null
 +++ b/tools/server/server-inference-engine.cpp
 @@ -0,0 +1,98 @@
@@ -5081,7 +5130,7 @@ index 0000000..0314591
 +}
 diff --git a/tools/server/server-inference-engine.h b/tools/server/server-inference-engine.h
 new file mode 100644
-index 0000000..cbfd759
+index 0000000000000000000000000000000000000000..cbfd7595391d43962aa336bd0733a4d70ab2937b
 --- /dev/null
 +++ b/tools/server/server-inference-engine.h
 @@ -0,0 +1,159 @@
@@ -5246,7 +5295,7 @@ index 0000000..cbfd759
 +};
 diff --git a/tools/server/server-inference-iteration.cpp b/tools/server/server-inference-iteration.cpp
 new file mode 100644
-index 0000000..28e2b6b
+index 0000000000000000000000000000000000000000..28e2b6b258e0a3592da474a289e8e34955a08607
 --- /dev/null
 +++ b/tools/server/server-inference-iteration.cpp
 @@ -0,0 +1,56 @@
@@ -5308,7 +5357,7 @@ index 0000000..28e2b6b
 +}
 diff --git a/tools/server/server-inference-iteration.h b/tools/server/server-inference-iteration.h
 new file mode 100644
-index 0000000..a07cccb
+index 0000000000000000000000000000000000000000..a07cccb23dc6bce904cb8952e28c5e2c452e87b9
 --- /dev/null
 +++ b/tools/server/server-inference-iteration.h
 @@ -0,0 +1,47 @@
@@ -5361,7 +5410,7 @@ index 0000000..a07cccb
 +};
 diff --git a/tools/server/server-inference-scheduler.cpp b/tools/server/server-inference-scheduler.cpp
 new file mode 100644
-index 0000000..44d995d
+index 0000000000000000000000000000000000000000..44d995d890b192aa9b3b8de28666e17ef8639ebb
 --- /dev/null
 +++ b/tools/server/server-inference-scheduler.cpp
 @@ -0,0 +1,227 @@
@@ -5594,7 +5643,7 @@ index 0000000..44d995d
 +}
 diff --git a/tools/server/server-inference-scheduler.h b/tools/server/server-inference-scheduler.h
 new file mode 100644
-index 0000000..ac22980
+index 0000000000000000000000000000000000000000..ac2298059945df08cf06cdff7847505be9c07723
 --- /dev/null
 +++ b/tools/server/server-inference-scheduler.h
 @@ -0,0 +1,106 @@
@@ -5706,7 +5755,7 @@ index 0000000..ac22980
 +};
 diff --git a/tools/server/server-kv-block-backend.cpp b/tools/server/server-kv-block-backend.cpp
 new file mode 100644
-index 0000000..e82bc2b
+index 0000000000000000000000000000000000000000..e82bc2bd2ceb3e27a73a41226ebed7f6249873cf
 --- /dev/null
 +++ b/tools/server/server-kv-block-backend.cpp
 @@ -0,0 +1,226 @@
@@ -5938,7 +5987,7 @@ index 0000000..e82bc2b
 +}
 diff --git a/tools/server/server-kv-block-backend.h b/tools/server/server-kv-block-backend.h
 new file mode 100644
-index 0000000..2399499
+index 0000000000000000000000000000000000000000..239949982c5088c59365e07c6b3ad3c7ad5d87b7
 --- /dev/null
 +++ b/tools/server/server-kv-block-backend.h
 @@ -0,0 +1,110 @@
@@ -6054,7 +6103,7 @@ index 0000000..2399499
 +#endif
 diff --git a/tools/server/server-kv-block-cuda.cu b/tools/server/server-kv-block-cuda.cu
 new file mode 100644
-index 0000000..c6d6ce0
+index 0000000000000000000000000000000000000000..c6d6ce0b75041e2159e6ddac9b1221536b59cfcc
 --- /dev/null
 +++ b/tools/server/server-kv-block-cuda.cu
 @@ -0,0 +1,576 @@
@@ -6636,7 +6685,7 @@ index 0000000..c6d6ce0
 +}
 diff --git a/tools/server/server-kv-block-manager.cpp b/tools/server/server-kv-block-manager.cpp
 new file mode 100644
-index 0000000..00aca39
+index 0000000000000000000000000000000000000000..00aca39ad3f8e76b82ab190b6c14bcb597eb976d
 --- /dev/null
 +++ b/tools/server/server-kv-block-manager.cpp
 @@ -0,0 +1,405 @@
@@ -7047,7 +7096,7 @@ index 0000000..00aca39
 +}
 diff --git a/tools/server/server-kv-block-manager.h b/tools/server/server-kv-block-manager.h
 new file mode 100644
-index 0000000..262f133
+index 0000000000000000000000000000000000000000..262f13310645b20b4b00914e4808d57a1bbb7bde
 --- /dev/null
 +++ b/tools/server/server-kv-block-manager.h
 @@ -0,0 +1,127 @@
@@ -7180,7 +7229,7 @@ index 0000000..262f133
 +};
 diff --git a/tools/server/server-kv-capacity-planner.cpp b/tools/server/server-kv-capacity-planner.cpp
 new file mode 100644
-index 0000000..d65bef6
+index 0000000000000000000000000000000000000000..d65bef67b7b41c935c2e5f204d49a598aae60676
 --- /dev/null
 +++ b/tools/server/server-kv-capacity-planner.cpp
 @@ -0,0 +1,51 @@
@@ -7237,7 +7286,7 @@ index 0000000..d65bef6
 +}
 diff --git a/tools/server/server-kv-capacity-planner.h b/tools/server/server-kv-capacity-planner.h
 new file mode 100644
-index 0000000..ad1db6c
+index 0000000000000000000000000000000000000000..ad1db6cbf2be5615f2e6830757cd628d3c54d1fa
 --- /dev/null
 +++ b/tools/server/server-kv-capacity-planner.h
 @@ -0,0 +1,41 @@
@@ -7284,7 +7333,7 @@ index 0000000..ad1db6c
 +};
 diff --git a/tools/server/server-kv-runtime.cpp b/tools/server/server-kv-runtime.cpp
 new file mode 100644
-index 0000000..79ae1c2
+index 0000000000000000000000000000000000000000..79ae1c2f765d8f7723b4ce444e98bc7bb84f49d0
 --- /dev/null
 +++ b/tools/server/server-kv-runtime.cpp
 @@ -0,0 +1,179 @@
@@ -7469,7 +7518,7 @@ index 0000000..79ae1c2
 +}
 diff --git a/tools/server/server-kv-runtime.h b/tools/server/server-kv-runtime.h
 new file mode 100644
-index 0000000..ed288a0
+index 0000000000000000000000000000000000000000..ed288a0c43b0842d31c5acc24d89ca39f5e9f8e5
 --- /dev/null
 +++ b/tools/server/server-kv-runtime.h
 @@ -0,0 +1,73 @@
@@ -7548,7 +7597,7 @@ index 0000000..ed288a0
 +};
 diff --git a/tools/server/server-kv-swap-store.cpp b/tools/server/server-kv-swap-store.cpp
 new file mode 100644
-index 0000000..d36d7f3
+index 0000000000000000000000000000000000000000..d36d7f397d338abb93436c5ada1e4b3a64161d41
 --- /dev/null
 +++ b/tools/server/server-kv-swap-store.cpp
 @@ -0,0 +1,309 @@
@@ -7863,7 +7912,7 @@ index 0000000..d36d7f3
 +}
 diff --git a/tools/server/server-kv-swap-store.h b/tools/server/server-kv-swap-store.h
 new file mode 100644
-index 0000000..b0f8842
+index 0000000000000000000000000000000000000000..b0f88424d6f2c1f316760c8e75c1947c20b25587
 --- /dev/null
 +++ b/tools/server/server-kv-swap-store.h
 @@ -0,0 +1,64 @@
@@ -7933,7 +7982,7 @@ index 0000000..b0f8842
 +        const std::filesystem::path & directory, size_t budget_bytes);
 diff --git a/tools/server/server-model-cost-model.cpp b/tools/server/server-model-cost-model.cpp
 new file mode 100644
-index 0000000..f004865
+index 0000000000000000000000000000000000000000..f00486583c5e6e255ffcf74b79da9f81d551d7d8
 --- /dev/null
 +++ b/tools/server/server-model-cost-model.cpp
 @@ -0,0 +1,92 @@
@@ -8031,7 +8080,7 @@ index 0000000..f004865
 +}
 diff --git a/tools/server/server-model-cost-model.h b/tools/server/server-model-cost-model.h
 new file mode 100644
-index 0000000..a5cc17d
+index 0000000000000000000000000000000000000000..a5cc17d0fd874bb4476e38ce6bdb0be9cedf11ef
 --- /dev/null
 +++ b/tools/server/server-model-cost-model.h
 @@ -0,0 +1,36 @@
@@ -8073,7 +8122,7 @@ index 0000000..a5cc17d
 +};
 diff --git a/tools/server/server-runtime-adapter.cpp b/tools/server/server-runtime-adapter.cpp
 new file mode 100644
-index 0000000..056ed91
+index 0000000000000000000000000000000000000000..056ed91501aa407a4962bf164fa40edb77a1627b
 --- /dev/null
 +++ b/tools/server/server-runtime-adapter.cpp
 @@ -0,0 +1,63 @@
@@ -8142,7 +8191,7 @@ index 0000000..056ed91
 +}
 diff --git a/tools/server/server-runtime-adapter.h b/tools/server/server-runtime-adapter.h
 new file mode 100644
-index 0000000..b99df52
+index 0000000000000000000000000000000000000000..b99df52667db07bd318535f75f9422d392dafab7
 --- /dev/null
 +++ b/tools/server/server-runtime-adapter.h
 @@ -0,0 +1,39 @@
@@ -8187,7 +8236,7 @@ index 0000000..b99df52
 +std::unique_ptr<server_runtime_adapter> server_create_llama_runtime();
 diff --git a/tools/server/server-speculation-controller.cpp b/tools/server/server-speculation-controller.cpp
 new file mode 100644
-index 0000000..1418d06
+index 0000000000000000000000000000000000000000..1418d067f349f3e963c3383e6a9633c35a40821a
 --- /dev/null
 +++ b/tools/server/server-speculation-controller.cpp
 @@ -0,0 +1,94 @@
@@ -8287,7 +8336,7 @@ index 0000000..1418d06
 +}
 diff --git a/tools/server/server-speculation-controller.h b/tools/server/server-speculation-controller.h
 new file mode 100644
-index 0000000..3b0b46a
+index 0000000000000000000000000000000000000000..3b0b46a725d4e8b539d5c334f36de3fa4d90bb12
 --- /dev/null
 +++ b/tools/server/server-speculation-controller.h
 @@ -0,0 +1,56 @@
@@ -8348,7 +8397,7 @@ index 0000000..3b0b46a
 +    server_speculation_state & get_or_create(int sequence_id);
 +};
 diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
-index 72a4bd0..33cc38a 100644
+index 72a4bd076ad7d2011521fca6f9472e04bf58a517..53cf7d2d2b7bc4fbc831209e5422fea2f1688424 100644
 --- a/tools/server/server-task.cpp
 +++ b/tools/server/server-task.cpp
 @@ -1895,6 +1895,7 @@ json server_task_result_metrics::to_json() {
@@ -8367,7 +8416,7 @@ index 72a4bd0..33cc38a 100644
          { "t_prompt_processing",             t_prompt_processing },
          { "n_tokens_predicted",              n_tokens_predicted },
          { "t_tokens_generation",             t_tokens_generation },
-@@ -1909,6 +1911,55 @@ json server_task_result_metrics::to_json() {
+@@ -1909,6 +1911,59 @@ json server_task_result_metrics::to_json() {
          { "n_decode_total",                  n_decode_total },
          { "n_busy_slots_total",              n_busy_slots_total },
  
@@ -8397,7 +8446,9 @@ index 72a4bd0..33cc38a 100644
 +            { "insufficient_evidence_decisions", benefit_cpu.insufficient_evidence_decisions },
 +            { "safety_fallbacks", benefit_cpu.safety_fallbacks },
 +            { "drift_events", benefit_cpu.drift_events },
-+            { "cooldown_remaining", benefit_cpu.cooldown_remaining }
++            { "cooldown_remaining", benefit_cpu.cooldown_remaining },
++            { "predicted_benefit_ms", benefit_cpu.last_predicted_benefit_ms },
++            { "uncertainty_ms", benefit_cpu.last_uncertainty_ms }
 +        } },
 +        { "benefit_cuda", {
 +            { "upstream_observations", benefit_cuda.upstream_observations },
@@ -8410,7 +8461,9 @@ index 72a4bd0..33cc38a 100644
 +            { "insufficient_evidence_decisions", benefit_cuda.insufficient_evidence_decisions },
 +            { "safety_fallbacks", benefit_cuda.safety_fallbacks },
 +            { "drift_events", benefit_cuda.drift_events },
-+            { "cooldown_remaining", benefit_cuda.cooldown_remaining }
++            { "cooldown_remaining", benefit_cuda.cooldown_remaining },
++            { "predicted_benefit_ms", benefit_cuda.last_predicted_benefit_ms },
++            { "uncertainty_ms", benefit_cuda.last_uncertainty_ms }
 +        } },
 +
 +        { "kv_cache_tokens",                 kv_cache_tokens },
@@ -8424,7 +8477,7 @@ index 72a4bd0..33cc38a 100644
      };
  }
 diff --git a/tools/server/server-task.h b/tools/server/server-task.h
-index bdadcff..3697493 100644
+index bdadcff765271df832ff93871ee7b42b60077bfd..36974933d5feea18b664bf959027e257e4eef70b 100644
 --- a/tools/server/server-task.h
 +++ b/tools/server/server-task.h
 @@ -10,6 +10,11 @@

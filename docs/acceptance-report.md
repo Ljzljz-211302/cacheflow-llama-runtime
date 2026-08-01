@@ -10,7 +10,7 @@
 
 ## 当前结论
 
-本轮严格验收已通过。2026-08-01 唯一入口 `scripts/verify.ps1 -Full` 完整运行 1200.6 秒并以 0 退出；覆盖架构/patch 门禁、CPU/upstream/CUDA 构建、全部 C++/Python 测试、Compute Sanitizer、功能/故障/兼容/模型/性能/质量矩阵，以及新增的 CPU/CUDA 各 10-trial Conservative Benefit Gating。
+本轮严格验收已通过。2026-08-01 最终提交版本通过唯一入口 `scripts/verify.ps1 -Full`，完整运行 1224.9 秒并以 0 退出；覆盖架构/patch 门禁、CPU/upstream/CUDA 构建、全部 C++/Python 测试、Compute Sanitizer、功能/故障/兼容/模型/性能/质量矩阵、CPU/CUDA 各 10-trial Conservative Benefit Gating，以及新增的 53-wave 长驻收敛和 3-pair CUDA 因果 profiling。
 
 “存在代码”“单元测试通过”和“生产路径通过”是三个不同层级。本报告只把有生产 smoke 或真实模型证据的条目标为生产接入。
 
@@ -79,9 +79,15 @@ P95 改善 97.41%。这证明被隔离的 COW hot path，不等价于整个 serv
 
 ### Conservative Benefit Gating
 
-新控制器不再按 backend 硬编码开关，而是在真实 prefill 决策点生成 upstream greedy 与 CacheFlow shadow plan，按 backend-local contextual confidence model 保守选择。最终 10-trial Latin 结果：CPU learned objective median 4042.18 ms，upstream 4542.93 ms（改善 11.02%）；CUDA learned 208.06 ms，upstream 207.40 ms（回归 0.32%，低于 3% 上限）。两端均通过 20% paired upstream/always/rule oracle regret 和 harmful-trace wrong-enable 门槛。
+新控制器不再按 backend 硬编码开关，而是在真实 prefill 决策点生成 upstream greedy 与 CacheFlow shadow plan，按 backend-local contextual confidence model 保守选择。最终 10-trial Latin 结果：CPU learned objective median 3997.56 ms、paired upstream regression -12.46%、paired-oracle regret 16.34%；CUDA learned 209.74 ms、paired regression -6.17%、paired-oracle regret 2.44%。两端均通过原 3% fresh-process paired regression、20% paired upstream/always/rule oracle regret 和 harmful-trace wrong-enable 门槛。此前“两个独立中位数之比”的错误统计口径已移除，阈值未放宽。
 
-本轮 learned 的 CacheFlow 动作全部是有预算的 `safe_exploration`：CPU 16 次、CUDA 40 次；`positive_lower_bound_decisions` 均为 0。结论是“控制器在当前短 trace 上安全探索并 fail closed”，不是“真实 workload 已证明模型稳定学会启用”。positive-lower-bound 路径由 deterministic replay 原生测试覆盖；生产实证仍需更长驻留时间与更大模型。
+短生命周期风险预算按 backend 隔离：CPU learned 产生 19 次 `safe_exploration`；已知 always 有害的 CUDA fresh process 提高最小样本门槛，在该 trace 内 0 次 probe 并 fail closed；`positive_lower_bound_decisions` 均为 0。CUDA positive-lower-bound 的生产实证由下一段长驻实验提供。
+
+随后新增的单进程长驻门禁补齐了这一限制：CUDA server 连续运行 53 waves，`confidence_beta=1.0`、每动作最少 12 个样本。冷启动 CacheFlow/positive 均为 0；稳定阶段 17 次有限探索后产生 143 次 positive-lower-bound，覆盖 39 waves、最长连续 35 waves，终态收益 11.24 ms 大于 5.27 ms 不确定性；切换后 CacheFlow/positive 均为 0、安全回退为 3。门禁要求持续启用且终态仍保持置信，不取最大置信快照。
+
+### CUDA profiling 因果链
+
+3 组 paired Latin upstream/always 干预通过。强制 CacheFlow 中位造成决策 +15、prefill chunk +23、prefill token -145、自研 KV kernel launch不变、KV copy -2,519,000 B、CUDA Event -0.260 ms、GPU busy +1.19%、最大 idle gap不变，继而 Engine execute +31,230 us、TTFT P95 +44.79 ms。完整 GPU samples、Engine events 和相关 Prometheus 快照保存在 `results/cuda_causal_profile_evidence.json`；门禁拒绝仅有采样噪声而没有 material Engine/TTFT 结果的 trace。本机没有 Nsight，因此不声称全模型 occupancy/roofline。
 
 exact output hash 被保留为审计指标而非并发性能硬门槛：batch composition 会改变近似相等 logits 与 EOS 位置；HTTP/SSE、上游兼容和语义质量分别由专门 gate 验证。
 
@@ -111,7 +117,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 
 ## 个人贡献边界
 
-固定上游提供 GGUF/模型 graph、GGML 通用算子、既有 backend、HTTP 基础设施和 sampling。个人差异是 Engine 拆分、Scheduler、KV 资源/块/事务 Swap、真实 CUDA KV Adapter 与 kernels、自适应/收益门控、metrics、fault injection 和复现实验。当前相对固定上游为 56 files、+7480/-99。代码量只统计该 patch；不得把 `vendor/llama.cpp` 原有代码算作个人实现，也不得声称“重写了 llama.cpp”。
+固定上游提供 GGUF/模型 graph、GGML 通用算子、既有 backend、HTTP 基础设施和 sampling。个人差异是 Engine 拆分、Scheduler、KV 资源/块/事务 Swap、真实 CUDA KV Adapter 与 kernels、自适应/收益门控、metrics、fault injection 和复现实验。当前相对固定上游为 56 files、+7533/-99。代码量只统计该 patch；不得把 `vendor/llama.cpp` 原有代码算作个人实现，也不得声称“重写了 llama.cpp”。
 
 早期 Python 控制面已归档到 `prototypes/cacheflow`，只保留设计演进与原型测试证据；生产 `llama-server` 不导入或调用它。
 
@@ -122,6 +128,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 - WPR sampled-stack profile 因权限未完成；现有图只回答 Engine phase 时间归属；
 - CUDA cacheflow 当前 mixed workload 的吞吐和 latency P95 退化，需要后续加入 backend-specific policy gating；
 - Benefit Gating 当前仅控制 prefill plan，尚未扩展到 slot placement、KV admission、swap 与 speculation 的联合动作空间；
-- 当前 10-trial 短 trace 没有产生 positive-lower-bound 启用，真实在线收敛只由 deterministic replay 覆盖，不能把探索次数描述成学习成功次数；
+- 当前 10-trial fresh-process 短 trace 没有 positive-lower-bound；在线收敛只由新增 53-wave 单进程 CUDA trace 支持，不能外推其他 GPU、模型或负载；
 - 同工具链输出兼容不等于跨编译器逐字节兼容；
 - 换 GPU、驱动、CUDA 或模型后必须重跑 Sanitizer 和矩阵。

@@ -38,6 +38,8 @@ def require_engine_metrics(samples: dict[str, float]) -> None:
         "llamacpp:benefit_safety_fallback_total",
         "llamacpp:benefit_drift_total",
         "llamacpp:benefit_cooldown_remaining",
+        "llamacpp:benefit_predicted_benefit_ms",
+        "llamacpp:benefit_uncertainty_ms",
         "llamacpp:kv_admission_pressure_total",
         "llamacpp:kv_proactive_evictions_total",
         "llamacpp:kv_proactive_reclaimed_tokens_total",

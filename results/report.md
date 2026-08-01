@@ -13,16 +13,16 @@
 
 | Case | 量化 | 后端 | 测试 | tokens/s | 标准差 | 模型 MiB | Run 峰值 VRAM MiB | Run 增量 VRAM MiB |
 |---|---|---|---|---:|---:|---:|---:|---:|
-| gpu-quantization | Q4_K_M | CUDA | pp256 | 14178.02 | 4151.11 | 463.0 | 634 | 625 |
-| gpu-quantization | Q4_K_M | CUDA | tg64 | 317.60 | 10.78 | 463.0 | 634 | 625 |
-| gpu-quantization | Q8_0 | CUDA | pp256 | 17802.69 | 2966.44 | 638.7 | 762 | 753 |
-| gpu-quantization | Q8_0 | CUDA | tg64 | 264.82 | 1.85 | 638.7 | 762 | 753 |
-| gpu-quantization | F16 | CUDA | pp256 | 14168.44 | 3625.26 | 1202.1 | 1210 | 1201 |
-| gpu-quantization | F16 | CUDA | tg64 | 153.07 | 1.21 | 1202.1 | 1210 | 1201 |
-| cpu-thread-6 | Q4_K_M | CPU-only | pp256 | 3496.20 | 839.50 | 463.0 | 440 | 431 |
-| cpu-thread-6 | Q4_K_M | CPU-only | tg64 | 66.91 | 1.59 | 463.0 | 440 | 431 |
-| cpu-thread-12 | Q4_K_M | CPU-only | pp256 | 3232.82 | 429.31 | 463.0 | 440 | 431 |
-| cpu-thread-12 | Q4_K_M | CPU-only | tg64 | 65.57 | 1.00 | 463.0 | 440 | 431 |
+| gpu-quantization | Q4_K_M | CUDA | pp256 | 15618.28 | 2233.08 | 463.0 | 634 | 625 |
+| gpu-quantization | Q4_K_M | CUDA | tg64 | 318.65 | 15.43 | 463.0 | 634 | 625 |
+| gpu-quantization | Q8_0 | CUDA | pp256 | 17903.55 | 2612.62 | 638.7 | 756 | 747 |
+| gpu-quantization | Q8_0 | CUDA | tg64 | 267.04 | 6.08 | 638.7 | 756 | 747 |
+| gpu-quantization | F16 | CUDA | pp256 | 14105.03 | 4036.96 | 1202.1 | 1250 | 1241 |
+| gpu-quantization | F16 | CUDA | tg64 | 154.73 | 0.62 | 1202.1 | 1250 | 1241 |
+| cpu-thread-6 | Q4_K_M | CPU-only | pp256 | 3549.09 | 666.58 | 463.0 | 440 | 431 |
+| cpu-thread-6 | Q4_K_M | CPU-only | tg64 | 68.84 | 1.39 | 463.0 | 440 | 431 |
+| cpu-thread-12 | Q4_K_M | CPU-only | pp256 | 2986.16 | 549.17 | 463.0 | 440 | 431 |
+| cpu-thread-12 | Q4_K_M | CPU-only | tg64 | 64.27 | 0.46 | 463.0 | 440 | 431 |
 
 `pp` 表示 prompt processing，`tg` 表示 token generation。同一 run 同时产生 pp/tg 记录，因此两行共享整次进程的显存峰值，并非阶段级峰值。`llama-bench` 不包含 tokenization 和 sampling 时间，因此在线指标需看下一节。
 
@@ -30,16 +30,16 @@
 
 | 并发 | 请求数 | TTFT p50 ms | TTFT p95 ms | TPOT p95 ms | 总延迟 p95 ms | 单请求平均 TPS | 聚合 TPS | 峰值 VRAM MiB | 服务增量 MiB |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 30 | 23.63 | 36.13 | 3.53 | 199.40 | 293.27 | 262.10 | 562 | 553 |
-| 2 | 60 | 30.30 | 45.84 | 4.54 | 253.74 | 234.63 | 415.27 | 562 | 553 |
-| 4 | 120 | 33.44 | 53.21 | 7.28 | 380.24 | 150.96 | 543.23 | 562 | 553 |
+| 1 | 30 | 25.53 | 36.04 | 3.73 | 209.40 | 287.47 | 256.56 | 562 | 553 |
+| 2 | 60 | 30.12 | 42.66 | 4.54 | 249.16 | 229.40 | 406.26 | 562 | 553 |
+| 4 | 120 | 38.38 | 52.33 | 6.50 | 343.87 | 164.86 | 587.60 | 562 | 553 |
 
 ## C++ KV Cache 调度 A/B
 
 | 淘汰惩罚 | trials | 当前请求 ms | 后续长会话 ms | 序列总延迟 ms | 重复 prefill tokens | 选择淘汰 tokens |
 |---:|---:|---:|---:|---:|---:|---:|
-| 0.00 | 5 | 29.38 | 1408.42 | 1436.76 | 415 | 405 |
-| 0.50 | 5 | 98.94 | 56.01 | 155.34 | 35 | 10 |
+| 0.00 | 5 | 28.37 | 1394.40 | 1422.29 | 415 | 405 |
+| 0.50 | 5 | 94.35 | 51.16 | 145.20 | 35 | 10 |
 
 惩罚 0 等价于上游最长公共前缀选择；正惩罚使用本项目新增的净收益评分。当前请求可能少复用 token，但能避免破坏更有价值的长会话缓存，因此必须比较请求序列而非单请求。
 
@@ -47,23 +47,23 @@
 
 | 方法 | Median E2E ms | P95 E2E ms | Bytes/op | Launch/op | Extra device bytes |
 |---|---:|---:|---:|---:|---:|
-| tail_block_cow | 0.0082 | 0.0289 | 196608 | 1 | 196608 |
-| whole_sequence_copy | 0.7629 | 0.9220 | 12582912 | 128 | 12582912 |
+| tail_block_cow | 0.0081 | 0.0270 | 196608 | 1 | 196608 |
+| whole_sequence_copy | 0.7580 | 0.8493 | 12582912 | 128 | 12582912 |
 
-3 个 fresh process、每个方法 300 samples；Tail COW P95 改善 96.86%。
+3 个 fresh process、每个方法 300 samples；Tail COW P95 改善 96.82%。
 
 ## Adaptive Prefill
 
 | Backend | Mode | Median wall ms | P95 wall ms | Effective chunk median |
 |---|---|---:|---:|---:|
-| cpu | greedy | 12485.56 | 12568.22 | 0 |
-| cpu | fixed64 | 13471.84 | 13548.43 | 64 |
-| cpu | fixed256 | 13085.14 | 13106.44 | 256 |
-| cpu | adaptive | 13126.96 | 13179.55 | 31 |
-| cuda | greedy | 639.78 | 640.00 | 0 |
-| cuda | fixed64 | 739.86 | 765.94 | 64 |
-| cuda | fixed256 | 651.76 | 666.29 | 256 |
-| cuda | adaptive | 692.56 | 712.94 | 80 |
+| cpu | greedy | 12475.67 | 12549.60 | 0 |
+| cpu | fixed64 | 13341.32 | 13460.18 | 64 |
+| cpu | fixed256 | 13038.55 | 13056.91 | 256 |
+| cpu | adaptive | 13126.46 | 13147.95 | 31 |
+| cuda | greedy | 636.55 | 648.84 | 0 |
+| cuda | fixed64 | 725.20 | 748.32 | 64 |
+| cuda | fixed256 | 661.44 | 665.00 | 256 |
+| cuda | adaptive | 665.31 | 677.16 | 82 |
 
 Adaptive 能避开错误 fixed-64，但当前 CUDA trace 未稳定击败 greedy/fixed-256；该负结果保留。
 
@@ -71,23 +71,23 @@ Adaptive 能避开错误 fixed-64，但当前 CUDA trace 未稳定击败 greedy/
 
 | Backend | Mode | Median wall ms | P95 wall ms | Acceptance |
 |---|---|---:|---:|---:|
-| cpu | none | 4269.71 | 4657.51 | 0.0% |
-| cpu | fixed | 3540.91 | 3564.45 | 85.4% |
-| cpu | adaptive | 3420.58 | 3461.88 | 97.2% |
-| cuda | none | 409.72 | 417.21 | 0.0% |
-| cuda | fixed | 222.55 | 226.88 | 85.4% |
-| cuda | adaptive | 218.50 | 231.35 | 97.2% |
+| cpu | none | 3964.32 | 4065.35 | 0.0% |
+| cpu | fixed | 3344.77 | 3351.09 | 85.4% |
+| cpu | adaptive | 3294.07 | 3294.69 | 97.2% |
+| cuda | none | 414.17 | 420.02 | 0.0% |
+| cuda | fixed | 212.38 | 215.79 | 85.4% |
+| cuda | adaptive | 209.83 | 217.97 | 97.2% |
 
 ## Mixed Prefill / Decode
 
 | Backend | Policy | Trials | TTFT median / P95 ms | TPOT P95 ms | Latency P95 ms | Aggregate output TPS |
 |---|---|---:|---:|---:|---:|---:|
-| cpu | upstream | 3 | 1556.69 / 7693.09 | 673.07 | 11729.82 | 13.08 |
-| cpu | cacheflow | 3 | 1566.96 / 3011.56 | 281.17 | 6933.29 | 19.94 |
-| cuda | upstream | 3 | 55.19 / 153.14 | 14.76 | 514.31 | 284.98 |
-| cuda | cacheflow | 3 | 62.92 / 83.70 | 12.42 | 542.41 | 275.33 |
+| cpu | upstream | 3 | 1521.25 / 7449.65 | 418.92 | 11395.63 | 14.35 |
+| cpu | cacheflow | 3 | 1507.24 / 2877.07 | 151.45 | 7038.50 | 21.87 |
+| cuda | upstream | 3 | 63.63 / 155.30 | 15.13 | 524.43 | 254.44 |
+| cuda | cacheflow | 3 | 61.40 / 91.64 | 11.93 | 489.79 | 286.57 |
 
-CPU 本轮 latency P95 -40.9%、aggregate TPS +52.5%；CUDA 本轮 latency P95 +5.5%、aggregate TPS -3.4%。这是当前轮结果，不外推为稳定收益。
+CPU 本轮 latency P95 -38.2%、aggregate TPS +52.4%；CUDA 本轮 latency P95 -6.6%、aggregate TPS +12.6%。这是当前轮结果，不外推为稳定收益。
 
 ### 跨验收轮重复性
 
@@ -106,32 +106,54 @@ CPU 本轮 latency P95 -40.9%、aggregate TPS +52.5%；CUDA 本轮 latency P95 +
 
 ## Conservative Benefit Gating
 
-| Backend | Mode | Trials | Objective median ms | CacheFlow decisions | Exploration | Positive lower bound |
-|---|---|---:|---:|---:|---:|---:|
-| cpu | upstream | 10 | 4542.93 | 0 | 0 | 0 |
-| cpu | always | 10 | 3608.49 | 195 | 0 | 0 |
-| cpu | rule | 10 | 3743.66 | 60 | 0 | 0 |
-| cpu | learned | 10 | 4042.18 | 16 | 16 | 0 |
-| cpu | oracle | 10 | 3559.28 | 0 | 0 | 0 |
-| cuda | upstream | 10 | 207.40 | 0 | 0 | 0 |
-| cuda | always | 10 | 214.94 | 162 | 0 | 0 |
-| cuda | rule | 10 | 211.76 | 61 | 0 | 0 |
-| cuda | learned | 10 | 208.06 | 40 | 40 | 0 |
-| cuda | oracle | 10 | 194.31 | 0 | 0 | 0 |
+| Backend | Mode | Trials | Objective median ms | Paired upstream regression | CacheFlow decisions | Exploration | Positive lower bound |
+|---|---|---:|---:|---:|---:|---:|---:|
+| cpu | upstream | 10 | 4789.32 | — | 0 | 0 | 0 |
+| cpu | always | 10 | 3480.59 | — | 196 | 0 | 0 |
+| cpu | rule | 10 | 3560.27 | — | 67 | 0 | 0 |
+| cpu | learned | 10 | 3997.56 | -12.46% | 19 | 19 | 0 |
+| cpu | oracle | 10 | 3428.03 | — | 0 | 0 | 0 |
+| cuda | upstream | 10 | 226.47 | — | 0 | 0 | 0 |
+| cuda | always | 10 | 233.78 | — | 174 | 0 | 0 |
+| cuda | rule | 10 | 204.18 | — | 50 | 0 | 0 |
+| cuda | learned | 10 | 209.74 | -6.17% | 0 | 0 | 0 |
+| cuda | oracle | 10 | 196.95 | — | 0 | 0 | 0 |
 
-相对 upstream 的 learned objective 变化：CPU -11.02%；CUDA +0.32%。
-真实短 trace 的 learned 路径共出现 0 次 positive-lower-bound 决策；当前结果证明的是受限探索和 fail-closed 护栏，稳定优势下的置信触发由确定性 native replay 覆盖，不能据此宣称线上长周期收敛。
+相对 upstream 的 learned objective 变化：CPU -12.46%；CUDA -6.17%。
+真实短 trace 的 learned 路径共出现 0 次 positive-lower-bound 决策；该 fresh-process 结果只证明受限探索和 fail-closed，长周期收敛证据见下一节。
+
+### 长驻在线收敛与分布切换
+
+同一 CUDA server PID 连续执行 53 个 wave；Ridge 最小样本数 12，confidence beta=1.00。
+
+| Phase | Upstream | CacheFlow | Exploration | Positive lower bound | Positive waves / max streak | Drift | Safety fallback | TTFT P95 ms | Terminal benefit / uncertainty ms |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| cold_start | 3 | 0 | 0 | 0 | 0 / 0 | 0 | 1 | 110.30 | 0.00 / 0.00 |
+| stable_reuse | 33 | 160 | 17 | 143 | 39 / 35 | 0 | 22 | 211.75 | 11.24 / 5.27 |
+| distribution_shift | 3 | 0 | 0 | 0 | 0 / 0 | 0 | 3 | 95.32 | 11.24 / 5.27 |
+
+该实验补齐 fresh-process 短 trace 的证据缺口：稳定阶段必须出现非探索的置信下界启用，切换到独立 throughput-only 请求后必须 fail closed。
+
+## CUDA Profiling 因果链
+
+对 upstream/always 进行 paired Latin 干预；中间变量来自调度指标、CUDA Event 和 100 ms GPU 活跃度采样，结果来自 Engine trace 与请求 TTFT。该范围只覆盖本项目 CacheFlow KV kernel，不冒充完整 Nsight Compute kernel census。
+
+| Paired trials | Δ CacheFlow decisions | Δ Prefill chunks | Δ Prefill tokens | Δ KV kernel launches | Δ KV copy bytes | Δ CUDA Event ms | Δ GPU busy | Δ max idle gap ms | Δ Execute us | Δ TTFT P95 ms |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 3 | 15 | 23 | -145 | 0 | -2519000 | -0.260 | +1.19% | 0 | 31230 | 44.79 |
+
+本轮强制 CacheFlow 改变了 prefill/CUDA 中间变量并恶化 Engine execute 与 TTFT；这是 learned gate 必须按上下文拒绝有害动作的直接系统证据。
 
 ## Production Engine Phase Trace
 
 | Phase | Duration us | Share |
 |---|---:|---:|
-| execute | 9485332 | 99.9058% |
-| commit | 7402 | 0.0780% |
-| plan | 1293 | 0.0136% |
-| prepare | 253 | 0.0027% |
+| execute | 9113907 | 99.9136% |
+| commit | 6527 | 0.0716% |
+| plan | 1127 | 0.0124% |
+| prepare | 231 | 0.0025% |
 
-共 246 个 production Engine spans。该数据来自 `in-process Chrome trace; WPR sampled stacks require elevated SeSystemProfilePrivilege`；它是 phase-duration trace，不是 sampled-stack CPU flame graph。
+共 218 个 production Engine spans。该数据来自 `in-process Chrome trace; WPR sampled stacks require elevated SeSystemProfilePrivilege`；它是 phase-duration trace，不是 sampled-stack CPU flame graph。
 
 ## 最小质量护栏
 
@@ -143,10 +165,10 @@ CPU 本轮 latency P95 -40.9%、aggregate TPS +52.5%；CUDA 本轮 latency P95 +
 
 ## 自动计算观察
 
-- Q4_K_M 权重大小是 F16 的 38.5%，CUDA decode 速度是 F16 的 2.07 倍。
-- 同一 Q4_K_M 配置下，CUDA decode 速度是 12 线程 CPU-only 的 4.84 倍。
-- 并发从 1 增至 4 时，聚合输出吞吐提高到 2.07 倍；同时应结合 TTFT/TPOT 尾延迟判断交互体验。
-- Cache-aware 调度在冲突序列中减少 91.6% 的重复 prefill token、减少 97.5% 的缓存淘汰，中位序列延迟提升 9.25 倍。
+- Q4_K_M 权重大小是 F16 的 38.5%，CUDA decode 速度是 F16 的 2.06 倍。
+- 同一 Q4_K_M 配置下，CUDA decode 速度是 12 线程 CPU-only 的 4.96 倍。
+- 并发从 1 增至 4 时，聚合输出吞吐提高到 2.29 倍；同时应结合 TTFT/TPOT 尾延迟判断交互体验。
+- Cache-aware 调度在冲突序列中减少 91.6% 的重复 prefill token、减少 97.5% 的缓存淘汰，中位序列延迟提升 9.80 倍。
 - 3 种精度在 5 题 smoke set 上的规则准确率为 20%–40%；样本过少，不能据此比较量化精度。
 
 ## 解释边界

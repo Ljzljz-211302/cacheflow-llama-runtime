@@ -49,6 +49,13 @@ def metric(text: str, name: str, labels: dict[str, str]) -> float:
 
 def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
     cuda = backend == "cuda"
+    # The short-lived gate has an explicit backend-local risk budget. CPU
+    # CacheFlow is beneficial on this trace and may collect early samples;
+    # CUDA always-mode is harmful, so a fresh CUDA process must remain cold
+    # and fail closed. Sustained CUDA exploration/convergence is evaluated by
+    # run_long_lived_benefit.py instead of charging one probe to every restart.
+    minimum_observations = "64" if cuda else "3"
+    exploration_interval = "8" if cuda else "1"
     server = ROOT / (
         "build/patched-cuda-ninja3/bin/llama-server.exe"
         if cuda else "build/patched-cpu-noui/bin/Release/llama-server.exe"
@@ -61,8 +68,8 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
         str(server), "-m", str(model), "--host", "127.0.0.1", "--port", str(port),
         "-c", "4096", "-np", "4", "-b", "512", "-ub", "512", "-t", "8", "-ngl", "99" if cuda else "0",
         "--no-kv-unified", "--metrics", "--no-warmup", "--scheduler-policy", "cacheflow",
-        "--benefit-policy", mode, "--benefit-min-observations", "3",
-        "--benefit-exploration-interval", "1", "--prefill-chunk-min", "16",
+        "--benefit-policy", mode, "--benefit-min-observations", minimum_observations,
+        "--benefit-exploration-interval", exploration_interval, "--prefill-chunk-min", "16",
         "--prefill-chunk-max", "128", "--kv-block-runtime", "--kv-block-size", "16",
     ]
     environment = os.environ.copy()
@@ -153,6 +160,7 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
         ),
         "oracle_objective_ms": "",
         "oracle_regret_ratio": "",
+        "upstream_regression_ratio": "",
     }
 
 
@@ -198,6 +206,10 @@ def main() -> None:
             learned = float(paired["learned"]["objective_ms"])
             paired["learned"]["oracle_objective_ms"] = oracle
             paired["learned"]["oracle_regret_ratio"] = (learned - oracle) / max(oracle, 1e-9)
+            upstream = float(paired["upstream"]["objective_ms"])
+            paired["learned"]["upstream_regression_ratio"] = (
+                learned - upstream
+            ) / max(upstream, 1e-9)
         for mode in MODES:
             group = [row for row in rows if row["backend"] == backend and row["mode"] == mode]
             summaries.append({
@@ -211,6 +223,11 @@ def main() -> None:
                 "exploration_decisions": sum(float(row["exploration_decisions"]) for row in group),
                 "positive_lower_bound_decisions": sum(float(row["positive_lower_bound_decisions"]) for row in group),
                 "exact_hash_match_ratio": statistics.median(float(row["exact_hash_match_ratio"]) for row in group),
+                "paired_upstream_regression_ratio": (
+                    statistics.median(float(row["upstream_regression_ratio"]) for row in group)
+                    if mode == "learned"
+                    else ""
+                ),
             })
         learned_group = [row for row in rows if row["backend"] == backend and row["mode"] == "learned"]
         wrong_enable_trials = 0
@@ -234,14 +251,18 @@ def main() -> None:
             "exploration_decisions": 0.0,
             "positive_lower_bound_decisions": 0.0,
             "exact_hash_match_ratio": 1.0,
+            "paired_upstream_regression_ratio": "",
         })
 
-        by_mode = {str(row["mode"]): row for row in summaries if row["backend"] == backend}
-        learned_objective = float(by_mode["learned"]["objective_median_ms"])
-        upstream_objective = float(by_mode["upstream"]["objective_median_ms"])
+        paired_regression = statistics.median(
+            float(row["upstream_regression_ratio"]) for row in learned_group
+        )
         regret = statistics.median(float(row["oracle_regret_ratio"]) for row in learned_group)
-        if learned_objective > upstream_objective * (1 + args.max_regression):
-            violations.append(f"{backend} learned policy regressed upstream by more than {args.max_regression:.1%}")
+        if paired_regression > args.max_regression:
+            violations.append(
+                f"{backend} learned paired median regression {paired_regression:.1%} "
+                f"exceeds {args.max_regression:.1%}"
+            )
         if regret > args.max_oracle_regret:
             violations.append(f"{backend} learned median oracle regret {regret:.1%} exceeds {args.max_oracle_regret:.1%}")
         if harmful_trials and wrong_enable_trials / harmful_trials > 0.20:

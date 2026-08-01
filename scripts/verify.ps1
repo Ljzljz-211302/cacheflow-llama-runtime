@@ -88,6 +88,10 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "mixed prefill/decode CPU/CUDA workload failed" }
         python scripts\run_benefit_gating_ab.py --backend both --trials 10
         if ($LASTEXITCODE -ne 0) { throw "conservative benefit gating/oracle acceptance failed" }
+        python scripts\run_long_lived_benefit.py --backend cuda
+        if ($LASTEXITCODE -ne 0) { throw "long-lived benefit convergence/shift acceptance failed" }
+        python scripts\run_cuda_causal_profile.py --trials 3
+        if ($LASTEXITCODE -ne 0) { throw "CUDA policy-to-TTFT causal profiling failed" }
         powershell -NoProfile -ExecutionPolicy Bypass -File scripts\profile_engine.ps1
         if ($LASTEXITCODE -ne 0) { throw "production engine trace/flame chart failed" }
         python scripts\run_prefill_ab.py

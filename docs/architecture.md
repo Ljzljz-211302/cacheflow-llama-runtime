@@ -987,9 +987,9 @@ sequenceDiagram
 
 ### Phase 10：面试交付——已完成
 
-- 一键构建、测试、Sanitizer 和 benchmark 已纳入 `verify.ps1 -Full`，最终整链 765 秒通过；
+- 一键构建、测试、Sanitizer 和 benchmark 已纳入 `verify.ps1 -Full`，2026-08-01 最终提交版本整链 1224.9 秒通过；
 - 架构图、生产 Engine trace 火焰图、mixed workload 原始 trial 和自动报告已生成；
-- 当前个人贡献统计为相对固定上游 56 files、+7480/-99；patch 可逆性由全量入口检查；
+- 当前个人贡献统计为相对固定上游 56 files、+7533/-99；patch 可逆性由全量入口检查；
 - 三分钟演示、算法/状态/失败模式/实验限制深挖手册已完成。
 
 ## 16. 当前代码到目标 Module 的映射
@@ -1127,4 +1127,21 @@ Scheduler 同时产生会改变 fairness cursor 的 CacheFlow plan，以及纯�
 
 CLI 支持 `--benefit-policy upstream|always|rule|learned` 及样本、探索、置信度、margin 参数。Prometheus 按 backend/action 导出 decision、observation、exploration、safety fallback、drift 和 cooldown。
 
-`run_benefit_gating_ab.py` 在相同 CacheFlow 运行栈中只改变门控策略，执行 fresh-process Latin rotation 的 upstream/always/rule/learned 对照，并从 paired upstream/always/rule 构造 trace-level oracle。硬门槛为 learned 相对 upstream 不回归超过 3%、含探索成本的 median oracle regret 不超过 20%，以及 harmful trace 上非探索错误启用率不超过 20%。完整验收固定为 CPU/CUDA 各 10 trials；报告必须区分 `safe_exploration` 与真正的 `positive_lower_bound` 启用。
+`run_benefit_gating_ab.py` 在相同 CacheFlow 运行栈中只改变门控策略，执行 fresh-process Latin rotation 的 upstream/always/rule/learned 对照，并从 paired upstream/always/rule 构造 trace-level oracle。比较使用同一 trial 内的 paired ratio，禁止用两个独立中位数相除。短冷启动硬门槛保持 learned paired median regression 不超过 3%、paired median oracle regret 不超过 20%，以及 harmful trace 上非探索错误启用率不超过 20%。风险预算按 backend 隔离：该 CPU trace 允许快速收集样本；已知 always 有害的 CUDA fresh process 将最小样本提高到 64，在 12-request trace 内保持零 probe/fail-closed，CUDA 的探索能力只由长驻实验验证。完整验收固定为 CPU/CUDA 各 10 trials；真正的置信启用由 21.5 的长驻门禁负责。
+
+### 21.5 长驻收敛与分布切换
+
+`run_long_lived_benefit.py` 保持同一个 CUDA server PID，逐 wave 抓取带 backend/action label 的累积 counter 与最后一次预测 gauge。实验顺序固定为短冷启动、稳定高复用/长短请求混合、独立 throughput-only 分布切换。主门禁使用生产级 `confidence_beta=1.0`、每动作最少 12 个样本：冷启动不得提前启用；稳定阶段必须出现 `predicted_benefit > joint_uncertainty` 的非探索动作；切换后不得继续错误启用，并须由 drift 或 structural safety fallback 回到 upstream。不同 phase 的请求复杂度不同，禁止互相作为相对性能 baseline，只使用统一 TTFT SLO；同 workload 相对性能由下一节配对 A/B 提供。
+
+最终 53-wave CUDA 结果为：冷启动 CacheFlow/positive 均为 0；稳定阶段 exploration 17、positive-lower-bound 143，positive 覆盖 39 waves、最长连续 35 waves，终态预测收益/不确定性 11.24/5.27 ms；分布切换 CacheFlow/positive 均为 0、安全回退 3。门禁要求至少连续 3 个 positive wave，且终态收益仍须大于终态不确定性；不以全程最大值制造选择偏差。
+
+### 21.6 CUDA profiling 因果链
+
+`run_cuda_causal_profile.py` 对 upstream/always 做 3 组 fresh-process paired Latin 干预，并按同一 trial 求差，避免把进程顺序、温度或不配对样本当作策略效果。证据链为：
+
+1. `benefit_decisions_total` 确认策略干预实际改变动作；
+2. prefill token/chunk counter 确认 scheduler mediator 改变；
+3. 自研 KV kernel launch/copy byte、CUDA Event 时间与 100 ms `nvidia-smi` busy/idle 样本确认 CUDA mediator；
+4. production Engine Chrome trace 与 SSE TTFT 确认系统结果。
+
+最终 always 相对 upstream 的配对中位差为 CacheFlow 决策 +15、prefill chunk +23、prefill token -145、自研 KV kernel launch不变、KV copy -2,519,000 B、CUDA Event -0.260 ms、GPU busy +1.19%、最大 idle gap不变、Engine execute +31,230 us、TTFT P95 +44.79 ms。CUDA 搬运指标改善但 Engine/TTFT 恶化，说明更多分块带来的排队/执行结构效应不能由单一 kernel 或 copy 指标代表；100 ms GPU busy 只是辅助信号。门禁要求 TTFT 至少 5 ms 且 Engine 至少 1000 us 的 material paired effect；完整 GPU samples、Engine events 和相关 Prometheus snapshot 保存在可提交的 `results/cuda_causal_profile_evidence.json`。当前机器未安装 Nsight Systems/Compute，因此不声称完整 kernel census、occupancy 或 roofline。

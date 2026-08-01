@@ -53,6 +53,18 @@ def render_report(results_dir: Path, output_path: Path) -> None:
             benefit_gating = list(csv.DictReader(handle))
     else:
         benefit_gating = []
+    long_lived_path = results_dir / "long_lived_benefit_cuda_summary.json"
+    long_lived = (
+        json.loads(long_lived_path.read_text(encoding="utf-8"))
+        if long_lived_path.exists()
+        else None
+    )
+    cuda_causal_path = results_dir / "cuda_causal_profile_summary.json"
+    cuda_causal = (
+        json.loads(cuda_causal_path.read_text(encoding="utf-8"))
+        if cuda_causal_path.exists()
+        else None
+    )
     profile = json.loads(
         (results_dir / "engine-profile-summary.json").read_text(encoding="utf-8")
     )
@@ -312,14 +324,21 @@ def render_report(results_dir: Path, output_path: Path) -> None:
                 "",
                 "## Conservative Benefit Gating",
                 "",
-                "| Backend | Mode | Trials | Objective median ms | CacheFlow decisions | Exploration | Positive lower bound |",
-                "|---|---|---:|---:|---:|---:|---:|",
+                "| Backend | Mode | Trials | Objective median ms | Paired upstream regression | CacheFlow decisions | Exploration | Positive lower bound |",
+                "|---|---|---:|---:|---:|---:|---:|---:|",
             ]
         )
         for row in benefit_gating:
+            paired_regression = row.get("paired_upstream_regression_ratio")
+            paired_text = (
+                f"{float(paired_regression):+.2%}"
+                if paired_regression not in (None, "")
+                else "—"
+            )
             lines.append(
                 f"| {row['backend']} | {row['mode']} | {row['trials']} | "
                 f"{float(row['objective_median_ms']):.2f} | "
+                f"{paired_text} | "
                 f"{float(row['cacheflow_decisions']):.0f} | "
                 f"{float(row['exploration_decisions']):.0f} | "
                 f"{float(row['positive_lower_bound_decisions']):.0f} |"
@@ -329,20 +348,10 @@ def render_report(results_dir: Path, output_path: Path) -> None:
             for row in benefit_gating
             if row["mode"] == "learned"
         }
-        upstream_rows = {
-            row["backend"]: row
-            for row in benefit_gating
-            if row["mode"] == "upstream"
-        }
         benefit_observations = []
         for backend in sorted(learned_rows):
             learned = learned_rows[backend]
-            upstream = upstream_rows[backend]
-            delta = (
-                float(learned["objective_median_ms"])
-                / float(upstream["objective_median_ms"])
-                - 1
-            )
+            delta = float(learned["paired_upstream_regression_ratio"])
             benefit_observations.append(f"{backend.upper()} {delta:+.2%}")
         positive_decisions = sum(
             int(float(row["positive_lower_bound_decisions"]))
@@ -355,8 +364,61 @@ def render_report(results_dir: Path, output_path: Path) -> None:
                 + "；".join(benefit_observations)
                 + "。",
                 f"真实短 trace 的 learned 路径共出现 {positive_decisions} 次 positive-lower-bound 决策；"
-                "当前结果证明的是受限探索和 fail-closed 护栏，稳定优势下的置信触发由确定性 native replay 覆盖，"
-                "不能据此宣称线上长周期收敛。",
+                "该 fresh-process 结果只证明受限探索和 fail-closed，长周期收敛证据见下一节。",
+            ]
+        )
+    if long_lived:
+        lines.extend(
+            [
+                "",
+                "### 长驻在线收敛与分布切换",
+                "",
+                f"同一 CUDA server PID 连续执行 {long_lived['waves']} 个 wave；"
+                f"Ridge 最小样本数 {long_lived['minimum_observations']}，"
+                f"confidence beta={float(long_lived['confidence_beta']):.2f}。",
+                "",
+                "| Phase | Upstream | CacheFlow | Exploration | Positive lower bound | Positive waves / max streak | Drift | Safety fallback | TTFT P95 ms | Terminal benefit / uncertainty ms |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for phase in long_lived["phases"]:
+            lines.append(
+                f"| {phase['phase']} | {phase['upstream_decisions']} | "
+                f"{phase['cacheflow_decisions']} | {phase['exploration_decisions']} | "
+                f"{phase['positive_decisions']} | "
+                f"{phase['positive_waves']} / {phase['max_consecutive_positive_waves']} | "
+                f"{phase['drift_events']} | "
+                f"{phase['safety_fallbacks']} | {float(phase['ttft_p95_ms']):.2f} | "
+                f"{float(phase['predicted_benefit_ms']):.2f} / "
+                f"{float(phase['uncertainty_ms']):.2f} |"
+            )
+        lines.extend(
+            [
+                "",
+                "该实验补齐 fresh-process 短 trace 的证据缺口：稳定阶段必须出现非探索的置信下界启用，"
+                "切换到独立 throughput-only 请求后必须 fail closed。",
+            ]
+        )
+    if cuda_causal:
+        causal = cuda_causal["result"]
+        lines.extend(
+            [
+                "",
+                "## CUDA Profiling 因果链",
+                "",
+                "对 upstream/always 进行 paired Latin 干预；中间变量来自调度指标、CUDA Event 和 100 ms GPU 活跃度采样，"
+                "结果来自 Engine trace 与请求 TTFT。该范围只覆盖本项目 CacheFlow KV kernel，不冒充完整 Nsight Compute kernel census。",
+                "",
+                "| Paired trials | Δ CacheFlow decisions | Δ Prefill chunks | Δ Prefill tokens | Δ KV kernel launches | Δ KV copy bytes | Δ CUDA Event ms | Δ GPU busy | Δ max idle gap ms | Δ Execute us | Δ TTFT P95 ms |",
+                "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+                f"| {causal['paired_trials']} | {float(causal['cacheflow_decision_delta']):.0f} | "
+                f"{float(causal['prefill_chunk_delta']):.0f} | {float(causal['prefill_token_delta']):.0f} | "
+                f"{float(causal['kernel_launch_delta']):.0f} | {float(causal['copy_bytes_delta']):.0f} | "
+                f"{float(causal['cuda_event_delta_ms']):.3f} | {float(causal['gpu_busy_delta']):+.2%} | "
+                f"{float(causal['idle_gap_delta_ms']):.0f} | {float(causal['execute_duration_delta_us']):.0f} | "
+                f"{float(causal['ttft_delta_ms']):.2f} |",
+                "",
+                "本轮强制 CacheFlow 改变了 prefill/CUDA 中间变量并恶化 Engine execute 与 TTFT；这是 learned gate 必须按上下文拒绝有害动作的直接系统证据。",
             ]
         )
     lines.extend(

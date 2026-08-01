@@ -2,7 +2,7 @@
 
 CacheFlow Runtime 是一个直接重构 llama.cpp 推理热路径的单机 LLM Serving / AI Infra 项目。它不是 Python 包装层，也不把 `vendor/` 中的上游源码算作个人工作量：个人实现以固定上游 `acd79d603` 为基线，通过可重放 patch 进入真实 `llama-server -> llama_decode -> KV memory -> CUDA` 调用链。
 
-当前 fork 相对固定上游涉及 56 个文件，新增 7,480 行、删除 99 行 C/C++/CUDA；最终以可重放 patch 的 `git diff --stat` 为准。外层 Python 仅负责固定实验、故障注入和报告。
+当前 fork 相对固定上游涉及 56 个文件，新增 7,533 行、删除 99 行 C/C++/CUDA；最终以可重放 patch 的 `git diff --stat` 为准。外层 Python 仅负责固定实验、故障注入和报告。
 
 ## 实现了什么
 
@@ -47,7 +47,9 @@ flowchart LR
 - Adaptive Prefill：CUDA 在线 cost model 在最终轮避开错误 fixed-64，但略劣于 greedy/fixed-256；CPU 历史在线动作曾劣于所有候选，现按 backend bucket 选择 `chunk=0` greedy 安全动作，并由 2% 回归门槛阻止再次静默退化。
 - Gather/Scatter：完全不重叠时 per-block memcpy 更快，因此生产实现只在重叠/重复映射需要 snapshot 语义时使用 staging kernel。
 - Mixed prefill/decode：CPU 在两轮 3-trial 验收中都改善尾延迟/吞吐；CUDA 两轮的 latency/吞吐结论反号，虽然 TTFT P95 均改善，但样本不足以声称稳定端到端收益，因此当前不应对所有 CUDA workload 默认启用。
-- Conservative Benefit Gating：最终 CPU/CUDA 各 10-trial Latin 验收中，CPU learned objective 4042.18 ms 对 upstream 4542.93 ms（改善 11.02%）；CUDA 208.06 ms 对 207.40 ms（回归 0.32%，低于 3% 门槛）。paired-oracle regret 与 harmful wrong-enable 门槛通过。当前短 trace 的 CacheFlow 动作全部属于有限探索，positive-lower-bound 启用为 0；因此只声称安全探索/fail-closed 已实证，不把探索冒充在线收敛。
+- Conservative Benefit Gating：最终 CPU/CUDA 各 10-trial Latin 验收中，CPU learned objective median 3997.56 ms、paired upstream regression -12.46%、paired-oracle regret 16.34%；CUDA 209.74 ms、paired regression -6.17%、paired-oracle regret 2.44%。两端均通过原 3%/20% 与 harmful wrong-enable 门槛。短生命周期采用 backend-local 风险预算：CPU 19 次有限探索，CUDA 0 次 probe 并 fail closed；positive-lower-bound 均为 0，不把冷启动门禁冒充在线收敛。
+- 长驻在线学习：单一 CUDA server PID 连续 53 waves，生产级 `confidence_beta=1.0`、每动作最少 12 个样本；冷启动 0 次提前启用，稳定阶段 17 次探索后产生 143 次 positive-lower-bound，覆盖 39 个 wave、最长连续 35 waves；终态预测收益 11.24 ms 对不确定性 5.27 ms；切换后 0 次 CacheFlow、3 次安全回退。
+- CUDA profiling 因果链：3 组 paired Latin upstream/always 干预中，强制 CacheFlow 中位使决策 +15、prefill chunk +23、prefill token -145、KV copy -2,519,000 B、CUDA Event -0.260 ms、GPU busy +1.19%，最终 Engine execute +31,230 us、TTFT P95 +44.79 ms。CUDA 搬运指标改善但服务尾延迟恶化，证据指向分块/排队效应不能由单一 kernel 指标代表；范围不冒充完整 Nsight kernel census。
 - Production Engine trace：最终 CPU mixed workload 中 execute 占 99.9145%，plan 仅 0.0148%；`results/engine-flame.svg` 是 phase-duration 图，不是 sampled-stack flame graph。
 
 所有性能 A/B 结论至少 3 次 fresh-process trial；功能 smoke 和 Engine trace 不冒充多 trial 性能结论。汇总位于 `results/`，原始 trial 位于 `results/raw/`。硬件、模型和负结果边界见 [实验限制](docs/experiment-limitations.md)。
@@ -71,7 +73,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 5. OpenAI/SSE、取消、Deadline、背压和恢复；
 6. 上游输出兼容、模型/后端/并发/上下文矩阵；
 7. Compute Sanitizer memcheck/racecheck（硬门槛）；
-8. CUDA Transport/COW、Adaptive Prefill/Spec、mixed workload、Conservative Benefit Gating（CPU/CUDA 各 10 trials）、Scheduler、在线/离线/质量 A/B；
+8. CUDA Transport/COW、Adaptive Prefill/Spec、mixed workload、Conservative Benefit Gating（CPU/CUDA 各 10 trials）、53-wave 长驻收敛和 3-pair CUDA 因果 profiling；
 9. production Engine trace/flame chart，并从原始数据重新生成报告。
 
 只做快速环境与 Python 验证：
@@ -98,6 +100,9 @@ Windows WDDM 首次运行前需要以管理员身份执行 CUDA Toolkit 的 `Ena
 --benefit-exploration-interval N
 --benefit-confidence-beta BETA
 --benefit-safety-margin-ms MS
+--benefit-drift-ratio RATIO
+--benefit-drift-consecutive N
+--benefit-cooldown-decisions N
 --spec-policy fixed|adaptive
 --kv-block-runtime
 --kv-block-size N

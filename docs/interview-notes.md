@@ -191,13 +191,17 @@ CUDA mixed workload 缺少 backend-aware policy guard；Hybrid/Recurrent 只有 
 
 ### 如果再做两周？
 
-当前已完成 prefill 级 Conservative Benefit Gating：10 维 runtime snapshot、CPU/CUDA 分模、shadow upstream/CacheFlow plan、毫秒量纲置信界、有限探索和漂移回退。再做两周会把动作空间扩展到 slot placement/KV admission/speculation 的联合策略，并用更大模型与 Nsight 验证跨层因果链，而不是继续堆外围功能。
+当前已完成 prefill 级 Conservative Benefit Gating、53-wave 长驻收敛和 CUDA Event/Engine/TTFT 因果链。再做两周会在安装 Nsight Systems/Compute 后补 kernel occupancy/roofline，并把动作空间扩展到 slot placement/KV admission/speculation，而不是继续堆外围功能。
 
 ### Benefit Gating 怎么讲？
 
 先讲负结果：固定 adaptive chunk 在不同 backend/workload 上结论反号。然后画出同一生产 Seam 的两条 shadow plan，说明 learned policy 只在悲观 CacheFlow cost 仍低于乐观 upstream cost 加安全 margin 时启用。重点追问是：为什么置信半径必须乘 residual noise、为什么 SLO miss 进入 reward 却不等于 drift、为什么探索必须有预算、为什么单 prefill 必须直接回退。最后展示 CPU/CUDA 各 10-trial Latin 验收与 paired oracle regret，不声称这是全栈或所有模型上的全局最优。
 
-最终 10-trial 中 positive-lower-bound 次数为 0，CacheFlow 动作均为有限探索。面试时必须主动说清：短 fresh-process trace 验证了安全边界和回归门槛，deterministic replay 验证稳定优势下会收敛到 positive lower bound；但真实长驻服务的在线收敛尚未被当前 0.5B trace 证明。
+最终 10-trial fresh-process 中 positive-lower-bound 次数为 0：CPU 19 次有限探索，CUDA 0 次 probe/fail-closed；它只验证 backend-local 冷启动风险边界。随后 53-wave 单进程 CUDA trace 在 `beta=1.0` 下产生 17 次探索和 143 次 positive-lower-bound，覆盖 39 waves、最长连续 35 waves，终态收益仍大于不确定性，并在分布切换后 0 次错误启用、3 次安全回退，因此可以声称当前 0.5B/CUDA/workload 上观察到持续在线利用，但不能外推其他模型与硬件。
+
+### CUDA 因果链怎么讲？
+
+先说明干预不是相关性截图：每个 trial 配对运行 upstream/always，并做 Latin 顺序轮换。然后沿四层证据讲：动作计数变化 → prefill token/chunk 变化 → KV copy byte/CUDA Event 与 GPU activity 变化 → Engine execute/TTFT 变化。本轮强制启用增加 23 个 chunk，同时减少 145 个 prefill token、2.52 MB KV copy 和 0.260 ms CUDA Event，但 Engine execute 增加 31.2 ms、TTFT P95 增加 44.8 ms；说明 kernel/copy 局部改善不等于服务尾延迟改善，分块与排队结构同样重要。最后展示可提交 evidence JSON，并主动限定这不是 Nsight 全 kernel census。
 
 ## 三分钟现场演示顺序
 
@@ -205,7 +209,7 @@ CUDA mixed workload 缺少 backend-aware policy guard；Hybrid/Recurrent 只有 
 2. 运行 `test-kv-block-manager`，展示 partial-tail share -> append COW 和容量守恒。
 3. 打开 `llama-kv-cache-paged.cu`，说明真实 tensor gather/scatter/COW 与 direct-copy 分流。
 4. 运行 CUDA tensor adapter smoke，展示 shared blocks、COW 和相同输出。
-5. 展示 mixed workload 表和 flame chart：先讲 CPU 正结果，再主动讲 CUDA 负结果与下一步 gating。
+5. 展示短 trace、53-wave 收敛表和 CUDA 因果链：先区分探索/利用，再解释为什么 always 在该 trace 上增加数据移动并恶化 TTFT。
 
 ## 面试中的禁区
 
