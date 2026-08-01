@@ -4,6 +4,8 @@
 
 当前项目的可投入应用边界是：**单机、单个 `llama-server` 进程、CPU 或单 GPU、由本机或可信反向代理访问**。在这个边界内，真实 GGUF 模型、OpenAI API、流式输出、背压、取消、Deadline、KV 故障降级、指标和在线收益模型跨重启恢复均有自动化验证。
 
+这里的“投入应用”现在有具体消费者：`interview_assistant` 提供面向推免复习的浏览器工作流、资料检索引用、多轮会话和 SQLite 持久化。它与只发测试请求的 smoke 脚本不同，用户能够持续创建、恢复和使用会话。仓库只能证明应用可运行及用户旅程通过，不能在尚未对外部署时声称已有真实外部用户或线上流量。
+
 这不是“任意规模生产就绪”的宣称。多机路由、张量/流水并行、跨副本策略聚合、租户配额和 Kubernetes Operator 仍不在当前范围内。外部访问必须由反向代理完成 TLS、访问日志和限流；本仓库的生产启动器只绑定 `127.0.0.1`，避免误把未配置 TLS 的进程直接暴露到公网。
 
 ## 生产入口
@@ -63,5 +65,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start_production.ps1 `
 ## 已自动验收
 
 `scripts/run_benefit_checkpoint_smoke.py` 通过真实 CPU `llama-server` 完成三段 fresh-process 验收：先产生并落盘在线观测，强制终止后重启并恢复相同观测，再写入截断文件并确认服务不崩溃、恢复失败指标为 1、模型观测归零且请求仍可成功。结果写入 `results/benefit-checkpoint-smoke.json`。
+
+`scripts/run_user_application_journey.py` 使用真实 CUDA Qwen 模型和五份学习资料启动完整应用：浏览器首页、资料健康度、机器学习会话、带引用流式回答、应用重启续聊、第二个 408 会话以及两个并发用户请求均须成功。结果写入 `results/user-application-journey.json`；这证明的是可用应用链路，不冒充外部用户采用率。
 
 这一切片解决的是生产 P0 的“在线控制状态不能跨重启”问题。下一优先级是 24 小时 soak、磁盘满/只读目录故障注入、反向代理部署模板和请求级 trace correlation；在这些门槛完成前，不应宣称支持无人值守公网多租户部署。

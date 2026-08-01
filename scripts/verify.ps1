@@ -61,6 +61,8 @@ try {
         } finally {
             Remove-Item Env:CACHEFLOW_REQUIRE_PRODUCTION_BINARIES -ErrorAction SilentlyContinue
         }
+        python scripts\run_user_application_journey.py
+        if ($LASTEXITCODE -ne 0) { throw "real interview-assistant user journey failed" }
         python scripts\run_kv_block_smoke.py --mode share
         if ($LASTEXITCODE -ne 0) { throw "resident prefix sharing smoke failed" }
         python scripts\run_kv_block_smoke.py --mode preempt --port 8108

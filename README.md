@@ -120,6 +120,20 @@ Windows WDDM 首次运行前需要以管理员身份执行 CUDA Toolkit 的 `Ena
   -ApiKeyFile D:\secrets\cacheflow-api-keys.txt -Backend cuda -InstanceId gpu0
 ```
 
+## 真实用户应用
+
+`llama-server` 之外新增了可直接使用的“研途”推免面试学习助手。它读取现有 408、机器学习、数据库、编译原理和数学资料，提供带来源引用的检索增强回答、多轮流式会话、SQLite 持久化和应用重启续聊；浏览器不接触模型 API key。
+
+先按上节启动 CacheFlow Runtime，再在另一个终端启动应用：
+
+```powershell
+.\scripts\start_interview_assistant.ps1 `
+  -ApiKeyFile D:\secrets\cacheflow-api-keys.txt `
+  -KnowledgeRoot D:\exam\tuimian-monitor\docs\study
+```
+
+访问 `http://127.0.0.1:8766`。真实 CUDA 用户旅程不是单请求 smoke：它创建两个独立会话、完成三轮带引用回答、并发两个用户请求、重启应用并验证历史续聊，证据见 `results/user-application-journey.json`。详细边界见 [用户应用说明](docs/user-application.md)。
+
 ## 代码边界
 
 ```text
