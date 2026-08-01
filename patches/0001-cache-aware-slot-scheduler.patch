@@ -18,10 +18,10 @@ index 9e7b125..6195e3f 100644
  license_add_file("llama.cpp" "LICENSE")
  
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 8382c1d..858c809 100644
+index 8382c1d..0a711ab 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -3256,6 +3256,172 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3256,6 +3256,222 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.slot_prompt_similarity = std::stof(value);
          }
      ).set_examples({LLAMA_EXAMPLE_SERVER}));
@@ -31,6 +31,7 @@ index 8382c1d..858c809 100644
 +        [](common_params & params, const std::string & value) {
 +            if (value == "upstream") {
 +                params.scheduler_policy = value;
++                params.benefit_policy = "upstream";
 +                params.slot_cache_eviction_penalty = 0.0f;
 +                params.prefill_policy = "greedy";
 +                params.prefill_chunk_size = 0;
@@ -40,6 +41,7 @@ index 8382c1d..858c809 100644
 +                params.speculative_adaptive = false;
 +            } else if (value == "cacheflow") {
 +                params.scheduler_policy = value;
++                params.benefit_policy = "learned";
 +                params.slot_cache_eviction_penalty = 0.25f;
 +                params.prefill_policy = "adaptive";
 +                params.prefill_chunk_adaptive = true;
@@ -52,19 +54,65 @@ index 8382c1d..858c809 100644
 +        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
++        {"--benefit-policy"}, "upstream|always|rule|learned",
++        "select conservative prefill benefit gating (learned uses backend-local confidence bounds)",
++        [](common_params & params, const std::string & value) {
++            if (value != "upstream" && value != "always" && value != "rule" && value != "learned") {
++                throw std::invalid_argument("benefit policy must be upstream, always, rule, or learned");
++            }
++            params.benefit_policy = value;
++            if (value != "upstream") params.scheduler_policy = "cacheflow";
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--benefit-min-observations"}, "N",
++        "observations required per action before confidence-bound selection",
++        [](common_params & params, int value) {
++            if (value <= 0) throw std::invalid_argument("benefit minimum observations must be positive");
++            params.benefit_min_observations = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--benefit-exploration-interval"}, "N",
++        "safe upstream decisions between cold-start CacheFlow probes",
++        [](common_params & params, int value) {
++            if (value <= 0) throw std::invalid_argument("benefit exploration interval must be positive");
++            params.benefit_exploration_interval = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--benefit-confidence-beta"}, "BETA",
++        "confidence radius multiplier for conservative CacheFlow enablement",
++        [](common_params & params, const std::string & value) {
++            params.benefit_confidence_beta = std::stof(value);
++            if (params.benefit_confidence_beta < 0.0f) throw std::invalid_argument("benefit confidence beta must be non-negative");
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--benefit-safety-margin-ms"}, "MS",
++        "minimum pessimistic latency gain required to select CacheFlow",
++        [](common_params & params, const std::string & value) {
++            params.benefit_safety_margin_ms = std::stof(value);
++            if (params.benefit_safety_margin_ms < 0.0f) throw std::invalid_argument("benefit safety margin must be non-negative");
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
 +        {"--prefill-policy"}, "greedy|fixed|adaptive",
 +        "select prefill control independently (fixed uses --prefill-chunk-size)",
 +        [](common_params & params, const std::string & value) {
 +            params.scheduler_policy = "cacheflow";
 +            if (value == "greedy") {
++                params.benefit_policy = "upstream";
 +                params.prefill_policy = value;
 +                params.prefill_chunk_size = 0;
 +                params.prefill_chunk_adaptive = false;
 +            } else if (value == "fixed") {
++                params.benefit_policy = "always";
 +                params.prefill_policy = value;
 +                if (params.prefill_chunk_size == 0) params.prefill_chunk_size = 128;
 +                params.prefill_chunk_adaptive = false;
 +            } else if (value == "adaptive") {
++                params.benefit_policy = "always";
 +                params.prefill_policy = value;
 +                params.prefill_chunk_adaptive = true;
 +            } else {
@@ -155,6 +203,7 @@ index 8382c1d..858c809 100644
 +            params.prefill_chunk_size = value;
 +            params.scheduler_policy = value == 0 ? params.scheduler_policy : "cacheflow";
 +            params.prefill_policy = value == 0 ? "greedy" : "fixed";
++            params.benefit_policy = value == 0 ? "upstream" : "always";
 +        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
@@ -163,6 +212,7 @@ index 8382c1d..858c809 100644
 +        [](common_params & params) {
 +            params.scheduler_policy = "cacheflow";
 +            params.prefill_policy = "adaptive";
++            params.benefit_policy = "always";
 +            params.prefill_chunk_adaptive = true;
 +        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
@@ -194,7 +244,7 @@ index 8382c1d..858c809 100644
      add_opt(common_arg(
          {"--lora-init-without-apply"},
          string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),
-@@ -3413,6 +3579,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3413,6 +3629,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
  
      //
      // speculative parameters
@@ -249,15 +299,20 @@ index 8382c1d..858c809 100644
  
      add_opt(common_arg(
 diff --git a/common/common.h b/common/common.h
-index 0b284cb..e43bea8 100644
+index 0b284cb..1d5b4b1 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -653,6 +653,25 @@ struct common_params {
+@@ -653,6 +653,30 @@ struct common_params {
      std::string media_path; // path to directory for loading media files
  
      float slot_prompt_similarity = 0.1f;
 +    std::string scheduler_policy = "upstream";
 +    std::string prefill_policy = "greedy";
++    std::string benefit_policy = "upstream";
++    int32_t benefit_min_observations = 6;
++    int32_t benefit_exploration_interval = 8;
++    float benefit_confidence_beta = 1.0f;
++    float benefit_safety_margin_ms = 0.25f;
 +    std::string spec_policy = "fixed";
 +    float slot_cache_eviction_penalty = 0.0f;
 +    int32_t prefill_chunk_size = 0;
@@ -1005,10 +1060,10 @@ index db82539..e749164 100644
  
      //
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index e284a58..c138f7c 100644
+index e284a58..e97f439 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -116,6 +116,110 @@ function(llama_build_and_test source)
+@@ -116,6 +116,116 @@ function(llama_build_and_test source)
      set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})
  endfunction()
  
@@ -1028,6 +1083,7 @@ index e284a58..c138f7c 100644
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-inference-iteration.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-inference-scheduler.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-model-cost-model.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-benefit-policy.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-capacity-planner.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-runtime.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-block-manager.cpp
@@ -1047,6 +1103,11 @@ index e284a58..c138f7c 100644
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-model-cost-model.cpp)
 +target_include_directories(test-model-cost-model PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
 +llama_test(test-model-cost-model)
++
++llama_build(test-benefit-policy.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-benefit-policy.cpp)
++target_include_directories(test-benefit-policy PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++llama_test(test-benefit-policy)
 +
 +llama_build(test-kv-capacity-planner.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-capacity-planner.cpp)
@@ -1371,12 +1432,156 @@ index 0000000..3af8e59
 +    if (!backend->verify_integrity()) return 1;
 +    return 0;
 +}
+diff --git a/tests/test-benefit-policy.cpp b/tests/test-benefit-policy.cpp
+new file mode 100644
+index 0000000..c103f98
+--- /dev/null
++++ b/tests/test-benefit-policy.cpp
+@@ -0,0 +1,138 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
++#include "server-benefit-policy.h"
++
++#include <cassert>
++#include <cmath>
++
++static server_benefit_features workload(bool cuda = false) {
++    server_benefit_features value;
++    value.backend = cuda ? server_benefit_backend::cuda : server_benefit_backend::cpu;
++    value.batch_width = 4;
++    value.decode_tokens = 2;
++    value.upstream_prefill_tokens = 256;
++    value.cacheflow_prefill_tokens = 128;
++    value.cacheflow_chunks = 2;
++    value.active_sequences = 4;
++    value.remaining_prefill_tokens = 512;
++    value.maximum_remaining_tokens = 180;
++    value.kv_pressure = 0.45;
++    return value;
++}
++
++int main() {
++    server_benefit_config config;
++    config.mode = server_benefit_mode::learned;
++    config.minimum_observations = 4;
++    config.exploration_interval = 3;
++    config.confidence_beta = 0.05;
++    config.safety_margin_ms = 0.1;
++    config.drift_consecutive_limit = 2;
++    config.cooldown_decisions = 3;
++
++    // Cold start is safe: establish the upstream baseline before probing.
++    server_benefit_policy policy(config);
++    const auto features = workload();
++    for (size_t i = 0; i < config.minimum_observations; ++i) {
++        const auto decision = policy.choose(features);
++        assert(decision.action == server_benefit_action::upstream);
++        assert(decision.reason == server_benefit_reason::cold_start);
++        policy.observe(decision, { 20.0, false, false });
++    }
++
++    // Exploration is deterministic and bounded; learned selection requires
++    // evidence that CacheFlow's pessimistic cost beats upstream's optimistic cost.
++    auto probe = policy.choose(features);
++    assert(probe.action == server_benefit_action::cacheflow);
++    assert(probe.reason == server_benefit_reason::safe_exploration);
++    policy.observe(probe, { 10.0, false, false });
++    size_t guard = 0;
++    while (policy.snapshot(server_benefit_backend::cpu).cacheflow_observations <
++            config.minimum_observations && guard++ < 32) {
++        const auto decision = policy.choose(features);
++        policy.observe(decision, {
++            decision.action == server_benefit_action::cacheflow ? 10.0 : 20.0,
++            false,
++            false,
++        });
++    }
++    assert(guard < 32);
++    auto learned = policy.choose(features);
++    assert(learned.action == server_benefit_action::cacheflow);
++    assert(learned.reason == server_benefit_reason::positive_lower_bound);
++    assert(learned.predicted_benefit_ms > learned.uncertainty_ms);
++
++    // Inconclusive evidence triggers only a finite number of sparse probes.
++    auto ambiguous_config = config;
++    ambiguous_config.minimum_observations = 1;
++    ambiguous_config.exploration_interval = 1;
++    ambiguous_config.confidence_beta = 100.0;
++    server_benefit_policy ambiguous(ambiguous_config);
++    for (size_t i = 0; i < 20; ++i) {
++        const auto decision = ambiguous.choose(features);
++        ambiguous.observe(decision, { 20.0, false, false });
++    }
++    const auto ambiguous_state = ambiguous.snapshot(server_benefit_backend::cpu);
++    assert(ambiguous_state.exploration_decisions == 3);
++    assert(ambiguous.choose(features).action == server_benefit_action::upstream);
++
++    // CPU evidence must never leak into the CUDA model.
++    auto cuda_decision = policy.choose(workload(true));
++    assert(cuda_decision.action == server_benefit_action::upstream);
++    assert(cuda_decision.reason == server_benefit_reason::cold_start);
++
++    // Unsafe pressure suppresses probing and learned enablement.
++    auto pressured = features;
++    pressured.kv_pressure = 0.99;
++    auto pressure_decision = policy.choose(pressured);
++    assert(pressure_decision.action == server_benefit_action::upstream);
++    assert(pressure_decision.reason == server_benefit_reason::safety_fallback);
++
++    auto lone_prefill = features;
++    lone_prefill.decode_tokens = 0;
++    lone_prefill.active_sequences = 1;
++    lone_prefill.cacheflow_chunks = 1;
++    auto throughput_only = policy.choose(lone_prefill);
++    assert(throughput_only.action == server_benefit_action::upstream);
++    assert(throughput_only.reason == server_benefit_reason::safety_fallback);
++
++    // Consecutive severe residuals trip a backend-local cooldown.
++    policy.observe(learned, { 100.0, true, true });
++    policy.observe(learned, { 100.0, true, true });
++    auto cooldown = policy.choose(features);
++    assert(cooldown.action == server_benefit_action::upstream);
++    assert(cooldown.reason == server_benefit_reason::drift_cooldown);
++    assert(policy.snapshot(server_benefit_backend::cpu).drift_events == 1);
++
++    // Fixed policies support controlled A/B experiments without bypassing the seam.
++    config.mode = server_benefit_mode::always_cacheflow;
++    server_benefit_policy always(config);
++    assert(always.choose(features).action == server_benefit_action::cacheflow);
++    config.mode = server_benefit_mode::upstream;
++    server_benefit_policy upstream(config);
++    assert(upstream.choose(features).action == server_benefit_action::upstream);
++
++    // Replaying the same ordered snapshots and feedback through the production
++    // seam is bit-for-bit deterministic at the decision level.
++    config.mode = server_benefit_mode::learned;
++    server_benefit_policy replay_a(config);
++    server_benefit_policy replay_b(config);
++    for (size_t i = 0; i < 30; ++i) {
++        auto replay_features = workload(i % 5 == 0);
++        replay_features.decode_tokens += i % 3;
++        replay_features.kv_pressure += (i % 4) * 0.03;
++        const auto left = replay_a.choose(replay_features);
++        const auto right = replay_b.choose(replay_features);
++        assert(left.id == right.id);
++        assert(left.action == right.action);
++        assert(left.reason == right.reason);
++        assert(std::abs(left.predicted_benefit_ms - right.predicted_benefit_ms) < 1e-12);
++        const double elapsed = left.action == server_benefit_action::cacheflow ? 11.0 : 19.0;
++        replay_a.observe(left, { elapsed, false, false });
++        replay_b.observe(right, { elapsed, false, false });
++    }
++
++    return 0;
++}
 diff --git a/tests/test-inference-engine.cpp b/tests/test-inference-engine.cpp
 new file mode 100644
-index 0000000..9d66fd2
+index 0000000..9ba8b55
 --- /dev/null
 +++ b/tests/test-inference-engine.cpp
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,93 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -1394,6 +1599,10 @@ index 0000000..9d66fd2
 +    std::filesystem::remove(trace);
 +    engine.configure_trace(trace);
 +    engine.scheduler().configure({0.1f, 0.25f, 64, true, 16, 256, 25.0});
++    server_benefit_config benefit_config;
++    benefit_config.mode = server_benefit_mode::always_cacheflow;
++    engine.benefit_policy().configure(benefit_config);
++    assert(engine.benefit_policy().choose({}).action == server_benefit_action::cacheflow);
 +    engine.set_kv_runtime(std::make_unique<server_kv_runtime>(16, 64));
 +    engine.set_swap_store(server_kv_create_host_swap_store(1 << 20));
 +    engine.set_runtime(std::make_unique<server_deterministic_runtime>(
@@ -1421,6 +1630,7 @@ index 0000000..9d66fd2
 +    assert(snapshot.iteration_plan.decode_tokens == 1);
 +    assert(snapshot.iteration_plan.prefill_tokens == 7);
 +    assert(snapshot.block_runtime_enabled && snapshot.swap_store_enabled);
++    assert(snapshot.cpu_benefit.cacheflow_decisions == 1);
 +
 +    bool prepared = false;
 +    bool executed = false;
@@ -1509,10 +1719,10 @@ index 0000000..298af36
 +}
 diff --git a/tests/test-inference-scheduler.cpp b/tests/test-inference-scheduler.cpp
 new file mode 100644
-index 0000000..966521d
+index 0000000..dd36bec
 --- /dev/null
 +++ b/tests/test-inference-scheduler.cpp
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,130 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -1571,6 +1781,30 @@ index 0000000..966521d
 +    assert(next.quota(1) == 0);
 +}
 +
++static void test_shadow_upstream_plan_is_pure_and_matches_greedy() {
++    server_inference_scheduler scheduler({0.1f, 0.5f, 32});
++    const std::vector<server_prefill_candidate> candidates = {{2, 10}, {0, 100}, {1, 20}};
++    const auto shadow = server_inference_scheduler::plan_upstream_prefill(candidates, 64);
++    assert(shadow.effective_chunk_size == 0);
++    assert(shadow.quota(0) == 64);
++    assert(shadow.quota(1) == 0);
++    assert(shadow.quota(2) == 0);
++
++    // Shadow planning must not advance the CacheFlow round-robin cursor.
++    const auto first = scheduler.plan_prefill(candidates, 32);
++    assert(first.quota(0) == 32);
++
++    server_prefill_plan reordered;
++    reordered.tokens_scheduled = 30;
++    reordered.allocations = {{2, 10}, {1, 20}};
++    server_prefill_plan same_quotas;
++    same_quotas.tokens_scheduled = 30;
++    same_quotas.allocations = {{1, 20}, {2, 10}};
++    assert(reordered.equivalent_allocations(same_quotas));
++    same_quotas.allocations[0].tokens = 19;
++    assert(!reordered.equivalent_allocations(same_quotas));
++}
++
 +static void test_adaptive_chunk_responds_to_real_iteration_feedback() {
 +    server_scheduler_config config;
 +    config.adaptive_prefill = true;
@@ -1614,6 +1848,7 @@ index 0000000..966521d
 +    test_threshold_negative_benefit_and_lru_tie_break();
 +    test_chunked_prefill_shares_an_iteration_budget();
 +    test_zero_chunk_preserves_greedy_upstream_behavior();
++    test_shadow_upstream_plan_is_pure_and_matches_greedy();
 +    test_adaptive_chunk_responds_to_real_iteration_feedback();
 +    test_adaptive_cpu_safety_fallback_selects_greedy_action();
 +    return 0;
@@ -2552,10 +2787,10 @@ index 0000000..297ccfe
 +    return 0;
 +}
 diff --git a/tools/server/CMakeLists.txt b/tools/server/CMakeLists.txt
-index 7d42743..a18ab1b 100644
+index 7d42743..62b13db 100644
 --- a/tools/server/CMakeLists.txt
 +++ b/tools/server/CMakeLists.txt
-@@ -11,6 +11,28 @@ add_library(${TARGET} STATIC
+@@ -11,6 +11,30 @@ add_library(${TARGET} STATIC
      server-task.h
      server-queue.cpp
      server-queue.h
@@ -2581,10 +2816,12 @@ index 7d42743..a18ab1b 100644
 +    server-runtime-adapter.h
 +    server-model-cost-model.cpp
 +    server-model-cost-model.h
++    server-benefit-policy.cpp
++    server-benefit-policy.h
      server-common.cpp
      server-common.h
      server-context.cpp
-@@ -27,6 +49,12 @@ target_include_directories(${TARGET} PRIVATE ../mtmd)
+@@ -27,6 +51,12 @@ target_include_directories(${TARGET} PRIVATE ../mtmd)
  target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
  target_link_libraries(${TARGET} PUBLIC llama-common mtmd ${CMAKE_THREAD_LIBS_INIT})
  
@@ -2597,8 +2834,452 @@ index 7d42743..a18ab1b 100644
  # llama-server-impl: server logic, reusable by app
  
  set(TARGET llama-server-impl)
+diff --git a/tools/server/server-benefit-policy.cpp b/tools/server/server-benefit-policy.cpp
+new file mode 100644
+index 0000000..44e9b43
+--- /dev/null
++++ b/tools/server/server-benefit-policy.cpp
+@@ -0,0 +1,291 @@
++#include "server-benefit-policy.h"
++
++#include <algorithm>
++#include <cmath>
++
++namespace {
++template <size_t N>
++bool invert(const double (&input)[N][N], double (&output)[N][N]) {
++    double matrix[N][2 * N]{};
++    for (size_t row = 0; row < N; ++row) {
++        for (size_t column = 0; column < N; ++column) matrix[row][column] = input[row][column];
++        matrix[row][N + row] = 1.0;
++    }
++    for (size_t pivot = 0; pivot < N; ++pivot) {
++        size_t best = pivot;
++        for (size_t row = pivot + 1; row < N; ++row) {
++            if (std::abs(matrix[row][pivot]) > std::abs(matrix[best][pivot])) best = row;
++        }
++        if (std::abs(matrix[best][pivot]) < 1e-12) return false;
++        if (best != pivot) {
++            for (size_t column = 0; column < 2 * N; ++column) {
++                std::swap(matrix[pivot][column], matrix[best][column]);
++            }
++        }
++        const double divisor = matrix[pivot][pivot];
++        for (size_t column = 0; column < 2 * N; ++column) matrix[pivot][column] /= divisor;
++        for (size_t row = 0; row < N; ++row) {
++            if (row == pivot) continue;
++            const double factor = matrix[row][pivot];
++            for (size_t column = 0; column < 2 * N; ++column) {
++                matrix[row][column] -= factor * matrix[pivot][column];
++            }
++        }
++    }
++    for (size_t row = 0; row < N; ++row) {
++        for (size_t column = 0; column < N; ++column) output[row][column] = matrix[row][N + column];
++    }
++    return true;
++}
++}
++
++void server_benefit_policy::ridge_model::reset(double lambda) {
++    observations = 0;
++    residual_variance_ewma = 0.0;
++    for (size_t row = 0; row < feature_count; ++row) {
++        rhs[row] = 0.0;
++        for (size_t column = 0; column < feature_count; ++column) normal[row][column] = 0.0;
++        normal[row][row] = lambda;
++    }
++}
++
++void server_benefit_policy::ridge_model::observe(
++        const std::array<double, feature_count> & x, double cost) {
++    const double residual = cost - predict(x);
++    constexpr double alpha = 0.2;
++    residual_variance_ewma = observations == 0 ? residual * residual :
++            alpha * residual * residual + (1.0 - alpha) * residual_variance_ewma;
++    for (size_t row = 0; row < feature_count; ++row) {
++        rhs[row] += x[row] * cost;
++        for (size_t column = 0; column < feature_count; ++column) {
++            normal[row][column] += x[row] * x[column];
++        }
++    }
++    observations++;
++}
++
++double server_benefit_policy::ridge_model::predict(
++        const std::array<double, feature_count> & x) const {
++    double inverse[feature_count][feature_count]{};
++    if (!invert(normal, inverse)) return 0.0;
++    double prediction = 0.0;
++    for (size_t row = 0; row < feature_count; ++row) {
++        double theta = 0.0;
++        for (size_t column = 0; column < feature_count; ++column) theta += inverse[row][column] * rhs[column];
++        prediction += x[row] * theta;
++    }
++    return std::max(0.0, prediction);
++}
++
++double server_benefit_policy::ridge_model::radius(
++        const std::array<double, feature_count> & x, double beta) const {
++    double inverse[feature_count][feature_count]{};
++    if (!invert(normal, inverse)) return 1e9;
++    double variance = 0.0;
++    for (size_t row = 0; row < feature_count; ++row) {
++        for (size_t column = 0; column < feature_count; ++column) {
++            variance += x[row] * inverse[row][column] * x[column];
++        }
++    }
++    const double noise_ms = std::max(1.0, std::sqrt(std::max(0.0, residual_variance_ewma)));
++    return beta * noise_ms * std::sqrt(std::max(0.0, variance));
++}
++
++server_benefit_policy::server_benefit_policy(server_benefit_config config) {
++    configure(config);
++}
++
++void server_benefit_policy::configure(server_benefit_config config) {
++    config_ = config;
++    config_.minimum_observations = std::max<size_t>(1, config_.minimum_observations);
++    config_.exploration_interval = std::max<size_t>(1, config_.exploration_interval);
++    config_.ridge_lambda = std::max(1e-6, config_.ridge_lambda);
++    config_.drift_consecutive_limit = std::max<size_t>(1, config_.drift_consecutive_limit);
++    cpu_ = {};
++    cuda_ = {};
++    cpu_.upstream.reset(config_.ridge_lambda);
++    cpu_.cacheflow.reset(config_.ridge_lambda);
++    cuda_.upstream.reset(config_.ridge_lambda);
++    cuda_.cacheflow.reset(config_.ridge_lambda);
++    next_id_ = 1;
++}
++
++server_benefit_policy::backend_state & server_benefit_policy::state(server_benefit_backend backend) {
++    return backend == server_benefit_backend::cuda ? cuda_ : cpu_;
++}
++
++const server_benefit_policy::backend_state & server_benefit_policy::state(server_benefit_backend backend) const {
++    return backend == server_benefit_backend::cuda ? cuda_ : cpu_;
++}
++
++std::array<double, server_benefit_policy::feature_count> server_benefit_policy::normalize(
++        const server_benefit_features & value) const {
++    const double upstream = std::max<size_t>(1, value.upstream_prefill_tokens);
++    return {
++        1.0,
++        std::min(1.0, value.batch_width / 32.0),
++        std::min(1.0, value.decode_tokens / 32.0),
++        std::min(1.0, value.upstream_prefill_tokens / 2048.0),
++        std::clamp((upstream - std::min<double>(upstream, value.cacheflow_prefill_tokens)) / upstream, 0.0, 1.0),
++        std::min(1.0, value.cacheflow_chunks / 32.0),
++        std::min(1.0, value.active_sequences / 32.0),
++        std::min(1.0, value.remaining_prefill_tokens / 8192.0),
++        value.remaining_prefill_tokens == 0 ? 0.0 : std::min(1.0,
++                (double) value.maximum_remaining_tokens / value.remaining_prefill_tokens),
++        std::clamp(value.kv_pressure, 0.0, 1.0),
++    };
++}
++
++server_benefit_decision server_benefit_policy::choose(const server_benefit_features & features) {
++    auto & backend = state(features.backend);
++    server_benefit_decision decision;
++    decision.id = next_id_++;
++    decision.backend = features.backend;
++    decision.model_features = normalize(features);
++
++    auto select = [&](server_benefit_action action, server_benefit_reason reason) {
++        decision.action = action;
++        decision.reason = reason;
++        if (action == server_benefit_action::cacheflow) backend.cacheflow_decisions++;
++        else backend.upstream_decisions++;
++        if (reason == server_benefit_reason::cold_start) backend.cold_start_decisions++;
++        if (reason == server_benefit_reason::positive_lower_bound) backend.positive_lower_bound_decisions++;
++        if (reason == server_benefit_reason::insufficient_evidence) backend.insufficient_evidence_decisions++;
++    };
++
++    if (config_.mode == server_benefit_mode::upstream) {
++        select(server_benefit_action::upstream, server_benefit_reason::fixed_upstream);
++        return decision;
++    }
++    if (config_.mode == server_benefit_mode::always_cacheflow) {
++        select(server_benefit_action::cacheflow, server_benefit_reason::fixed_cacheflow);
++        return decision;
++    }
++    if (features.kv_pressure > config_.maximum_kv_pressure) {
++        backend.safety_fallbacks++;
++        select(server_benefit_action::upstream, server_benefit_reason::safety_fallback);
++        return decision;
++    }
++    if (config_.mode == server_benefit_mode::rule) {
++        const bool match = features.cacheflow_prefill_tokens < features.upstream_prefill_tokens &&
++                features.active_sequences > 1 && features.cacheflow_chunks > 1;
++        select(match ? server_benefit_action::cacheflow : server_benefit_action::upstream,
++                match ? server_benefit_reason::rule_match : server_benefit_reason::rule_reject);
++        return decision;
++    }
++    // Chunking a lone prefill only sacrifices throughput. With multiple
++    // prefills it can improve fairness/TTFT even before decode begins, so the
++    // statistical model decides inside that structurally useful region.
++    const bool structurally_safe = features.active_sequences > 1 &&
++            features.cacheflow_chunks > 1;
++    if (!structurally_safe) {
++        backend.safety_fallbacks++;
++        select(server_benefit_action::upstream, server_benefit_reason::safety_fallback);
++        return decision;
++    }
++    if (backend.cooldown_remaining > 0) {
++        backend.cooldown_remaining--;
++        select(server_benefit_action::upstream, server_benefit_reason::drift_cooldown);
++        return decision;
++    }
++    if (backend.upstream.observations < config_.minimum_observations) {
++        select(server_benefit_action::upstream, server_benefit_reason::cold_start);
++        return decision;
++    }
++    if (backend.cacheflow.observations < config_.minimum_observations) {
++        backend.decisions_since_probe++;
++        if (backend.cacheflow.observations == 0 ||
++                backend.decisions_since_probe >= config_.exploration_interval) {
++            backend.decisions_since_probe = 0;
++            backend.exploration_decisions++;
++            select(server_benefit_action::cacheflow, server_benefit_reason::safe_exploration);
++        } else {
++            select(server_benefit_action::upstream, server_benefit_reason::cold_start);
++        }
++        return decision;
++    }
++
++    const double upstream_cost = backend.upstream.predict(decision.model_features);
++    const double cacheflow_cost = backend.cacheflow.predict(decision.model_features);
++    const double upstream_radius = backend.upstream.radius(decision.model_features, config_.confidence_beta);
++    const double cacheflow_radius = backend.cacheflow.radius(decision.model_features, config_.confidence_beta);
++    decision.predicted_benefit_ms = upstream_cost - cacheflow_cost;
++    decision.uncertainty_ms = upstream_radius + cacheflow_radius + config_.safety_margin_ms;
++    const bool proven = cacheflow_cost + cacheflow_radius + config_.safety_margin_ms <
++            std::max(0.0, upstream_cost - upstream_radius);
++    if (proven) {
++        backend.decisions_since_probe = 0;
++        select(server_benefit_action::cacheflow, server_benefit_reason::positive_lower_bound);
++        return decision;
++    }
++
++    // An inconclusive model must not become permanently stuck after reaching
++    // the minimum sample count. Continue sparse exploration up to a strict
++    // backend-local budget, then fail closed if the lower bound is still not
++    // positive.
++    backend.decisions_since_probe++;
++    const uint64_t exploration_budget = config_.minimum_observations * 3;
++    if (backend.cacheflow.observations < exploration_budget &&
++            backend.decisions_since_probe >= config_.exploration_interval) {
++        backend.decisions_since_probe = 0;
++        backend.exploration_decisions++;
++        select(server_benefit_action::cacheflow, server_benefit_reason::safe_exploration);
++    } else {
++        select(server_benefit_action::upstream, server_benefit_reason::insufficient_evidence);
++    }
++    return decision;
++}
++
++void server_benefit_policy::observe(
++        const server_benefit_decision & decision, const server_benefit_feedback & feedback) {
++    if (feedback.elapsed_ms <= 0.0) return;
++    auto & backend = state(decision.backend);
++    auto & model = decision.action == server_benefit_action::cacheflow ? backend.cacheflow : backend.upstream;
++    auto & bad_residuals = decision.action == server_benefit_action::cacheflow
++            ? backend.cacheflow_bad_residuals : backend.upstream_bad_residuals;
++    const double predicted = model.predict(decision.model_features);
++    double cost = feedback.elapsed_ms;
++    if (feedback.slo_violation || feedback.elapsed_ms > config_.target_iteration_ms) {
++        cost += config_.slo_penalty * std::max(0.0, feedback.elapsed_ms - config_.target_iteration_ms);
++    }
++    if (feedback.execution_failed) cost += config_.failure_penalty_ms;
++
++    const double residual = std::abs(cost - predicted);
++    const bool mature = model.observations >= config_.minimum_observations * 3;
++    // An SLO miss changes the optimized cost but is not itself model drift:
++    // a consistently slow backend can be predicted accurately. Drift requires
++    // an execution failure or a mature model's unexpectedly large residual.
++    const bool severe = feedback.execution_failed ||
++            (mature && residual > config_.drift_ratio * std::max(1.0, predicted));
++    if (severe) bad_residuals++;
++    else bad_residuals = 0;
++
++    model.observe(decision.model_features, cost);
++    if (bad_residuals >= config_.drift_consecutive_limit) {
++        backend.drift_events++;
++        bad_residuals = 0;
++        backend.cooldown_remaining = config_.cooldown_decisions;
++        model.reset(config_.ridge_lambda);
++    }
++}
++
++server_benefit_snapshot server_benefit_policy::snapshot(server_benefit_backend backend_id) const {
++    const auto & backend = state(backend_id);
++    std::array<double, feature_count> reference{};
++    reference[0] = 1.0;
++    return {
++        backend.upstream.observations,
++        backend.cacheflow.observations,
++        backend.upstream_decisions,
++        backend.cacheflow_decisions,
++        backend.exploration_decisions,
++        backend.cold_start_decisions,
++        backend.positive_lower_bound_decisions,
++        backend.insufficient_evidence_decisions,
++        backend.safety_fallbacks,
++        backend.drift_events,
++        backend.cooldown_remaining,
++        backend.upstream.predict(reference),
++        backend.cacheflow.predict(reference),
++    };
++}
+diff --git a/tools/server/server-benefit-policy.h b/tools/server/server-benefit-policy.h
+new file mode 100644
+index 0000000..f3c0b54
+--- /dev/null
++++ b/tools/server/server-benefit-policy.h
+@@ -0,0 +1,141 @@
++#pragma once
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++
++enum class server_benefit_backend { cpu, cuda };
++enum class server_benefit_action { upstream, cacheflow };
++enum class server_benefit_mode { upstream, always_cacheflow, rule, learned };
++
++enum class server_benefit_reason {
++    fixed_upstream,
++    fixed_cacheflow,
++    rule_match,
++    rule_reject,
++    cold_start,
++    safe_exploration,
++    positive_lower_bound,
++    insufficient_evidence,
++    safety_fallback,
++    drift_cooldown,
++};
++
++constexpr size_t server_benefit_feature_count = 10;
++
++struct server_benefit_config {
++    server_benefit_mode mode = server_benefit_mode::upstream;
++    size_t minimum_observations = 6;
++    size_t exploration_interval = 8;
++    double ridge_lambda = 1.0;
++    double confidence_beta = 1.0;
++    double safety_margin_ms = 0.25;
++    double maximum_kv_pressure = 0.90;
++    double target_iteration_ms = 40.0;
++    double slo_penalty = 2.0;
++    double failure_penalty_ms = 1000.0;
++    double drift_ratio = 2.5;
++    size_t drift_consecutive_limit = 3;
++    size_t cooldown_decisions = 16;
++};
++
++struct server_benefit_features {
++    server_benefit_backend backend = server_benefit_backend::cpu;
++    size_t batch_width = 0;
++    size_t decode_tokens = 0;
++    size_t upstream_prefill_tokens = 0;
++    size_t cacheflow_prefill_tokens = 0;
++    size_t cacheflow_chunks = 0;
++    size_t active_sequences = 0;
++    size_t remaining_prefill_tokens = 0;
++    size_t maximum_remaining_tokens = 0;
++    double kv_pressure = 0.0;
++};
++
++struct server_benefit_feedback {
++    double elapsed_ms = 0.0;
++    bool slo_violation = false;
++    bool execution_failed = false;
++};
++
++struct server_benefit_decision {
++    uint64_t id = 0;
++    server_benefit_backend backend = server_benefit_backend::cpu;
++    server_benefit_action action = server_benefit_action::upstream;
++    server_benefit_reason reason = server_benefit_reason::fixed_upstream;
++    double predicted_benefit_ms = 0.0;
++    double uncertainty_ms = 0.0;
++
++    // Opaque observation context retained so feedback is attributed to the
++    // exact decision that produced it, not to a later mutable snapshot.
++    std::array<double, server_benefit_feature_count> model_features{};
++};
++
++struct server_benefit_snapshot {
++    uint64_t upstream_observations = 0;
++    uint64_t cacheflow_observations = 0;
++    uint64_t upstream_decisions = 0;
++    uint64_t cacheflow_decisions = 0;
++    uint64_t exploration_decisions = 0;
++    uint64_t cold_start_decisions = 0;
++    uint64_t positive_lower_bound_decisions = 0;
++    uint64_t insufficient_evidence_decisions = 0;
++    uint64_t safety_fallbacks = 0;
++    uint64_t drift_events = 0;
++    size_t cooldown_remaining = 0;
++    double upstream_cost_ms = 0.0;
++    double cacheflow_cost_ms = 0.0;
++};
++
++// Conservative contextual policy for the production scheduling seam. It owns
++// backend-local online models and exposes only choose/observe/snapshot.
++class server_benefit_policy {
++public:
++    explicit server_benefit_policy(server_benefit_config config = {});
++
++    void configure(server_benefit_config config);
++    server_benefit_decision choose(const server_benefit_features & features);
++    void observe(const server_benefit_decision & decision, const server_benefit_feedback & feedback);
++    server_benefit_snapshot snapshot(server_benefit_backend backend) const;
++
++private:
++    static constexpr size_t feature_count = server_benefit_feature_count;
++
++    struct ridge_model {
++        double normal[feature_count][feature_count]{};
++        double rhs[feature_count]{};
++        uint64_t observations = 0;
++        double residual_variance_ewma = 0.0;
++
++        void reset(double lambda);
++        void observe(const std::array<double, feature_count> & x, double cost);
++        double predict(const std::array<double, feature_count> & x) const;
++        double radius(const std::array<double, feature_count> & x, double beta) const;
++    };
++
++    struct backend_state {
++        ridge_model upstream;
++        ridge_model cacheflow;
++        uint64_t upstream_decisions = 0;
++        uint64_t cacheflow_decisions = 0;
++        uint64_t exploration_decisions = 0;
++        uint64_t cold_start_decisions = 0;
++        uint64_t positive_lower_bound_decisions = 0;
++        uint64_t insufficient_evidence_decisions = 0;
++        uint64_t safety_fallbacks = 0;
++        uint64_t drift_events = 0;
++        size_t upstream_bad_residuals = 0;
++        size_t cacheflow_bad_residuals = 0;
++        size_t cooldown_remaining = 0;
++        uint64_t decisions_since_probe = 0;
++    };
++
++    server_benefit_config config_;
++    backend_state cpu_;
++    backend_state cuda_;
++    uint64_t next_id_ = 1;
++
++    backend_state & state(server_benefit_backend backend);
++    const backend_state & state(server_benefit_backend backend) const;
++    std::array<double, feature_count> normalize(const server_benefit_features & features) const;
++};
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..ef80975 100644
+index 986b2f1..698a61a 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -4,6 +4,14 @@
@@ -2818,7 +3499,7 @@ index 986b2f1..ef80975 100644
  
          std::string & mmproj_path = params_base.mmproj.path;
          bool has_mmproj = !mmproj_path.empty();
-@@ -1114,8 +1202,66 @@ private:
+@@ -1114,8 +1202,79 @@ private:
  
          n_swa = params_base.swa_full ? 0 : llama_model_n_swa(model_tgt);
  
@@ -2832,10 +3513,23 @@ index 986b2f1..ef80975 100644
 +            (size_t) params_base.prefill_chunk_min,
 +            (size_t) params_base.prefill_chunk_max,
 +            params_base.prefill_target_iteration_ms,
-+            params_base.n_gpu_layers <= 0,
++            params_base.n_gpu_layers <= 0 && params_base.benefit_policy == "upstream",
 +        });
-+        SRV_INF("CacheFlow policies: scheduler=%s, prefill=%s, speculation=%s, kv_blocks=%s\n",
++        server_benefit_mode benefit_mode = server_benefit_mode::upstream;
++        if (params_base.benefit_policy == "always") benefit_mode = server_benefit_mode::always_cacheflow;
++        else if (params_base.benefit_policy == "rule") benefit_mode = server_benefit_mode::rule;
++        else if (params_base.benefit_policy == "learned") benefit_mode = server_benefit_mode::learned;
++        server_benefit_config benefit_config;
++        benefit_config.mode = benefit_mode;
++        benefit_config.minimum_observations = (size_t) params_base.benefit_min_observations;
++        benefit_config.exploration_interval = (size_t) params_base.benefit_exploration_interval;
++        benefit_config.confidence_beta = params_base.benefit_confidence_beta;
++        benefit_config.safety_margin_ms = params_base.benefit_safety_margin_ms;
++        benefit_config.target_iteration_ms = params_base.prefill_target_iteration_ms;
++        inference_engine.benefit_policy().configure(benefit_config);
++        SRV_INF("CacheFlow policies: scheduler=%s, prefill=%s, benefit=%s, speculation=%s, kv_blocks=%s\n",
 +                params_base.scheduler_policy.c_str(), params_base.prefill_policy.c_str(),
++                params_base.benefit_policy.c_str(),
 +                params_base.spec_policy.c_str(), params_base.kv_block_runtime ? "enabled" : "disabled");
 +        inference_engine.speculation().configure({
 +            params_base.speculative_adaptive,
@@ -2887,7 +3581,7 @@ index 986b2f1..ef80975 100644
  
          // setup slots
          SRV_INF("initializing slots, n_slots = %d\n", params_base.n_parallel);
-@@ -1178,6 +1324,9 @@ private:
+@@ -1178,6 +1337,9 @@ private:
              SLT_INF(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
  
              slot.callback_on_release = [this](int id_slot) {
@@ -2897,7 +3591,7 @@ index 986b2f1..ef80975 100644
                  queue_tasks.pop_deferred_task(id_slot);
              };
  
-@@ -1383,9 +1532,10 @@ private:
+@@ -1383,9 +1545,10 @@ private:
  
          bool update_cache = false;
  
@@ -2911,7 +3605,7 @@ index 986b2f1..ef80975 100644
  
              for (server_slot & slot : slots) {
                  // skip the slot if it is not available
-@@ -1393,29 +1543,41 @@ private:
+@@ -1393,29 +1556,41 @@ private:
                      continue;
                  }
  
@@ -2973,7 +3667,7 @@ index 986b2f1..ef80975 100644
  
                  // if we are about to lose a large portion of the existing context - save it in the prompt cache
                  if (f_keep < 0.5f) {
-@@ -1443,12 +1605,16 @@ private:
+@@ -1443,12 +1618,16 @@ private:
  
              if (ret != nullptr) {
                  SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
@@ -2990,7 +3684,7 @@ index 986b2f1..ef80975 100644
              update_cache = update_cache && prompt_cache;
  
              // cache prompts only for completion tasks
-@@ -1469,41 +1635,114 @@ private:
+@@ -1469,41 +1648,114 @@ private:
  
                  SRV_INF("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
              }
@@ -3126,7 +3820,7 @@ index 986b2f1..ef80975 100644
      }
  
      std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
-@@ -1519,7 +1758,234 @@ private:
+@@ -1519,7 +1771,234 @@ private:
          return output;
      }
  
@@ -3361,7 +4055,7 @@ index 986b2f1..ef80975 100644
          // process per-request lora adapters
          if (!task.params.lora.empty()) {
              auto task_loras = construct_lora_list(task.params.lora);
-@@ -1590,6 +2056,8 @@ private:
+@@ -1590,6 +2069,8 @@ private:
              return false;
          }
  
@@ -3370,7 +4064,7 @@ index 986b2f1..ef80975 100644
          SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
  
          // initialize samplers
-@@ -1629,9 +2097,10 @@ private:
+@@ -1629,9 +2110,10 @@ private:
  
          slot.task = std::make_unique<const server_task>(std::move(task));
  
@@ -3382,7 +4076,7 @@ index 986b2f1..ef80975 100644
  
          // reset server kill-switch counter
          n_empty_consecutive = 0;
-@@ -1966,6 +2435,7 @@ private:
+@@ -1966,6 +2448,7 @@ private:
  
          res->generation_params = slot.task->params; // copy the parameters
  
@@ -3390,7 +4084,7 @@ index 986b2f1..ef80975 100644
          queue_results.send(std::move(res));
      }
  
-@@ -2214,12 +2684,14 @@ private:
+@@ -2214,12 +2697,14 @@ private:
                              if (!slot.is_processing()) {
                                  SLT_INF(slot, "%s", "saving idle slot to prompt cache\n");
  
@@ -3407,7 +4101,7 @@ index 986b2f1..ef80975 100644
                                      // [TAG_IDLE_SLOT_CLEAR]
                                      slot.prompt_clear(false);
                                  }
-@@ -2301,6 +2773,7 @@ private:
+@@ -2301,6 +2786,7 @@ private:
                      res->t_start             = metrics.t_start;
  
                      res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
@@ -3415,7 +4109,7 @@ index 986b2f1..ef80975 100644
                      res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
                      res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
                      res->t_tokens_generation_total       = metrics.t_tokens_generation_total;
-@@ -2308,12 +2781,95 @@ private:
+@@ -2308,12 +2794,98 @@ private:
                      res->n_tokens_max = metrics.n_tokens_max;
  
                      res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
@@ -3456,6 +4150,9 @@ index 986b2f1..ef80975 100644
 +                    res->speculation_net_saved_ms =
 +                            metrics.n_draft_tokens_accepted_total * target_ms_per_token -
 +                            metrics.t_speculation_draft_total_ms;
++                    const auto engine_snapshot = inference_engine.snapshot();
++                    res->benefit_cpu = engine_snapshot.cpu_benefit;
++                    res->benefit_cuda = engine_snapshot.cuda_benefit;
 +                    res->time_to_first_token = metrics.time_to_first_token;
 +                    res->time_per_output_token = metrics.time_per_output_token;
 +                    res->request_latency = metrics.request_latency;
@@ -3511,7 +4208,7 @@ index 986b2f1..ef80975 100644
  
                      if (task.metrics_reset_bucket) {
                          metrics.reset_bucket();
-@@ -2479,7 +3035,7 @@ private:
+@@ -2479,7 +3051,7 @@ private:
          }
      }
  
@@ -3520,7 +4217,7 @@ index 986b2f1..ef80975 100644
          // check if all slots are idle
          {
              bool all_idle = true;
-@@ -2494,7 +3050,7 @@ private:
+@@ -2494,7 +3066,7 @@ private:
              if (all_idle) {
                  SRV_INF("%s", "all slots are idle\n");
  
@@ -3529,7 +4226,7 @@ index 986b2f1..ef80975 100644
              }
          }
  
-@@ -2509,7 +3065,7 @@ private:
+@@ -2509,7 +3081,7 @@ private:
          // apply context-shift if needed
          // TODO: simplify and improve
          for (server_slot & slot : slots) {
@@ -3538,7 +4235,7 @@ index 986b2f1..ef80975 100644
                  if (!params_base.ctx_shift) {
                      // this check is redundant (for good)
                      // we should never get here, because generation should already stopped in process_token()
-@@ -2572,6 +3128,10 @@ private:
+@@ -2572,6 +3144,10 @@ private:
              }
          }
  
@@ -3549,7 +4246,7 @@ index 986b2f1..ef80975 100644
          // start populating the batch for this iteration
          common_batch_clear(batch);
  
-@@ -2583,7 +3143,7 @@ private:
+@@ -2583,7 +3159,7 @@ private:
  
          // determine which slots are generating and drafting
          for (auto & slot : slots) {
@@ -3558,7 +4255,7 @@ index 986b2f1..ef80975 100644
                  continue;
              }
  
-@@ -2602,7 +3162,9 @@ private:
+@@ -2602,7 +3178,9 @@ private:
                  const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                  const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
  
@@ -3569,7 +4266,7 @@ index 986b2f1..ef80975 100644
  
                  if (n_draft_max > 0) {
                      GGML_ASSERT(slot.can_speculate());
-@@ -2643,7 +3205,12 @@ private:
+@@ -2643,7 +3221,12 @@ private:
  
          // generate the actual drafts (if any)
          {
@@ -3582,7 +4279,7 @@ index 986b2f1..ef80975 100644
          }
  
          // make checkpoints if needed
-@@ -2705,6 +3272,53 @@ private:
+@@ -2705,6 +3288,91 @@ private:
          int32_t n_batch  = llama_n_batch(ctx_tgt);
          int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
  
@@ -3618,9 +4315,47 @@ index 986b2f1..ef80975 100644
 +
 +        const size_t decode_tokens_planned = (size_t) batch.n_tokens;
 +        const int64_t iteration_started_us = ggml_time_us();
-+        const auto prefill_plan = inference_engine.scheduler().plan_prefill(
-+                prefill_candidates,
-+                n_batch > batch.n_tokens ? (size_t) (n_batch - batch.n_tokens) : 0);
++        const size_t prefill_budget = n_batch > batch.n_tokens
++                ? (size_t) (n_batch - batch.n_tokens) : 0;
++        const auto cacheflow_prefill_plan = inference_engine.scheduler().plan_prefill(
++                prefill_candidates, prefill_budget);
++        const auto upstream_prefill_plan = server_inference_scheduler::plan_upstream_prefill(
++                prefill_candidates, prefill_budget);
++        server_benefit_decision benefit_decision;
++        const bool benefit_decision_active = !prefill_candidates.empty() && prefill_budget > 0 &&
++                !cacheflow_prefill_plan.equivalent_allocations(upstream_prefill_plan);
++        server_prefill_plan prefill_plan = cacheflow_prefill_plan;
++        if (benefit_decision_active) {
++            size_t remaining_prefill_tokens = 0;
++            size_t maximum_remaining_tokens = 0;
++            for (const auto & candidate : prefill_candidates) {
++                remaining_prefill_tokens += candidate.remaining_tokens;
++                maximum_remaining_tokens = std::max(maximum_remaining_tokens, candidate.remaining_tokens);
++            }
++            double kv_pressure = 0.0;
++            if (const auto * kv_runtime = inference_engine.kv_runtime()) {
++                const auto kv = kv_runtime->snapshot().blocks;
++                if (kv.capacity_blocks > 0) {
++                    kv_pressure = (double) (kv.allocated_blocks + kv.reserved_blocks) /
++                            kv.capacity_blocks;
++                }
++            }
++            benefit_decision = inference_engine.benefit_policy().choose({
++                params_base.n_gpu_layers > 0 ? server_benefit_backend::cuda : server_benefit_backend::cpu,
++                generating.size() + prefill_candidates.size(),
++                decode_tokens_planned,
++                upstream_prefill_plan.tokens_scheduled,
++                cacheflow_prefill_plan.tokens_scheduled,
++                cacheflow_prefill_plan.allocations.size(),
++                prefill_candidates.size(),
++                remaining_prefill_tokens,
++                maximum_remaining_tokens,
++                kv_pressure,
++            });
++            if (benefit_decision.action == server_benefit_action::upstream) {
++                prefill_plan = upstream_prefill_plan;
++            }
++        }
 +        double max_prefill_wait_ms = 0.0;
 +        for (const auto & candidate : prefill_candidates) {
 +            if (prefill_plan.quota(candidate.id) != 0) continue;
@@ -3636,7 +4371,7 @@ index 986b2f1..ef80975 100644
          float  alora_scale       = -1.0f;
          size_t alora_disabled_id = 0;
  
-@@ -2721,24 +3335,33 @@ private:
+@@ -2721,24 +3389,33 @@ private:
                  }
  
                  // check if this is a child slot
@@ -3674,7 +4409,7 @@ index 986b2f1..ef80975 100644
  
                          SLT_TRC(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
                                  slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
-@@ -3110,7 +3733,9 @@ private:
+@@ -3110,7 +3787,9 @@ private:
                      const bool n_before_user_known = n_before_user > 0;
  
                      // add prompt tokens for processing in the current batch
@@ -3685,7 +4420,7 @@ index 986b2f1..ef80975 100644
                          // get next token to process
                          llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                          if (cur_tok == LLAMA_TOKEN_NULL) {
-@@ -3173,7 +3798,8 @@ private:
+@@ -3173,7 +3852,8 @@ private:
  
                      // entire prompt has been processed
                      if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
@@ -3695,7 +4430,7 @@ index 986b2f1..ef80975 100644
  
                          GGML_ASSERT(batch.n_tokens > 0);
  
-@@ -3249,6 +3875,13 @@ private:
+@@ -3249,6 +3929,13 @@ private:
  
          SRV_DBG("decoding batch, n_tokens = %d\n", batch.n_tokens);
  
@@ -3709,7 +4444,7 @@ index 986b2f1..ef80975 100644
          auto accept_special_token = [&](server_slot & slot, llama_token token) {
              return params_base.special ||
                  slot.task->params.sampling.preserved_tokens.find(token) != slot.task->params.sampling.preserved_tokens.end();
-@@ -3294,7 +3927,8 @@ private:
+@@ -3294,7 +3981,8 @@ private:
                  batch.logits   + i,
              };
  
@@ -3719,7 +4454,7 @@ index 986b2f1..ef80975 100644
  
              metrics.on_decoded(slots);
  
-@@ -3320,6 +3954,7 @@ private:
+@@ -3320,6 +4008,7 @@ private:
                      // TODO: handle ret == 2 (abort) when we start aborting
  
                      if (!err.empty()) {
@@ -3727,7 +4462,7 @@ index 986b2f1..ef80975 100644
                          SRV_ERR("%s i = %d, n_batch = %d, ret = %d\n", err.c_str(), i, n_batch, ret);
  
                          for (auto & slot : slots) {
-@@ -3394,6 +4029,7 @@ private:
+@@ -3394,6 +4083,7 @@ private:
              //}
              if (!common_speculative_process(spec.get(), batch_view)) {
                  SRV_ERR("%s", "failed to process speculative batch\n");
@@ -3735,7 +4470,7 @@ index 986b2f1..ef80975 100644
  
                  // TODO: handle error
                  break;
-@@ -3407,10 +4043,11 @@ private:
+@@ -3407,10 +4097,11 @@ private:
  
              // handle `n_cmpl > 1` tasks - when the main prompt is processed, activate all child tasks too
              for (auto & slot : slots) {
@@ -3749,7 +4484,7 @@ index 986b2f1..ef80975 100644
                              children.push_back(&other);
                          }
                      }
-@@ -3420,17 +4057,19 @@ private:
+@@ -3420,17 +4111,19 @@ private:
                      for (auto & child : children) {
                          SLT_INF(slot, " - copying state to child %d\n", child->id);
  
@@ -3772,7 +4507,7 @@ index 986b2f1..ef80975 100644
                      if (slot.task->params.stream && slot.task->params.return_progress) {
                          send_partial_response(slot, {}, true);
                      }
-@@ -3440,7 +4079,7 @@ private:
+@@ -3440,7 +4133,7 @@ private:
                      continue; // continue loop of slots
                  }
  
@@ -3781,7 +4516,7 @@ index 986b2f1..ef80975 100644
                      if (slot.task->type == SERVER_TASK_TYPE_EMBEDDING) {
                          // prompt evaluated for embedding
                          send_embedding(slot, batch_view);
-@@ -3459,12 +4098,12 @@ private:
+@@ -3459,12 +4152,12 @@ private:
                      GGML_ASSERT(slot.task->need_sampling());
  
                      // prompt evaluated for next-token prediction
@@ -3796,7 +4531,7 @@ index 986b2f1..ef80975 100644
                      continue; // continue loop of slots
                  }
  
-@@ -3517,7 +4156,8 @@ private:
+@@ -3517,7 +4210,8 @@ private:
  
              // speculative decoding - main model sample and accept
              for (auto & slot : slots) {
@@ -3806,7 +4541,7 @@ index 986b2f1..ef80975 100644
                      continue;
                  }
  
-@@ -3593,6 +4233,13 @@ private:
+@@ -3593,6 +4287,13 @@ private:
  
                  // update how many tokens out of those tested were accepted
                  slot.n_draft_accepted += ids.size() - 1;
@@ -3820,7 +4555,7 @@ index 986b2f1..ef80975 100644
  
                  // add accepted tokens to the prompt
                  slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - n_draft);
-@@ -3631,11 +4278,39 @@ private:
+@@ -3631,11 +4332,51 @@ private:
  
                  SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) ids.size() - 1, (int) n_draft, slot.prompt.n_tokens());
              }
@@ -3829,7 +4564,8 @@ index 986b2f1..ef80975 100644
 +        });
 +
 +        GGML_ASSERT(inference_engine.commit_with(iteration, [&]() {
-+            commit_iteration(decode_tokens_planned, prefill_plan, iteration_started_us);
++            commit_iteration(decode_tokens_planned, prefill_plan, iteration_started_us,
++                    benefit_decision_active, benefit_decision, iteration.is_aborted());
 +        }) || iteration.is_aborted());
  
          SRV_DBG("%s", "run slots completed\n");
@@ -3838,13 +4574,24 @@ index 986b2f1..ef80975 100644
 +    void commit_iteration(
 +            size_t decode_tokens_planned,
 +            const server_prefill_plan & prefill_plan,
-+            int64_t iteration_started_us) {
++            int64_t iteration_started_us,
++            bool benefit_decision_active,
++            const server_benefit_decision & benefit_decision,
++            bool execution_failed) {
++        const double elapsed_ms = (ggml_time_us() - iteration_started_us) / 1000.0;
 +        inference_engine.scheduler().observe_iteration({
 +            decode_tokens_planned,
 +            prefill_plan.tokens_scheduled,
-+            (ggml_time_us() - iteration_started_us) / 1000.0,
++            elapsed_ms,
 +            prefill_plan.allocations.size(),
 +        });
++        if (benefit_decision_active) {
++            inference_engine.benefit_policy().observe(benefit_decision, {
++                elapsed_ms,
++                elapsed_ms > params_base.prefill_target_iteration_ms,
++                execution_failed,
++            });
++        }
 +        synchronize_kv_runtime();
 +    }
 +
@@ -3860,7 +4607,7 @@ index 986b2f1..ef80975 100644
      int get_slot_n_ctx() {
          return slots.back().n_ctx;
      }
-@@ -4127,6 +4802,151 @@ void server_routes::init_routes() {
+@@ -4127,6 +4868,151 @@ void server_routes::init_routes() {
                      {"name",  "prompt_tokens_total"},
                      {"help",  "Number of prompt tokens processed."},
                      {"value",  (uint64_t) res_task->n_prompt_tokens_processed_total}
@@ -4012,7 +4759,7 @@ index 986b2f1..ef80975 100644
              }, {
                      {"name",  "prompt_seconds_total"},
                      {"help",  "Prompt process time"},
-@@ -4149,6 +4969,18 @@ void server_routes::init_routes() {
+@@ -4149,6 +5035,18 @@ void server_routes::init_routes() {
                      {"value",  res_task->n_tokens_max}
              }}},
              {"gauge", {{
@@ -4031,7 +4778,7 @@ index 986b2f1..ef80975 100644
                      {"name",  "prompt_tokens_seconds"},
                      {"help",  "Average prompt throughput in tokens/s."},
                      {"value",  res_task->n_prompt_tokens_processed ? 1.e3 / res_task->t_prompt_processing * res_task->n_prompt_tokens_processed : 0.}
-@@ -4156,6 +4988,115 @@ void server_routes::init_routes() {
+@@ -4156,6 +5054,115 @@ void server_routes::init_routes() {
                      {"name",  "predicted_tokens_seconds"},
                      {"help",  "Average generation throughput in tokens/s."},
                      {"value",  res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}
@@ -4147,10 +4894,52 @@ index 986b2f1..ef80975 100644
              },{
                      {"name",  "requests_processing"},
                      {"help",  "Number of requests processing."},
-@@ -4188,6 +5129,38 @@ void server_routes::init_routes() {
+@@ -4188,6 +5195,80 @@ void server_routes::init_routes() {
              }
          }
  
++        auto append_benefit = [&prometheus](const char * backend,
++                const server_benefit_snapshot & value) {
++            prometheus << "llamacpp:benefit_decisions_total{backend=\"" << backend
++                       << "\",action=\"upstream\"} " << value.upstream_decisions << "\n"
++                       << "llamacpp:benefit_decisions_total{backend=\"" << backend
++                       << "\",action=\"cacheflow\"} " << value.cacheflow_decisions << "\n"
++                       << "llamacpp:benefit_observations_total{backend=\"" << backend
++                       << "\",action=\"upstream\"} " << value.upstream_observations << "\n"
++                       << "llamacpp:benefit_observations_total{backend=\"" << backend
++                       << "\",action=\"cacheflow\"} " << value.cacheflow_observations << "\n"
++                       << "llamacpp:benefit_exploration_total{backend=\"" << backend << "\"} "
++                       << value.exploration_decisions << "\n"
++                       << "llamacpp:benefit_reason_total{backend=\"" << backend
++                       << "\",reason=\"cold_start\"} " << value.cold_start_decisions << "\n"
++                       << "llamacpp:benefit_reason_total{backend=\"" << backend
++                       << "\",reason=\"positive_lower_bound\"} " << value.positive_lower_bound_decisions << "\n"
++                       << "llamacpp:benefit_reason_total{backend=\"" << backend
++                       << "\",reason=\"insufficient_evidence\"} " << value.insufficient_evidence_decisions << "\n"
++                       << "llamacpp:benefit_safety_fallback_total{backend=\"" << backend << "\"} "
++                       << value.safety_fallbacks << "\n"
++                       << "llamacpp:benefit_drift_total{backend=\"" << backend << "\"} "
++                       << value.drift_events << "\n"
++                       << "llamacpp:benefit_cooldown_remaining{backend=\"" << backend << "\"} "
++                       << value.cooldown_remaining << "\n";
++        };
++        prometheus << "# HELP llamacpp:benefit_decisions_total Conservative benefit-policy decisions.\n"
++                   << "# TYPE llamacpp:benefit_decisions_total counter\n"
++                   << "# HELP llamacpp:benefit_observations_total Executed decisions learned by the policy.\n"
++                   << "# TYPE llamacpp:benefit_observations_total counter\n"
++                   << "# HELP llamacpp:benefit_exploration_total Bounded CacheFlow cold-start probes.\n"
++                   << "# TYPE llamacpp:benefit_exploration_total counter\n"
++                   << "# HELP llamacpp:benefit_reason_total Explainable learned-policy decisions by reason.\n"
++                   << "# TYPE llamacpp:benefit_reason_total counter\n"
++                   << "# HELP llamacpp:benefit_safety_fallback_total High-pressure upstream fallbacks.\n"
++                   << "# TYPE llamacpp:benefit_safety_fallback_total counter\n"
++                   << "# HELP llamacpp:benefit_drift_total Model-drift cooldown entries.\n"
++                   << "# TYPE llamacpp:benefit_drift_total counter\n"
++                   << "# HELP llamacpp:benefit_cooldown_remaining Remaining safe-mode decisions.\n"
++                   << "# TYPE llamacpp:benefit_cooldown_remaining gauge\n";
++        append_benefit("cpu", res_task->benefit_cpu);
++        append_benefit("cuda", res_task->benefit_cuda);
++
 +        prometheus << "# HELP llamacpp:speculation_disabled_total Adaptive speculation cooldown entries by reason.\n"
 +                   << "# TYPE llamacpp:speculation_disabled_total counter\n"
 +                   << "llamacpp:speculation_disabled_total{reason=\"low_acceptance\"} "
@@ -4188,10 +4977,10 @@ index 986b2f1..ef80975 100644
          res->status = 200;
 diff --git a/tools/server/server-inference-engine.cpp b/tools/server/server-inference-engine.cpp
 new file mode 100644
-index 0000000..1b63815
+index 0000000..0314591
 --- /dev/null
 +++ b/tools/server/server-inference-engine.cpp
-@@ -0,0 +1,96 @@
+@@ -0,0 +1,98 @@
 +#include "server-inference-engine.h"
 +
 +#include <stdexcept>
@@ -4281,6 +5070,8 @@ index 0000000..1b63815
 +        scheduler_.state(),
 +        kv_runtime_ != nullptr,
 +        swap_store_ != nullptr,
++        benefit_policy_.snapshot(server_benefit_backend::cpu),
++        benefit_policy_.snapshot(server_benefit_backend::cuda),
 +    };
 +}
 +
@@ -4290,12 +5081,13 @@ index 0000000..1b63815
 +}
 diff --git a/tools/server/server-inference-engine.h b/tools/server/server-inference-engine.h
 new file mode 100644
-index 0000000..d8ddb1a
+index 0000000..cbfd759
 --- /dev/null
 +++ b/tools/server/server-inference-engine.h
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,159 @@
 +#pragma once
 +
++#include "server-benefit-policy.h"
 +#include "server-inference-iteration.h"
 +#include "server-inference-scheduler.h"
 +#include "server-kv-capacity-planner.h"
@@ -4336,6 +5128,8 @@ index 0000000..d8ddb1a
 +    server_scheduler_state scheduler;
 +    bool block_runtime_enabled = false;
 +    bool swap_store_enabled = false;
++    server_benefit_snapshot cpu_benefit;
++    server_benefit_snapshot cuda_benefit;
 +};
 +
 +// Owns the inference control plane. server_context remains the protocol and
@@ -4413,6 +5207,7 @@ index 0000000..d8ddb1a
 +    server_engine_snapshot snapshot() const;
 +
 +    server_inference_scheduler & scheduler() { return scheduler_; }
++    server_benefit_policy & benefit_policy() { return benefit_policy_; }
 +    server_kv_capacity_planner & capacity_planner() { return capacity_planner_; }
 +    server_speculation_controller & speculation() { return speculation_; }
 +    server_runtime_adapter & runtime() { return *runtime_; }
@@ -4430,6 +5225,7 @@ index 0000000..d8ddb1a
 +
 +private:
 +    server_inference_scheduler scheduler_;
++    server_benefit_policy benefit_policy_;
 +    server_kv_capacity_planner capacity_planner_;
 +    server_speculation_controller speculation_;
 +    std::unique_ptr<server_kv_runtime> kv_runtime_;
@@ -4565,10 +5361,10 @@ index 0000000..a07cccb
 +};
 diff --git a/tools/server/server-inference-scheduler.cpp b/tools/server/server-inference-scheduler.cpp
 new file mode 100644
-index 0000000..cc179ff
+index 0000000..44d995d
 --- /dev/null
 +++ b/tools/server/server-inference-scheduler.cpp
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,227 @@
 +#include "server-inference-scheduler.h"
 +
 +#include <algorithm>
@@ -4580,6 +5376,37 @@ index 0000000..cc179ff
 +                return allocation.id == id;
 +            });
 +    return it == allocations.end() ? 0 : it->tokens;
++}
++
++bool server_prefill_plan::equivalent_allocations(const server_prefill_plan & other) const {
++    if (tokens_scheduled != other.tokens_scheduled || allocations.size() != other.allocations.size()) {
++        return false;
++    }
++    return std::all_of(allocations.begin(), allocations.end(), [&](const auto & allocation) {
++        return other.quota(allocation.id) == allocation.tokens;
++    });
++}
++
++server_prefill_plan server_inference_scheduler::plan_upstream_prefill(
++        const std::vector<server_prefill_candidate> & candidates,
++        size_t token_budget) {
++    server_prefill_plan plan;
++    plan.token_budget = token_budget;
++    if (token_budget == 0) return plan;
++    auto ordered = candidates;
++    std::sort(ordered.begin(), ordered.end(), [](const auto & left, const auto & right) {
++        return left.id < right.id;
++    });
++    size_t remaining = token_budget;
++    for (const auto & candidate : ordered) {
++        const size_t allocation = std::min(candidate.remaining_tokens, remaining);
++        if (allocation == 0) continue;
++        plan.allocations.push_back({candidate.id, allocation});
++        plan.tokens_scheduled += allocation;
++        remaining -= allocation;
++        if (remaining == 0) break;
++    }
++    return plan;
 +}
 +
 +server_inference_scheduler::server_inference_scheduler(server_scheduler_config config) {
@@ -4767,10 +5594,10 @@ index 0000000..cc179ff
 +}
 diff --git a/tools/server/server-inference-scheduler.h b/tools/server/server-inference-scheduler.h
 new file mode 100644
-index 0000000..fc732d7
+index 0000000..ac22980
 --- /dev/null
 +++ b/tools/server/server-inference-scheduler.h
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,106 @@
 +#pragma once
 +
 +#include "server-model-cost-model.h"
@@ -4825,6 +5652,7 @@ index 0000000..fc732d7
 +    size_t effective_chunk_size = 0;
 +
 +    size_t quota(int id) const;
++    bool equivalent_allocations(const server_prefill_plan & other) const;
 +};
 +
 +struct server_scheduler_observation {
@@ -4856,6 +5684,12 @@ index 0000000..fc732d7
 +            size_t input_tokens) const;
 +
 +    server_prefill_plan plan_prefill(
++            const std::vector<server_prefill_candidate> & candidates,
++            size_t token_budget);
++
++    // Pure counterfactual used by benefit gating. It exactly reproduces the
++    // upstream greedy allocator without mutating the CacheFlow fairness cursor.
++    static server_prefill_plan plan_upstream_prefill(
 +            const std::vector<server_prefill_candidate> & candidates,
 +            size_t token_budget);
 +
@@ -7514,7 +8348,7 @@ index 0000000..3b0b46a
 +    server_speculation_state & get_or_create(int sequence_id);
 +};
 diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
-index 72a4bd0..987121b 100644
+index 72a4bd0..33cc38a 100644
 --- a/tools/server/server-task.cpp
 +++ b/tools/server/server-task.cpp
 @@ -1895,6 +1895,7 @@ json server_task_result_metrics::to_json() {
@@ -7533,7 +8367,7 @@ index 72a4bd0..987121b 100644
          { "t_prompt_processing",             t_prompt_processing },
          { "n_tokens_predicted",              n_tokens_predicted },
          { "t_tokens_generation",             t_tokens_generation },
-@@ -1909,6 +1911,29 @@ json server_task_result_metrics::to_json() {
+@@ -1909,6 +1911,55 @@ json server_task_result_metrics::to_json() {
          { "n_decode_total",                  n_decode_total },
          { "n_busy_slots_total",              n_busy_slots_total },
  
@@ -7552,6 +8386,32 @@ index 72a4bd0..987121b 100644
 +        { "n_kv_proactive_evictions_total", n_kv_proactive_evictions_total },
 +        { "n_kv_proactive_reclaimed_tokens_total", n_kv_proactive_reclaimed_tokens_total },
 +        { "n_kv_admission_failures_total", n_kv_admission_failures_total },
++        { "benefit_cpu", {
++            { "upstream_observations", benefit_cpu.upstream_observations },
++            { "cacheflow_observations", benefit_cpu.cacheflow_observations },
++            { "upstream_decisions", benefit_cpu.upstream_decisions },
++            { "cacheflow_decisions", benefit_cpu.cacheflow_decisions },
++            { "exploration_decisions", benefit_cpu.exploration_decisions },
++            { "cold_start_decisions", benefit_cpu.cold_start_decisions },
++            { "positive_lower_bound_decisions", benefit_cpu.positive_lower_bound_decisions },
++            { "insufficient_evidence_decisions", benefit_cpu.insufficient_evidence_decisions },
++            { "safety_fallbacks", benefit_cpu.safety_fallbacks },
++            { "drift_events", benefit_cpu.drift_events },
++            { "cooldown_remaining", benefit_cpu.cooldown_remaining }
++        } },
++        { "benefit_cuda", {
++            { "upstream_observations", benefit_cuda.upstream_observations },
++            { "cacheflow_observations", benefit_cuda.cacheflow_observations },
++            { "upstream_decisions", benefit_cuda.upstream_decisions },
++            { "cacheflow_decisions", benefit_cuda.cacheflow_decisions },
++            { "exploration_decisions", benefit_cuda.exploration_decisions },
++            { "cold_start_decisions", benefit_cuda.cold_start_decisions },
++            { "positive_lower_bound_decisions", benefit_cuda.positive_lower_bound_decisions },
++            { "insufficient_evidence_decisions", benefit_cuda.insufficient_evidence_decisions },
++            { "safety_fallbacks", benefit_cuda.safety_fallbacks },
++            { "drift_events", benefit_cuda.drift_events },
++            { "cooldown_remaining", benefit_cuda.cooldown_remaining }
++        } },
 +
 +        { "kv_cache_tokens",                 kv_cache_tokens },
 +        { "kv_cache_capacity_tokens",        kv_cache_capacity_tokens },
@@ -7564,21 +8424,22 @@ index 72a4bd0..987121b 100644
      };
  }
 diff --git a/tools/server/server-task.h b/tools/server/server-task.h
-index bdadcff..e32e3cb 100644
+index bdadcff..3697493 100644
 --- a/tools/server/server-task.h
 +++ b/tools/server/server-task.h
-@@ -11,6 +11,10 @@
+@@ -10,6 +10,11 @@
+ 
  // TODO: prevent including the whole server-common.h as we only use server_tokens
  #include "server-common.h"
- 
++#include "server-benefit-policy.h"
++
 +#include "ggml.h"
 +
 +#include <array>
-+
+ 
  using json = nlohmann::ordered_json;
  
- enum server_task_type {
-@@ -132,6 +136,7 @@ struct task_result_state {
+@@ -132,6 +137,7 @@ struct task_result_state {
  
  struct server_task {
      int id = -1; // to be filled by server_queue
@@ -7586,7 +8447,7 @@ index bdadcff..e32e3cb 100644
  
      // TODO @ngxson : remove this field and implement a mapping task_id -> idx in the response_reader
      size_t index = 0; // used when there are multiple prompts (batch request)
-@@ -234,6 +239,7 @@ struct server_task {
+@@ -234,6 +240,7 @@ struct server_task {
  
          copy.id        = id_child;
          copy.id_parent = id_parent;
@@ -7594,7 +8455,7 @@ index bdadcff..e32e3cb 100644
          copy.params    = params;
          copy.type      = type;
          copy.tokens    = tokens.clone();
-@@ -263,6 +269,23 @@ struct server_task {
+@@ -263,6 +270,23 @@ struct server_task {
      }
  };
  
@@ -7618,7 +8479,7 @@ index bdadcff..e32e3cb 100644
  struct result_timings {
      int32_t cache_n = -1;
  
-@@ -517,6 +540,7 @@ struct server_task_result_metrics : server_task_result {
+@@ -517,6 +541,7 @@ struct server_task_result_metrics : server_task_result {
  
      // TODO: somehow reuse server_metrics in the future, instead of duplicating the fields
      uint64_t n_prompt_tokens_processed_total = 0;
@@ -7626,7 +8487,7 @@ index bdadcff..e32e3cb 100644
      uint64_t t_prompt_processing_total       = 0;
      uint64_t n_tokens_predicted_total        = 0;
      uint64_t t_tokens_generation_total       = 0;
-@@ -524,6 +548,7 @@ struct server_task_result_metrics : server_task_result {
+@@ -524,6 +549,7 @@ struct server_task_result_metrics : server_task_result {
      uint64_t n_tokens_max = 0;
  
      uint64_t n_prompt_tokens_processed = 0;
@@ -7634,7 +8495,7 @@ index bdadcff..e32e3cb 100644
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -532,6 +557,57 @@ struct server_task_result_metrics : server_task_result {
+@@ -532,6 +558,59 @@ struct server_task_result_metrics : server_task_result {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -7661,6 +8522,8 @@ index bdadcff..e32e3cb 100644
 +    uint64_t n_draft_tokens_accepted_total = 0;
 +    uint64_t n_speculation_disabled_low_acceptance_total = 0;
 +    double speculation_net_saved_ms = 0.0;
++    server_benefit_snapshot benefit_cpu;
++    server_benefit_snapshot benefit_cuda;
 +
 +    uint64_t kv_cache_tokens          = 0;
 +    uint64_t kv_cache_capacity_tokens = 0;

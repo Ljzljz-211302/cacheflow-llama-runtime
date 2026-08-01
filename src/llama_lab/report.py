@@ -47,6 +47,12 @@ def render_report(results_dir: Path, output_path: Path) -> None:
     repeated_mixed_path = results_dir / "mixed_workload_repeated_runs.csv"
     with repeated_mixed_path.open(encoding="utf-8-sig", newline="") as handle:
         repeated_mixed = list(csv.DictReader(handle))
+    benefit_path = results_dir / "benefit_gating_summary.csv"
+    if benefit_path.exists():
+        with benefit_path.open(encoding="utf-8-sig", newline="") as handle:
+            benefit_gating = list(csv.DictReader(handle))
+    else:
+        benefit_gating = []
     profile = json.loads(
         (results_dir / "engine-profile-summary.json").read_text(encoding="utf-8")
     )
@@ -298,6 +304,63 @@ def render_report(results_dir: Path, output_path: Path) -> None:
             "",
             "两轮 CUDA latency/throughput 结论反号，因此当前 3-trial laptop GPU 证据不足以声称稳定端到端提升；"
             "production 应保留 upstream fallback，并增加 backend/workload-aware gating。",
+        ]
+    )
+    if benefit_gating:
+        lines.extend(
+            [
+                "",
+                "## Conservative Benefit Gating",
+                "",
+                "| Backend | Mode | Trials | Objective median ms | CacheFlow decisions | Exploration | Positive lower bound |",
+                "|---|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for row in benefit_gating:
+            lines.append(
+                f"| {row['backend']} | {row['mode']} | {row['trials']} | "
+                f"{float(row['objective_median_ms']):.2f} | "
+                f"{float(row['cacheflow_decisions']):.0f} | "
+                f"{float(row['exploration_decisions']):.0f} | "
+                f"{float(row['positive_lower_bound_decisions']):.0f} |"
+            )
+        learned_rows = {
+            row["backend"]: row
+            for row in benefit_gating
+            if row["mode"] == "learned"
+        }
+        upstream_rows = {
+            row["backend"]: row
+            for row in benefit_gating
+            if row["mode"] == "upstream"
+        }
+        benefit_observations = []
+        for backend in sorted(learned_rows):
+            learned = learned_rows[backend]
+            upstream = upstream_rows[backend]
+            delta = (
+                float(learned["objective_median_ms"])
+                / float(upstream["objective_median_ms"])
+                - 1
+            )
+            benefit_observations.append(f"{backend.upper()} {delta:+.2%}")
+        positive_decisions = sum(
+            int(float(row["positive_lower_bound_decisions"]))
+            for row in learned_rows.values()
+        )
+        lines.extend(
+            [
+                "",
+                "相对 upstream 的 learned objective 变化："
+                + "；".join(benefit_observations)
+                + "。",
+                f"真实短 trace 的 learned 路径共出现 {positive_decisions} 次 positive-lower-bound 决策；"
+                "当前结果证明的是受限探索和 fail-closed 护栏，稳定优势下的置信触发由确定性 native replay 覆盖，"
+                "不能据此宣称线上长周期收敛。",
+            ]
+        )
+    lines.extend(
+        [
             "",
             "## Production Engine Phase Trace",
             "",

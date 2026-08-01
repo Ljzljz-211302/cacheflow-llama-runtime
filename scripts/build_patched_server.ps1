@@ -15,7 +15,8 @@ $nativeTests = @(
     "test-kv-swap-store",
     "test-speculation-controller",
     "test-runtime-adapter",
-    "test-model-cost-model"
+    "test-model-cost-model",
+    "test-benefit-policy"
 )
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot ".git"))) {

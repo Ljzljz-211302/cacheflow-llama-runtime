@@ -86,6 +86,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "engine scheduler A/B failed" }
         python scripts\run_mixed_workload.py --backend both --trials 3
         if ($LASTEXITCODE -ne 0) { throw "mixed prefill/decode CPU/CUDA workload failed" }
+        python scripts\run_benefit_gating_ab.py --backend both --trials 10
+        if ($LASTEXITCODE -ne 0) { throw "conservative benefit gating/oracle acceptance failed" }
         powershell -NoProfile -ExecutionPolicy Bypass -File scripts\profile_engine.ps1
         if ($LASTEXITCODE -ne 0) { throw "production engine trace/flame chart failed" }
         python scripts\run_prefill_ab.py

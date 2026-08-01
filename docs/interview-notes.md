@@ -28,7 +28,7 @@ KV 侧不是简单加一个命中率计数器。我实现了固定 token block �
 - adaptive prefill/speculation 控制器；
 - 原生 metrics、fault injection、真实服务测试和可复现实验。
 
-不要说“我重写了 llama.cpp”，也不要把 vendor 总行数当个人代码量。应说“我固定上游 commit，在其真实 hot path 上形成 53-file、约 +6.5K/-0.1K 的可重放差异；最终数字以当前 patch 为准”。
+不要说“我重写了 llama.cpp”，也不要把 vendor 总行数当个人代码量。应说“我固定上游 commit，在其真实 hot path 上形成 56-file、约 +7.5K/-0.1K 的可重放差异；最终数字以当前 patch 为准”。
 
 ## 架构与状态所有权
 
@@ -191,7 +191,13 @@ CUDA mixed workload 缺少 backend-aware policy guard；Hybrid/Recurrent 只有 
 
 ### 如果再做两周？
 
-优先做 CUDA policy gating：用 rolling features（prefill/decode ratio、batch width、prefix reuse、KV pressure）预测启用收益，shadow 计算 CacheFlow 与 upstream plan，只有置信度和预期收益过阈值才切换。然后用更大模型/Nsight 验证 kernel 和端到端因果链，而不是继续堆外围功能。
+当前已完成 prefill 级 Conservative Benefit Gating：10 维 runtime snapshot、CPU/CUDA 分模、shadow upstream/CacheFlow plan、毫秒量纲置信界、有限探索和漂移回退。再做两周会把动作空间扩展到 slot placement/KV admission/speculation 的联合策略，并用更大模型与 Nsight 验证跨层因果链，而不是继续堆外围功能。
+
+### Benefit Gating 怎么讲？
+
+先讲负结果：固定 adaptive chunk 在不同 backend/workload 上结论反号。然后画出同一生产 Seam 的两条 shadow plan，说明 learned policy 只在悲观 CacheFlow cost 仍低于乐观 upstream cost 加安全 margin 时启用。重点追问是：为什么置信半径必须乘 residual noise、为什么 SLO miss 进入 reward 却不等于 drift、为什么探索必须有预算、为什么单 prefill 必须直接回退。最后展示 CPU/CUDA 各 10-trial Latin 验收与 paired oracle regret，不声称这是全栈或所有模型上的全局最优。
+
+最终 10-trial 中 positive-lower-bound 次数为 0，CacheFlow 动作均为有限探索。面试时必须主动说清：短 fresh-process trace 验证了安全边界和回归门槛，deterministic replay 验证稳定优势下会收敛到 positive lower bound；但真实长驻服务的在线收敛尚未被当前 0.5B trace 证明。
 
 ## 三分钟现场演示顺序
 

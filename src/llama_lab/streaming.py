@@ -25,17 +25,19 @@ def stream_chat(
     model: str = "local-model",
     max_tokens: int = 64,
     timeout: float = 120.0,
+    seed: int | None = None,
 ) -> dict[str, Any]:
-    body = json.dumps(
-        {
+    payload: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
             "max_tokens": max_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
-        }
-    ).encode("utf-8")
+    }
+    if seed is not None:
+        payload["seed"] = seed
+    body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/v1/chat/completions",
         data=body,

@@ -989,7 +989,7 @@ sequenceDiagram
 
 - 一键构建、测试、Sanitizer 和 benchmark 已纳入 `verify.ps1 -Full`，最终整链 765 秒通过；
 - 架构图、生产 Engine trace 火焰图、mixed workload 原始 trial 和自动报告已生成；
-- 个人贡献统计固定为 `c2843ef` 相对上游的 53 files、+6635/-99；patch 可逆性由全量入口检查；
+- 当前个人贡献统计为相对固定上游 56 files、+7480/-99；patch 可逆性由全量入口检查；
 - 三分钟演示、算法/状态/失败模式/实验限制深挖手册已完成。
 
 ## 16. 当前代码到目标 Module 的映射
@@ -1097,3 +1097,34 @@ sequenceDiagram
 5. 执行唯一入口 `verify.ps1 -Full`，其中 Compute Sanitizer 是硬门槛；
 6. 对最终差异做一次 Spec/Standards 代码审查，修复后重新运行受影响验证；
 7. 只有本章与第 17 章逐条存在实现、自动化证据和限制说明时，才允许标记“可用于面试”。
+
+## 21. Conservative Benefit Gating（已进入生产路径）
+
+### 21.1 问题与边界
+
+历史 mixed workload 表明，同一套 adaptive prefill 在 CPU/CUDA、吞吐优先/TTFT 优先负载上可能出现相反结论。因此 Engine 不再把“存在 CacheFlow plan”当作“应该执行 CacheFlow plan”。本阶段只门控 prefill allocation，不夸大为整个 KV、swap 或 speculation 栈的全局最优控制器。
+
+### 21.2 深模块与 Seam
+
+`server_benefit_policy` 由 `server_inference_engine` 独占，生产与测试都只通过：
+
+- `choose(RuntimeSnapshot) -> Decision`；
+- `observe(Decision, Feedback)`；
+- `snapshot(Backend)`。
+
+Scheduler 同时产生会改变 fairness cursor 的 CacheFlow plan，以及纯函数 `plan_upstream_prefill()` 生成的 counterfactual greedy plan。只有两个 plan 确实不同时才调用门控，避免用 decode-only 或等价动作污染在线模型。
+
+### 21.3 算法
+
+- CPU/CUDA 各维护 upstream、cacheflow 两个 10 维 contextual ridge model；特征含 batch/decode、两种 plan token 数、chunk 数、活跃序列、总/最大剩余 prefill、KV pressure。
+- cost 为真实 iteration latency，加 SLO 超限惩罚和执行失败惩罚。
+- 置信半径为 `beta * residual_ewma_std_ms * sqrt(x^T A^-1 x)`，量纲为毫秒。
+- 仅当 `cacheflow_cost + radius + margin < upstream_cost - radius` 时，判定收益下界为正。
+- 冷启动先建立 upstream 基线；CacheFlow 探索按 interval 稀疏发生，且总预算不超过 `3 * minimum_observations`。
+- 单 prefill、KV 高压、执行失败、成熟模型连续大残差均 fail closed 到 upstream；残差 streak 与模型按 action、backend 隔离。
+
+### 21.4 可解释性与实验
+
+CLI 支持 `--benefit-policy upstream|always|rule|learned` 及样本、探索、置信度、margin 参数。Prometheus 按 backend/action 导出 decision、observation、exploration、safety fallback、drift 和 cooldown。
+
+`run_benefit_gating_ab.py` 在相同 CacheFlow 运行栈中只改变门控策略，执行 fresh-process Latin rotation 的 upstream/always/rule/learned 对照，并从 paired upstream/always/rule 构造 trace-level oracle。硬门槛为 learned 相对 upstream 不回归超过 3%、含探索成本的 median oracle regret 不超过 20%，以及 harmful trace 上非探索错误启用率不超过 20%。完整验收固定为 CPU/CUDA 各 10 trials；报告必须区分 `safe_exploration` 与真正的 `positive_lower_bound` 启用。

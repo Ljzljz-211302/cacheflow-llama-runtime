@@ -10,7 +10,7 @@
 
 ## 当前结论
 
-严格验收已通过。2026-07-31 20:54:58–21:07:43，唯一入口 `scripts/verify.ps1 -Full` 针对 fork `c2843ef` 完整运行 765 秒，完成架构/patch 门禁、CPU/upstream/CUDA 构建、全部 C++/Python 测试、Compute Sanitizer、功能/故障/兼容/模型/性能/质量矩阵和报告生成；日志错误扫描无 Traceback、FAILED、非零 Sanitizer summary 或性能回归门槛失败。
+本轮严格验收已通过。2026-08-01 唯一入口 `scripts/verify.ps1 -Full` 完整运行 1200.6 秒并以 0 退出；覆盖架构/patch 门禁、CPU/upstream/CUDA 构建、全部 C++/Python 测试、Compute Sanitizer、功能/故障/兼容/模型/性能/质量矩阵，以及新增的 CPU/CUDA 各 10-trial Conservative Benefit Gating。
 
 “存在代码”“单元测试通过”和“生产路径通过”是三个不同层级。本报告只把有生产 smoke 或真实模型证据的条目标为生产接入。
 
@@ -35,6 +35,7 @@
 | KV 准入/抢占/恢复 | 真实 preempt smoke；Host/File/CUDA restore | save 失败保留 resident；restore 失败丢弃并重算 | 通过 |
 | Host/File 事务 Swap | server CLI 选择 memory/path store；真实序列 state 序列化 | budget、checksum、temp+rename、next-save/restore failpoint | 通过 |
 | Adaptive Prefill | CPU/CUDA 真实 A/B | backend-aware safety action；2% 错误固定点回归硬门槛 | 通过 |
+| Conservative Benefit Gating | 生产 shadow upstream/CacheFlow plan；CPU/CUDA 独立模型 | 置信下界、有限探索、高压/漂移回退、deterministic replay、每端 10 trials | 通过 |
 | Adaptive Speculation | CPU/CUDA N-gram 真实 A/B | EWMA、证据门槛、迟滞、KV 压力反馈 | 通过 |
 | CUDA Gather/Scatter | 真实 llama K/V tensor 的 descriptor-driven gather -> staging -> scatter | 随机/重复/重叠/尾部映射逐元素一致 | 通过 |
 | CUDA 异步 Swap | 真实 Qwen K/V D2H/H2D | pinned pool、stream/event lease、allocation failpoint | 通过 |
@@ -76,6 +77,14 @@ P95 改善 97.41%。这证明被隔离的 COW hot path，不等价于整个 serv
 - Adaptive Speculation 在当前 CPU/CUDA trace 中略优于 fixed 候选，但只限定当前 N-gram workload。
 - Adaptive Prefill 避免 fixed-64 错误点，却没有稳定击败 CUDA greedy/fixed-256；因此只声称在线控制可规避明显坏点。
 
+### Conservative Benefit Gating
+
+新控制器不再按 backend 硬编码开关，而是在真实 prefill 决策点生成 upstream greedy 与 CacheFlow shadow plan，按 backend-local contextual confidence model 保守选择。最终 10-trial Latin 结果：CPU learned objective median 4042.18 ms，upstream 4542.93 ms（改善 11.02%）；CUDA learned 208.06 ms，upstream 207.40 ms（回归 0.32%，低于 3% 上限）。两端均通过 20% paired upstream/always/rule oracle regret 和 harmful-trace wrong-enable 门槛。
+
+本轮 learned 的 CacheFlow 动作全部是有预算的 `safe_exploration`：CPU 16 次、CUDA 40 次；`positive_lower_bound_decisions` 均为 0。结论是“控制器在当前短 trace 上安全探索并 fail closed”，不是“真实 workload 已证明模型稳定学会启用”。positive-lower-bound 路径由 deterministic replay 原生测试覆盖；生产实证仍需更长驻留时间与更大模型。
+
+exact output hash 被保留为审计指标而非并发性能硬门槛：batch composition 会改变近似相等 logits 与 EOS 位置；HTTP/SSE、上游兼容和语义质量分别由专门 gate 验证。
+
 ## Profiler / Flame 证据
 
 `--engine-trace PATH` 在真实 production Engine 中记录 prepare/plan/execute/commit Chrome/Perfetto complete events。最终一次 CPU mixed workload 共 242 spans、9.553 s：execute 99.9145%，commit 0.0674%，plan 0.0148%，prepare 0.0033%。原始 trace 为 `results/raw/engine-trace-cpu-cacheflow-trial-1.json`，渲染结果为 `results/engine-flame.svg`。
@@ -102,7 +111,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 
 ## 个人贡献边界
 
-固定上游提供 GGUF/模型 graph、GGML 通用算子、既有 backend、HTTP 基础设施和 sampling。个人差异是 Engine 拆分、Scheduler、KV 资源/块/事务 Swap、真实 CUDA KV Adapter 与 kernels、自适应控制、metrics、fault injection 和复现实验。`c2843ef` 相对固定上游为 53 files、+6635/-99。代码量只统计该 patch；不得把 `vendor/llama.cpp` 原有代码算作个人实现，也不得声称“重写了 llama.cpp”。
+固定上游提供 GGUF/模型 graph、GGML 通用算子、既有 backend、HTTP 基础设施和 sampling。个人差异是 Engine 拆分、Scheduler、KV 资源/块/事务 Swap、真实 CUDA KV Adapter 与 kernels、自适应/收益门控、metrics、fault injection 和复现实验。当前相对固定上游为 56 files、+7480/-99。代码量只统计该 patch；不得把 `vendor/llama.cpp` 原有代码算作个人实现，也不得声称“重写了 llama.cpp”。
 
 早期 Python 控制面已归档到 `prototypes/cacheflow`，只保留设计演进与原型测试证据；生产 `llama-server` 不导入或调用它。
 
@@ -112,5 +121,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 - Hybrid/Recurrent 仅 capability fallback，未实现物理 block backend；
 - WPR sampled-stack profile 因权限未完成；现有图只回答 Engine phase 时间归属；
 - CUDA cacheflow 当前 mixed workload 的吞吐和 latency P95 退化，需要后续加入 backend-specific policy gating；
+- Benefit Gating 当前仅控制 prefill plan，尚未扩展到 slot placement、KV admission、swap 与 speculation 的联合动作空间；
+- 当前 10-trial 短 trace 没有产生 positive-lower-bound 启用，真实在线收敛只由 deterministic replay 覆盖，不能把探索次数描述成学习成功次数；
 - 同工具链输出兼容不等于跨编译器逐字节兼容；
 - 换 GPU、驱动、CUDA 或模型后必须重跑 Sanitizer 和矩阵。
