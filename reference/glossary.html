@@ -1,0 +1,32 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>CacheFlow 术语表</title><link rel="stylesheet" href="../assets/course.css"></head><body><main>
+<div class="kicker">Reference · 随时复习</div><h1>CacheFlow Runtime 术语表</h1><p class="lead">面试中术语必须稳定。以下定义以本项目语义为准；同名概念在别的框架中可能具有不同实现。</p>
+<table><thead><tr><th>术语</th><th>准确含义</th><th>项目中的落点</th></tr></thead><tbody>
+<tr><td>Prefill</td><td>一次并行处理 prompt tokens，构造每层 KV 并产生首个输出位置所需状态；通常计算密集，直接影响 TTFT。</td><td>Scheduler 的 prefill token/chunk 预算。</td></tr>
+<tr><td>Decode</td><td>自回归逐 token 生成；每个 sequence 每轮通常只增加一个 token，容易受内存带宽和 batch 宽度影响。</td><td>iteration-level batch 中的 decode token。</td></tr>
+<tr><td>TTFT</td><td>Time To First Token，从请求进入服务到首个非空流式 token 的时间。</td><td>`llama_lab.streaming` 与 benchmark。</td></tr>
+<tr><td>TPOT</td><td>Time Per Output Token，首 token 后生成每个输出 token 的平均/分位间隔；不要和总 latency 混淆。</td><td>server benchmark 汇总。</td></tr>
+<tr><td>Iteration-level scheduling</td><td>每次只为下一次模型迭代选 batch，迭代结束后允许新请求加入、旧请求完成或被抢占。</td><td>`server-inference-engine.*` / `server-inference-scheduler.*`。</td></tr>
+<tr><td>Chunked Prefill</td><td>把长 prompt 的 prefill 切成多轮，减少单轮对 decode 的阻塞；代价是更多轮次和调度/launch 开销。</td><td>Adaptive Prefill 候选动作。</td></tr>
+<tr><td>KV Cache</td><td>每层历史 token 的 Key/Value 张量，避免 decode 时重复计算历史 K/V；不是保存 attention 输出。</td><td>`llama-kv-cache*` 与 block runtime。</td></tr>
+<tr><td>Logical block</td><td>sequence 看到的有序 token 块编号。</td><td>Block Table 左侧索引。</td></tr>
+<tr><td>Physical block</td><td>KV 存储中真正占容量、带 refcount 的块。</td><td>`server_kv_block_manager`。</td></tr>
+<tr><td>Prefix sharing</td><td>多个 sequence 的逻辑块映射到相同物理块，复用公共 prompt 的 KV。</td><td>PrefixIndex + refcount。</td></tr>
+<tr><td>COW</td><td>Copy-on-Write：共享块在写入前复制，随后写者改映射，其他引用保持旧数据。</td><td>partial-tail append 路径。</td></tr>
+<tr><td>Preemption</td><td>资源不足时暂时移出某 sequence 的可执行状态；可重算或 swap，而非等同于取消。</td><td>PreemptionPolicy / KvSwapStore。</td></tr>
+<tr><td>Swap</td><td>把 KV 从运行存储迁到 Host/File/CUDA backing store，并在恢复时重建映射；必须有事务语义。</td><td>`server-kv-swap-store.*`。</td></tr>
+<tr><td>Shadow plan</td><td>不立即提交副作用的候选计划，用于比较 upstream 与 CacheFlow 的预测成本。</td><td>Benefit Gating 决策 seam。</td></tr>
+<tr><td>Ridge regression</td><td>带 L2 正则的线性回归，缓解少样本/共线特征导致的不可逆或高方差。</td><td>`server_benefit_policy::ridge_model`。</td></tr>
+<tr><td>Confidence radius</td><td>当前上下文在参数不确定性下的预测误差尺度；数据覆盖差时更大。</td><td>收益下界判定。</td></tr>
+<tr><td>Safe exploration</td><td>在结构安全区间内、有频率和总预算限制的试探动作；不等于模型已确信动作更优。</td><td>`safe_exploration` reason。</td></tr>
+<tr><td>Positive lower bound</td><td>即使把 CacheFlow 成本上调、upstream 成本下调并加 margin，CacheFlow 仍预测更优。</td><td>真正的 learned exploitation。</td></tr>
+<tr><td>Distribution shift</td><td>线上特征/反馈分布变化，使旧模型关系失效；不能把单次 SLO miss 自动等同于 drift。</td><td>residual streak + cooldown。</td></tr>
+<tr><td>CUDA stream</td><td>同一 stream 内按序执行的一列 GPU 命令；不同 stream 可能并发，但正确性不能依赖“碰巧并发”。</td><td>KV gather/scatter/swap 异步路径。</td></tr>
+<tr><td>CUDA event</td><td>插入 stream 的时间戳/依赖对象，能测设备执行区间，也能建立跨 stream happens-before。</td><td>KV kernel/copy Event 计时。</td></tr>
+<tr><td>Kernel launch</td><td>Host 向 GPU 提交一个 grid；launch 通常异步，过碎的 kernel 会引入调度和同步成本。</td><td>paged KV gather/scatter/COW。</td></tr>
+<tr><td>Counter</td><td>单调递增、重启可归零的累计量。</td><td>decisions、fallback、drift 次数。</td></tr>
+<tr><td>Gauge</td><td>可增可减的当前值。</td><td>terminal predicted benefit/uncertainty。</td></tr>
+<tr><td>Causal chain</td><td>受控干预 → 中介变化 → 系统结果变化；比单张 profiler 截图更能支持因果解释。</td><td>paired Latin upstream/always 实验。</td></tr>
+</tbody></table>
+<p class="source">主要参照：<a href="https://www.usenix.org/system/files/osdi22-yu.pdf">Orca</a>、<a href="https://doi.org/10.1145/3600006.3613165">PagedAttention</a>、<a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html">CUDA Programming Guide</a>、<a href="https://prometheus.io/docs/concepts/metric_types/">Prometheus</a>。</p>
+<nav class="nav"><a href="../lessons/0001-transformer-inference-foundations.html">开始课程 →</a><a href="formulas-and-code-map.html">公式与代码地图 →</a></nav>
+</main></body></html>

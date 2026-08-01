@@ -1,0 +1,51 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>公式与代码地图</title><link rel="stylesheet" href="../assets/course.css"></head><body><main>
+<div class="kicker">Reference · 白板速查</div><h1>核心公式与代码地图</h1><p class="lead">面试前 10 分钟复习：每个公式必须能说明变量、假设、复杂度，以及它如何进入当前实现。</p>
+<h2>1. Attention 与 KV</h2>
+<div class="formula">Attention(Q,K,V) = softmax(QKᵀ / √d<sub>k</sub>)V</div>
+<p>Prefill 长度为 <code>n</code> 时，标准 attention score 的计算/存储具有二次项；decode 只产生一个新 query，但需读取历史 <code>n</code> 个 K/V。KV cache 避免为历史 token 重算 K/V。</p>
+<div class="formula">KV bytes ≈ L × T × 2 × H<sub>kv</sub> × D<sub>head</sub> × bytes(dtype) × active sequences</div>
+<p><code>2</code> 表示 K 与 V；若使用 GQA，<code>Hkv &lt; Hq</code>。本项目容量规划必须使用模型几何，而不是写死“每 token 若干 KB”。</p>
+<h2>2. Block 与 COW 不变量</h2>
+<div class="formula">physical(block) = block_table[sequence][logical_block]</div>
+<div class="formula">∀p: refcount[p] = |{(s,l) : block_table[s][l] = p}|</div>
+<p>写共享块前必须满足 <code>refcount==1</code>；否则分配新块、复制有效 token、原子性地切换写者映射，再递减旧块引用。失败时应保持旧映射有效。</p>
+<h2>3. 调度分数</h2>
+<div class="formula">score = cache_reuse_gain − prefill_cost − eviction_penalty + aging_bonus − SLO_risk</div>
+<p>项目不是声称该线性式具有普适最优性，而是把可解释因素放进一个可测试、可回退的策略 seam。真正提交的 <code>IterationPlan</code> 必须冻结，不能在 execute 阶段悄悄改变。</p>
+<h2>4. Ridge 与置信门控</h2>
+<div class="formula">A = λI + Σxᵢxᵢᵀ,　b = Σxᵢyᵢ,　θ̂ = A⁻¹b</div>
+<div class="formula">ŷ(x)=xᵀθ̂,　radius(x)=β·σ̂·√(xᵀA⁻¹x)</div>
+<div class="formula">启用 CacheFlow iff ĉ + r<sub>c</sub> + margin &lt; max(0, û − r<sub>u</sub>)</div>
+<p>这是“CacheFlow 悲观成本仍小于 upstream 乐观成本”。项目分别维护 backend/action 模型；探索有间隔和预算，drift 用成熟模型的连续大残差触发。</p>
+<h2>5. 服务指标</h2>
+<div class="formula">TTFT = t(first non-empty token) − t(request accepted)</div>
+<div class="formula">TPOT ≈ [t(last token) − t(first token)] / max(output_tokens−1,1)</div>
+<div class="formula">throughput = Σ completion_tokens / wall_time</div>
+<p>P95 先对每个 trial 内请求求分位，再跨 fresh-process 汇总；不能拿一次最快值代表收益，也不能用不同 trial 的两个独立中位数冒充 paired ratio。</p>
+<h2>6. 一次请求的代码路径</h2>
+<div class="diagram">HTTP/SSE request
+  → tools/server/server-context.cpp
+  → server_inference_engine::run_iteration
+      prepare → plan → execute → commit/abort
+  → server_inference_scheduler (slot / prefill / decode)
+  → server_benefit_policy (upstream vs CacheFlow shadow plan)
+  → server_kv_block_manager / capacity_planner / swap_store
+  → server_runtime_adapter
+  → llama_decode
+  → llama-kv-cache-paged.cu / server-kv-block-cuda.cu
+  → CUDA stream + event
+  → metrics / Engine trace / SSE token</div>
+<h2>7. 核心源码定位</h2>
+<table><thead><tr><th>问题</th><th>先看文件</th><th>验证</th></tr></thead><tbody>
+<tr><td>迭代状态与事务</td><td><code>server-inference-iteration.*</code><br><code>server-inference-engine.*</code></td><td><code>test-inference-iteration.cpp</code><br><code>test-inference-engine.cpp</code></td></tr>
+<tr><td>调度与公平性</td><td><code>server-inference-scheduler.*</code></td><td><code>test-inference-scheduler.cpp</code></td></tr>
+<tr><td>KV block/COW</td><td><code>server-kv-block-manager.*</code></td><td><code>test-kv-block-manager.cpp</code></td></tr>
+<tr><td>容量准入</td><td><code>server-kv-capacity-planner.*</code></td><td><code>test-kv-capacity-planner.cpp</code></td></tr>
+<tr><td>Host/File Swap</td><td><code>server-kv-swap-store.*</code></td><td><code>test-kv-swap-store.cpp</code></td></tr>
+<tr><td>真实 CUDA KV</td><td><code>src/llama-kv-cache-paged.cu</code><br><code>server-kv-block-cuda.cu</code></td><td><code>test-kv-block-cuda.cpp</code><br><code>test-kv-real-cuda-swap.cpp</code></td></tr>
+<tr><td>在线收益门控</td><td><code>server-benefit-policy.*</code></td><td><code>test-benefit-policy.cpp</code><br><code>run_long_lived_benefit.py</code></td></tr>
+<tr><td>Speculation</td><td><code>server-speculation-controller.*</code></td><td><code>test-speculation-controller.cpp</code></td></tr>
+<tr><td>因果 profiling</td><td><code>run_cuda_causal_profile.py</code><br><code>llama_lab/cuda_causality.py</code></td><td><code>cuda_causal_profile_evidence.json</code></td></tr>
+</tbody></table>
+<nav class="nav"><a href="glossary.html">← 术语表</a><a href="../lessons/0008-interview-defense-lab.html">面试答辩实验室 →</a></nav>
+</main></body></html>

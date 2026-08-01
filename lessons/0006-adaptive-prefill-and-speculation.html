@@ -1,0 +1,21 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>06 Adaptive Prefill 与 Speculation</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/quiz.js"></script></head><body><main>
+<div class="kicker">Lesson 06 · 在线控制算法 · 55 min</div><h1>Adaptive Prefill 与 Speculative Decoding</h1><p class="lead">本节目标：解释两个“加速策略”为何都需要在线控制，以及项目实现与论文算法的边界。</p>
+<h2>1. Chunked Prefill 的基本权衡</h2><p>长 prefill 一次完成，矩阵大、吞吐可能好，却形成长迭代，阻塞 decode。切成 <code>c</code> token 的块，可在块间插入 decode，改善 TTFT/TPOT 尾部；但 chunk 太小会增加调度、kernel launch、KV 操作和重复 bookkeeping。</p>
+<div class="formula">iteration cost(c) ≈ fixed_launch + compute(prefill_tokens≤c, decode_batch) + scheduling_overhead(c)</div>
+<p>最优 <code>c</code> 依赖 backend、活跃 decode、剩余 prompt、KV 压力和目标 iteration 时间。固定 64/128/256 不可能对所有状态最优，因此项目维护按 backend bucket 的在线 cost model，并保留 <code>chunk=0</code> upstream greedy 安全动作。</p>
+<h2>2. 控制器为何要避免振荡</h2><p>若只看上一轮耗时：上一轮过慢就减 chunk，下一轮过快又增 chunk，可能来回振荡。常见稳定手段包括 EWMA、hysteresis、安全范围和最小观察量。项目负结果显示 CPU 在线动作曾劣于所有固定候选，因此加入 backend 分桶和 2% 回归门禁；这是“从负结果收紧控制器”的面试亮点。</p>
+<h2>3. Speculative Decoding 原理</h2><p>论文中的推测解码让廉价 draft 模型提出多个 token，target 模型一次并行验证，并通过接受/拒绝采样保持目标分布。速度来自“target 验证一段 token”比“串行生成同样数量 token”便宜。</p>
+<p>粗略加速由接受长度和验证成本决定：</p><div class="formula">speedup ≈ accepted_tokens_per_verify / (draft_cost + verify_cost relative to one target step)</div>
+<p>接受率低时，draft 成本和验证浪费会使其更慢；batch、模型大小和 memory bandwidth 都会改变 break-even point。</p>
+<h2>4. 本项目的边界</h2><p>项目使用 N-gram speculation controller，不是训练/部署独立 draft Transformer。它根据命中/接受反馈动态选择 speculation depth，并有固定策略对照。能展示的是“在线深度控制、反馈和回退”；不能声称实现了论文完整双模型采样算法。</p>
+<table><thead><tr><th>概念</th><th>论文 draft-model</th><th>本项目</th></tr></thead><tbody><tr><td>候选来源</td><td>小型近似模型</td><td>N-gram 路径</td></tr><tr><td>核心控制</td><td>draft 长度、接受采样</td><td>speculation depth 自适应</td></tr><tr><td>正确性边界</td><td>保持 target 分布的算法证明</td><td>依赖 llama.cpp 现有验证语义和兼容测试</td></tr><tr><td>贡献重点</td><td>论文算法本身</td><td>Serving 控制器、观测、A/B 与回退</td></tr></tbody></table>
+<h2>5. 两个控制器的共同结构</h2><div class="diagram">observe state → estimate candidate cost/reward → choose bounded action
+       ↑                                      ↓
+       └──────── feedback / SLO / failure ────┘
+
+共同要求：backend-aware、cold start、探索预算、回退、可解释 metric、真实 A/B。</div>
+<div class="task"><strong>设计题：</strong>如果将 Benefit Gating 动作空间从 upstream/CacheFlow 扩展到 <code>(prefill chunk, speculation depth)</code> 联合动作，维度和探索成本如何增长？你会选择分层控制器、contextual bandit 还是 constrained optimization？写出取舍。</div>
+<div class="quiz"><h3>主动回忆</h3><p>chunk 越小为什么不一定 TTFT 越好？</p><button data-answer="false">因为小 chunk 会改变模型参数</button><button data-answer="true">因为更多轮次与 launch/调度开销可能抵消公平性收益</button><button data-answer="false">因为小 chunk 无法写入任何 KV</button><div class="feedback"></div><details><summary>解析</summary>chunking 减少单轮阻塞，却增加轮次和系统开销；最优点依赖 workload/backend。</details></div>
+<p class="source">主阅读：<a href="https://www.usenix.org/conference/osdi24/presentation/agrawal">Sarathi-Serve</a>；<a href="https://proceedings.mlr.press/v202/leviathan23a.html">Speculative Decoding, ICML 2023</a>。</p>
+<nav class="nav"><a href="0005-online-learning-benefit-gating.html">← 在线门控</a><a href="0007-profiling-causal-experiments.html">下一课：因果实验 →</a></nav><p>如果你混淆了“候选生成”和“深度控制”，请让学习助手用一次 token 验证过程画时序图。</p>
+</main></body></html>

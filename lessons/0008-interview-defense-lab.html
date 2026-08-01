@@ -1,0 +1,24 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>08 面试答辩实验室</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/quiz.js"></script></head><body><main>
+<div class="kicker">Lesson 08 · 综合演练 · 90 min</div><h1>把项目讲成“可验证的个人研究工作”</h1><p class="lead">本节目标：形成 30 秒、3 分钟和 15 分钟三种叙事；用追问清单检验自己是否真正掌握，而非背稿。</p>
+<h2>1. 30 秒版本</h2><div class="card"><p>我基于固定版本 llama.cpp，在真实 <code>llama-server → llama_decode → KV → CUDA</code> 热路径上实现了 CacheFlow Runtime。核心工作包括 iteration-level Engine、cache-aware scheduler、Paged Prefix KV/COW、Host/File/CUDA swap、自研 KV kernels，以及用在线 Ridge 置信下界控制 CacheFlow 是否启用。我用真实模型、Compute Sanitizer、故障注入、多 trial A/B 和 CUDA→Engine→TTFT 因果链验证；同时保留负结果，不声称所有 CUDA workload 都提升。</p></div>
+<h2>2. 三分钟结构</h2><ol><li><strong>问题：</strong>LLM serving 的 prefill/decode 干扰、KV 动态内存和固定策略跨 backend 失效。</li><li><strong>架构：</strong>把循环拆成 prepare/plan/execute/commit；Scheduler、KV manager、runtime adapter 通过窄接口协作。</li><li><strong>算法：</strong>block table/refcount/COW；chunk/spec 控制；backend-local online Ridge + confidence gating。</li><li><strong>CUDA：</strong>真实 tensor gather/scatter/COW、direct/staging 分流、stream/event 生命周期和 sanitizer。</li><li><strong>证据：</strong>53-wave 收敛；paired CUDA 因果链；严格 full gate。</li><li><strong>边界：</strong>单机 0.5B/4050、无 Nsight 全 census、mixed CUDA 收益不稳定。</li></ol>
+<h2>3. 个人贡献边界</h2><p>上游提供 GGUF、GGML 图与通用算子、模型实现、sampling、HTTP 基础设施；个人差异以固定上游 patch 为准：56 files、+7533/−99 C/C++/CUDA，外层另有实验与报告。正确说法是“重构并扩展固定上游的 serving 热路径”，不是“重写了 llama.cpp”。</p>
+<h2>4. 高频追问与答题骨架</h2><table><thead><tr><th>追问</th><th>答案必须包含</th></tr></thead><tbody>
+<tr><td>为什么这是 AI Infra？</td><td>真实 serving 热路径、KV/CUDA/调度/性能—正确性权衡，不是 Python API 包装。</td></tr>
+<tr><td>为什么不用 vLLM？</td><td>学习目标是深入 llama.cpp 单机 C++/CUDA；借鉴 paging 思想但自行接入固定上游；不做无意义优劣宣称。</td></tr>
+<tr><td>COW 怎么保证正确？</td><td>refcount 不变量、allocate-copy-remap-dec 顺序、异步 event、失败回滚、测试。</td></tr>
+<tr><td>Ridge 为什么合理？</td><td>小维度、在线闭式更新、正则稳定少样本、置信半径可解释；非线性强时存在欠拟合边界。</td></tr>
+<tr><td>为什么需要探索？</td><td>反事实反馈不可同时观测；无探索无法学另一动作；结构区间/频率/预算/回退限制风险。</td></tr>
+<tr><td>为什么短 CUDA 不探索？</td><td>fresh-process 风险预算；always 已知有害，单 probe 可破坏 3% SLO；长驻实验独立证明学习。</td></tr>
+<tr><td>CUDA 指标改善为何 TTFT 变差？</td><td>局部 copy/Event 与全局 batch/排队不同层；chunk 更多；因果链显示系统结果，需 Nsight 继续定位。</td></tr>
+<tr><td>怎样证明不是偶然？</td><td>fresh process、paired Latin、多 trial、固定门槛、原始 evidence；仍承认样本/硬件限制。</td></tr>
+<tr><td>最大技术债？</td><td>动作空间仍主要是 prefill plan；未联合 slot/KV admission/swap/spec；缺多 GPU 与 Nsight。</td></tr>
+</tbody></table>
+<h2>5. 现场演示顺序</h2><ol><li>打开 <code>server-inference-engine.*</code>，指出状态所有权和事务阶段。</li><li>运行/展示 <code>test-kv-block-manager</code>：prefix share → partial-tail COW → refcount 守恒。</li><li>打开 <code>llama-kv-cache-paged.cu</code>：解释线程索引、mapping、direct/staging 选择。</li><li>展示 <code>long_lived_benefit_cuda_summary.json</code>：冷启动、持续利用、终态置信、shift 回退。</li><li>展示 <code>cuda_causal_profile_summary.json</code> 与 evidence：讲负结果和证据边界。</li></ol>
+<h2>6. 15 道闭卷自测</h2><ol><li>推导 GQA KV bytes 公式。</li><li>prefill 为什么更 compute-heavy，decode 为什么更 bandwidth-sensitive？</li><li>iteration-level scheduling 解决什么，不解决什么？</li><li>Request、Sequence、Slot 为什么分离？</li><li>写出 Block Table/refcount 不变量。</li><li>画 partial-tail COW 的成功和复制失败路径。</li><li>不同 CUDA stream 如何建立 happens-before？</li><li>Event 时间和端到端 TTFT 有何区别？</li><li>Ridge 的 λ 如何影响 bias/variance？</li><li>解释 <code>xᵀA⁻¹x</code>。</li><li>为何 cost 最小化用悲观 CacheFlow 与乐观 upstream？</li><li>SLO miss 与 drift 有何区别？</li><li>chunk size 太大/太小的失败模式是什么？</li><li>本项目 speculation 与论文双模型算法有何差异？</li><li>最终 CUDA 因果结果支持和不支持哪些结论？</li></ol>
+<div class="task"><strong>评分规则：</strong>每题 0=不会；1=能背定义；2=能推导；3=能连接代码/数据并说明边界。总分 45，达到 36 且任何题不为 0，才进入模拟面试。错题隔 1 天、3 天、7 天重新闭卷回答。</div>
+<div class="quiz"><h3>答辩判断</h3><p>面试官问“项目是不是 vLLM 的复刻”，最佳第一句是什么？</p><button data-answer="false">不是，因为我的代码行数比 vLLM 更多</button><button data-answer="true">借鉴 paging/iteration 思想，但贡献是固定 llama.cpp 热路径中的独立设计、实现与验证</button><button data-answer="false">是，所有 LLM serving 系统本质完全一样</button><div class="feedback"></div><details><summary>解析</summary>承认思想来源，马上指出代码边界、实现差异与可验证证据，最可信。</details></div>
+<h2>7. 面试禁区</h2><ul><li>不说“CUDA 加速了整体服务”；本轮 causal intervention 的 TTFT 反而恶化。</li><li>不把 phase-duration SVG 称为 sampled-stack flame graph。</li><li>不把 deterministic replay、safe exploration 或单次峰值称为线上收敛。</li><li>不说“通过 sanitizer 所以没有 bug”；它只覆盖特定错误类别和测试输入。</li><li>不说“比 vLLM 快”；没有同硬件同模型同 workload 的可信对照。</li></ul>
+<div class="callout good"><strong>完成标准：</strong>录制一次 3 分钟讲解；随机抽 5 道自测；现场打开 3 个源码文件定位；对一个负结果给出至少两个竞争性解释和下一步实验。</div>
+<nav class="nav"><a href="0007-profiling-causal-experiments.html">← 因果实验</a><a href="../reference/formulas-and-code-map.html">公式与代码地图 →</a></nav><p>完成后让学习助手扮演“系统教授 + 机器学习教授 + CUDA 工程师”连续追问，禁止只让它评价讲稿是否流畅。</p>
+</main></body></html>

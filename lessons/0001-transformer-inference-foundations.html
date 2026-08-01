@@ -1,0 +1,19 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>01 Transformer 推理基础</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/quiz.js"></script></head><body><main>
+<div class="kicker">Lesson 01 · 前置基础 · 45 min</div><h1>从 Attention 到 Prefill / Decode / KV Cache</h1><p class="lead">本节目标：不依赖项目术语，从 Transformer 数学推导出 serving 为什么需要 KV cache、为什么 prefill 与 decode 的性能特征不同。</p>
+<h2>1. 自回归模型到底在算什么</h2><p>语言模型把联合概率分解为 <code>P(x₁…xₙ)=∏P(xₜ|x&lt;t)</code>。生成第 <code>t</code> 个 token 时只能使用已有前缀，因此 decode 天生具有跨 token 的串行依赖；GPU 能并行的是“一次 forward 内的矩阵运算”和“多个 sequence 的同一步”，不能同时知道尚未生成的未来 token。</p>
+<p>每层先把 hidden state 投影为 Q、K、V：</p><div class="formula">Q=XW<sub>Q</sub>, K=XW<sub>K</sub>, V=XW<sub>V</sub><br>Attention(Q,K,V)=softmax(QKᵀ/√d<sub>k</sub>)V</div>
+<p>除以 <code>√dk</code> 是为了避免维度增大时点积方差过大，使 softmax 过早饱和。causal mask 把未来位置 score 设为负无穷，保证位置 <code>t</code> 不能偷看未来。</p>
+<h2>2. Prefill 和 Decode 为什么是两种 workload</h2>
+<table><thead><tr><th></th><th>Prefill</th><th>Decode</th></tr></thead><tbody><tr><td>输入</td><td>整个 prompt 的大量 token</td><td>每个活跃 sequence 通常 1 token</td></tr><tr><td>并行性</td><td>token 维度高，可形成大矩阵</td><td>跨时间串行，单轮矩阵较“瘦”</td></tr><tr><td>常见瓶颈</td><td>计算量、长迭代阻塞</td><td>KV 读取、内存带宽、launch/batch 效率</td></tr><tr><td>主要服务指标</td><td>TTFT</td><td>TPOT、吞吐、总 latency</td></tr></tbody></table>
+<p>如果一个 2000-token prefill 和正在 decode 的会话放进同一轮，GPU 利用率可能更高，但 decode 用户会等待一整个长迭代。这就是吞吐—延迟冲突，也是 chunked prefill 的动机。</p>
+<h2>3. KV Cache 推导</h2><p>生成新 token 时，新 query 仍需和所有历史 K/V 做 attention，但历史 token 的 K/V 投影没有变化。缓存它们可避免每步重算整个前缀。对 decoder-only、GQA 模型，粗略容量为：</p>
+<div class="formula">bytes = layers × tokens × 2(K,V) × kv_heads × head_dim × dtype_bytes × sequences</div>
+<p>例：24 层、4096 token、2 个 KV heads、head_dim=64、FP16、单 sequence：</p><div class="formula">24 × 4096 × 2 × 2 × 64 × 2 = 50,331,648 bytes ≈ 48 MiB</div>
+<p>注意：不能直接用参数量推 KV；KV 由层数、上下文、KV head 几何和精度决定。GQA/MQA 通过减少 KV heads 显著降低容量，但 query heads 不一定减少。</p>
+<div class="callout"><strong>项目连接：</strong>容量公式进入 <code>server-kv-capacity-planner.*</code>；Block runtime 管理的是这些随 token 增长的 KV，而不是模型权重。模型权重常驻和 KV 动态容量必须分开算。</div>
+<h2>4. 为什么小模型结果不能直接外推大模型</h2><p>模型变大后，权重读取、算力占用、KV 几何、batch 饱和点、kernel 数量都会改变。0.5B 在 RTX 4050 上看到的“某策略有害”，可以证明控制器需要门控，却不能证明 7B/A100 上方向相同。面试时应说“机制可迁移，数值结论需重跑”。</p>
+<div class="task"><strong>白板练习：</strong>给定 L=32、T=8192、Hkv=8、D=128、BF16、并发 4，先独立算 KV 容量；再说明若 block size=16，一个 sequence 需要多少逻辑块，最后一个 partial block 为什么会产生内部碎片。</div>
+<div class="quiz"><h3>主动回忆</h3><p>为什么 decode 有 KV cache 后仍会随上下文变慢？</p><button data-answer="false">因为历史 K/V 每步都会重新投影</button><button data-answer="true">因为新 query 仍需读取并关注历史 K/V</button><button data-answer="false">因为 causal mask 会重新训练模型参数</button><div class="feedback"></div><details><summary>解析</summary>KV cache 省掉历史 K/V 的投影重算，但没有省掉新 query 对历史 K/V 的读取和 attention。</details></div>
+<p class="source">主阅读：<a href="https://papers.neurips.cc/paper/7181-attention-is-all-you-need.pdf">Vaswani et al., Attention Is All You Need</a>。</p>
+<nav class="nav"><a href="../reference/glossary.html">← 术语表</a><a href="0002-serving-scheduling-and-metrics.html">下一课：Serving 调度 →</a></nav><p>有任何公式或概念不清楚，直接让你的学习助手换一种方式解释并现场出题。</p>
+</main></body></html>

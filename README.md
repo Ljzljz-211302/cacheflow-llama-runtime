@@ -127,6 +127,8 @@ models/ runtime/ build/          下载模型、工具链和本机构建产物�
 
 ## 面试演示主线
 
+系统学习入口：[推免面试课程](lessons/index.html)；配套的 [14 天学习路线](docs/interview-study-roadmap.md)、[术语表](reference/glossary.html)、[公式/代码地图](reference/formulas-and-code-map.html) 和 [25 道追问题库](reference/interview-question-bank.html)，从 Transformer/CUDA/机器学习前置基础一直覆盖到项目算法、实验和答辩训练。
+
 三分钟版本：
 
 1. 展示 `server_inference_iteration` 如何禁止半执行计划提交；

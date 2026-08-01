@@ -1,0 +1,40 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>CacheFlow 面试追问题库</title><link rel="stylesheet" href="../assets/course.css"></head><body><main>
+<div class="kicker">Reference · 25 questions</div><h1>推免面试追问题库</h1><p class="lead">先闭卷回答，再展开要点。优秀答案不只给定义，还要连接项目代码、实验与边界。</p>
+<h2>A. 模型与推理</h2>
+<details><summary>1. 为什么 Attention 要除以 √dₖ？</summary><p>若 Q/K 各维近似独立、方差为 1，点积方差随 dₖ 增长。尺度过大会让 softmax 接近 one-hot、梯度区间变差。除以 √dₖ 把点积分布尺度稳定在相近范围。项目连接：它解释模型图，但不是本项目个人实现。</p></details>
+<details><summary>2. KV cache 节省了什么，没节省什么？</summary><p>节省历史 token 在每层的 K/V 投影重算；没有省掉新 query 对历史 K/V 的读取和 attention，也没有消除跨生成 token 的自回归串行依赖。上下文越长，decode 仍可能更慢。</p></details>
+<details><summary>3. Prefill 与 decode 的 roofline 特征为何不同？</summary><p>Prefill 有较大 token 维度，更容易形成高算术强度矩阵乘；decode 每个 sequence 每步仅一个新 token，算子更瘦、权重/KV 读取占比高，常更受带宽和 launch/batch 效率限制。具体结论依模型、batch 和 GPU，需 profiling。</p></details>
+<details><summary>4. GQA 如何改变 KV 容量？</summary><p>query heads 多个一组共享较少的 KV heads。KV bytes 使用 Hkv 而不是 Hq，因此容量与 Hkv 线性相关。Attention 输出仍对应 query heads，不能把 Hq/Hkv 混用。</p></details>
+<details><summary>5. 量化权重为何不等于量化 KV？</summary><p>权重量化改变模型常驻参数的存储/计算；KV dtype 由运行时缓存配置决定。二者有不同精度和带宽影响，计算 VRAM 时应分项。</p></details>
+
+<h2>B. Engine、调度与 KV</h2>
+<details><summary>6. prepare/plan/execute/commit 比一个大循环好在哪里？</summary><p>它明确状态所有权和副作用边界：plan 可构造/比较 shadow plan，execute 只消费冻结计划，commit 才发布状态。失败可 abort，避免一半 slot/KV 已更新、一半仍旧状态。代价是接口和事务 bookkeeping。</p></details>
+<details><summary>7. iteration-level scheduling 会不会让吞吐下降？</summary><p>可能。更频繁调度和过小 batch 会增加开销；价值是允许动态 batching、减少头阻塞并改善延迟。需要在吞吐与 TTFT/TPOT 约束下选择，而非认为粒度越细越好。</p></details>
+<details><summary>8. Cache-aware 调度怎样导致饥饿？</summary><p>若复用收益长期主导分数，新 prefix/低命中请求可能一直输。项目加入 aging/SLO/eviction 等因素；测试应构造热门 cache 请求持续到达而老请求仍最终被选中的序列。</p></details>
+<details><summary>9. Block size 为什么不是越小越好？</summary><p>小块降低尾部内部碎片，提升共享/COW 粒度；同时增加 Block Table、refcount、mapping、kernel/拷贝次数和 launch 开销。默认 16 是当前实验折中，换模型/硬件需重测。</p></details>
+<details><summary>10. COW 的线性化点在哪里？</summary><p>可把“写者 Block Table 从旧块切到已完整复制的新块”视为发布/线性化点。在此之前其他读者仍见旧块；之后写者独占新块。CUDA copy 完成必须 happens-before 该发布。</p></details>
+<details><summary>11. refcount 归零为什么还不一定能立刻释放 GPU 块？</summary><p>Host 映射已无引用，不代表先前异步 kernel 已结束。还需 stream 同序或 completion event/fence；否则会发生异步 UAF，甚至块被重新分配后形成 ABA。</p></details>
+<details><summary>12. Swap 与 recompute 怎么选？</summary><p>比较 KV 搬运/存储/恢复成本与重新 prefill 计算成本，还要考虑 Host/磁盘容量、SLO、prefix 可复用性和失败复杂度。短 prefix 可能重算更便宜，长 prefix 或计算昂贵模型更偏 swap。</p></details>
+
+<h2>C. CUDA 与体系结构</h2>
+<details><summary>13. 为什么自研 gather/scatter kernel 可能输给多次 memcpy？</summary><p>通用 mapping 带索引读取、边界、launch 和可能的不连续访问；无重叠的连续块复制可被 CUDA memcpy 路径高效处理。kernel 只在重叠/重复映射需要 snapshot 语义或能有效融合时有优势。</p></details>
+<details><summary>14. Coalescing 的本质是什么？</summary><p>warp 中线程访问可合并为尽量少的内存事务。关键不是“地址必须完全连续”这一口号，而是访问落入多少内存 segment、对齐与数据宽度。mapping 随机会破坏合并并增加事务。</p></details>
+<details><summary>15. Event 和 cudaDeviceSynchronize 的取舍？</summary><p>device synchronize 等待设备所有先前工作，简单但扩大同步范围；event 可标记特定 stream 位置，用于精确依赖和计时，让无关 stream 继续。Event 本身也有管理成本，且必须关联正确 device/stream。</p></details>
+<details><summary>16. pinned memory 为什么重要，又有什么代价？</summary><p>page-locked Host memory 支持稳定 DMA/异步传输与 copy-compute overlap；但锁页减少 OS 可分页内存，分配较贵，过量会伤害系统。项目对 swap buffer 应有预算和复用。</p></details>
+<details><summary>17. memcheck/racecheck 全绿后还要测什么？</summary><p>Host 数据竞争、跨 stream 生命周期、算法语义、文件崩溃一致性、OOM、性能回归、模型兼容和输出质量。sanitizer 是必要门槛，不是完整正确性证明。</p></details>
+
+<h2>D. 在线学习与控制</h2>
+<details><summary>18. Ridge 正则 λ 增大有什么影响？</summary><p>参数更收缩，方差/病态敏感性下降，但 bias 增加，可能低估真实特征效应。在线早期通常需要稳定性；数据变多后固定 λ 相对数据项影响减弱。</p></details>
+<details><summary>19. 为什么维护 action-specific model？</summary><p>bandit 只观察所选动作的反馈；两个动作的成本函数可能不同。分模型便于学习各自参数与不确定性，但样本被拆分、冷启动更慢，因此需要受限探索。</p></details>
+<details><summary>20. 项目策略与标准 LinUCB 有何差异？</summary><p>LinUCB 通常最大化 reward 的乐观上界以探索；项目最小化系统 cost，并要求 CacheFlow 悲观上界仍低于 upstream 乐观下界，偏向安全部署。同时另设稀疏探索预算，不把纯 UCB 乐观动作直接放入生产。</p></details>
+<details><summary>21. 如何识别 distribution shift？</summary><p>用成熟模型的预测残差，而不是单次原始 latency。连续残差超过预测尺度的倍数或 execution failure 才触发 reset/cooldown；结构不安全状态可直接 fallback，无需等待统计 drift。</p></details>
+<details><summary>22. 为什么终态置信门槛重要？</summary><p>只要求历史曾出现连续 positive waves，模型可能后来失效仍通过。终态 `predicted_benefit > uncertainty` 防止挑选全程最大值的选择偏差，证明实验结束时仍保持置信。</p></details>
+
+<h2>E. 实验、贡献与边界</h2>
+<details><summary>23. 为什么需要 paired Latin，而非各跑若干次取中位？</summary><p>配对让同一 trial 的共同环境被差值抵消；Latin 轮换策略顺序，降低热机/温度/时间趋势混杂。必须先算 pair effect，再汇总；仍需足够样本和原始数据。</p></details>
+<details><summary>24. 最终 CUDA 因果结果的最强结论是什么？</summary><p>强制策略确实改变决策、prefill 分块和 CUDA KV 中介，并伴随 material Engine/TTFT 恶化；局部 copy/Event 下降未转化为端到端改善。不能据此断言具体 SM/occupancy 根因，也不能外推其他模型/GPU。</p></details>
+<details><summary>25. 如何证明个人贡献不是原仓库？</summary><p>固定上游 commit，以可逆 patch 统计 56 files、+7533/−99 C/C++/CUDA；逐模块展示新 Engine、Scheduler、KV/CUDA、控制器、测试和实验。明确上游保留 GGML/GGUF/model graph/sampling/HTTP，不声称重写 llama.cpp。</p></details>
+
+<div class="task"><strong>模拟方法：</strong>让同伴随机报题号，你必须在 90 秒内按“结论—原理—项目证据—边界”回答。若只能复述本页文字，记 1 分；能画公式/状态并指出源码，记 2 分；能接受反例并设计验证，记 3 分。</div>
+<nav class="nav"><a href="formulas-and-code-map.html">← 公式与代码地图</a><a href="../lessons/0008-interview-defense-lab.html">答辩实验室 →</a></nav>
+</main></body></html>

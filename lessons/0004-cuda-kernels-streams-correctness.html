@@ -1,0 +1,20 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>04 CUDA 基础与实现</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/quiz.js"></script></head><body><main>
+<div class="kicker">Lesson 04 · CUDA / 体系结构 · 60 min</div><h1>Kernel、Memory、Stream、Event 与正确性</h1><p class="lead">本节目标：能读懂项目 CUDA KV 路径，解释为什么“写了 CUDA”不等于“性能更好”，以及如何证明异步代码正确。</p>
+<h2>1. 执行层次</h2><p>Host 启动 kernel 的 grid；grid 由 thread blocks 组成；block 被调度到 SM；一个 block 内线程可通过 shared memory 和 barrier 协作。warp 是硬件执行粒度，分支分歧会让同一 warp 的路径串行化。</p>
+<p>索引常见写法：</p><pre><code>size_t i = blockIdx.x * blockDim.x + threadIdx.x;
+if (i &lt; n) dst[i] = src[mapping[i]];</code></pre>
+<p>面试需说明：边界检查防 OOB；连续线程访问连续地址有利于 coalescing；但一个纯 copy kernel 未必比 <code>cudaMemcpyAsync</code> 快，后者有专用实现和更低通用索引开销。</p>
+<h2>2. 项目为何同时有 direct-copy 与 staging kernel</h2><p>映射完全不重叠时，逐块 memcpy 通常更直接。若 scatter/gather 的源与目标可能重叠或同一源被重复映射，原地复制可能覆盖尚未读取的数据。staging 先保存快照，再写目标，获得类似 <code>memmove</code> 的语义。项目实验的负结果是：无重叠时 staging kernel 反而慢，因此生产路径只在需要 snapshot 语义时使用。</p>
+<h2>3. Stream 的 happens-before</h2><p>同一 stream 内命令按提交顺序执行；不同 stream 之间没有自动顺序保证。Host 的 kernel launch 通常异步返回，所以“函数返回”不代表 GPU 已完成。</p>
+<div class="diagram">stream A: copy-out ── record(event E) ────────────
+stream B:                wait(E) ── restore ── record(done)
+host:    enqueue ───────────────── wait(done) ── publish mapping</div>
+<p>page-locked host memory 是异步 Host↔Device 传输/重叠的重要条件。过早释放 pinned buffer 会 UAF；过度 <code>cudaDeviceSynchronize()</code> 虽然“安全”，却摧毁并发。更好的边界是精确 event + 生命周期所有权。</p>
+<h2>4. Event 计时回答什么</h2><p>两个 event 包围同一 stream 的操作，测的是设备时间区间，不包括请求排队前的全部 Host 调度和网络时间。项目同时保留：</p><table><thead><tr><th>证据</th><th>能回答</th><th>不能回答</th></tr></thead><tbody><tr><td>CUDA Event</td><td>指定 stream 操作设备耗时</td><td>完整请求 latency、occupancy 根因</td></tr><tr><td>nvidia-smi 100ms sample</td><td>粗粒度 busy/idle 趋势</td><td>短 kernel 精确利用率</td></tr><tr><td>Engine trace</td><td>prepare/plan/execute/commit 时间归属</td><td>warp/SM 级瓶颈</td></tr><tr><td>SSE TTFT</td><td>用户侧首 token 结果</td><td>具体哪个 kernel 导致变化</td></tr></tbody></table>
+<h2>5. 正确性工具</h2><p>Compute Sanitizer 的 memcheck 查越界、未对齐和部分 API/硬件错误；racecheck 主要检查 shared memory hazard；它们不是性能 profiler，也不能证明没有所有 Host 侧竞态。项目还需要 canary、随机 mapping、逐元素 CPU oracle、allocation failpoint 和端到端真实模型 smoke。</p>
+<div class="callout danger"><strong>高频追问：</strong>“racecheck 通过是否证明没有 race？”答：不证明。官方说明 racecheck 聚焦 shared memory hazard；跨 stream 生命周期、Host mutex、文件事务仍需 event 设计、状态机测试和故障注入。</div>
+<div class="task"><strong>代码练习：</strong>读 <code>src/llama-kv-cache-paged.cu</code> 的 gather/scatter kernel，画出 tensor 的逻辑维度和线性地址；再解释什么时候选择 direct copy、什么时候必须 staging。</div>
+<div class="quiz"><h3>主动回忆</h3><p>Host 函数在 kernel launch 后返回意味着什么？</p><button data-answer="false">kernel 已在所有 stream 完成</button><button data-answer="true">命令通常只被异步提交，完成需另行同步</button><button data-answer="false">GPU 已把结果自动复制回普通 Host 内存</button><div class="feedback"></div><details><summary>解析</summary>CUDA launch 多数是异步的；正确性依赖 stream 顺序、event 或显式同步。</details></div>
+<p class="source">主阅读：<a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html">CUDA Programming Guide: Asynchronous Execution</a>；工具：<a href="https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html">Compute Sanitizer</a>。</p>
+<nav class="nav"><a href="0003-paged-kv-prefix-cow-swap.html">← Paged KV</a><a href="0005-online-learning-benefit-gating.html">下一课：在线门控 →</a></nav><p>对任一异步生命周期有疑问时，先画 stream 时间线，再让学习助手检查 happens-before。</p>
+</main></body></html>

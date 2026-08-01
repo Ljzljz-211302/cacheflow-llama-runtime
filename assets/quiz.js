@@ -1,0 +1,1 @@
+document.addEventListener('click',e=>{const b=e.target.closest('[data-answer]');if(!b)return;const q=b.closest('.quiz');const ok=b.dataset.answer==='true';q.querySelectorAll('button').forEach(x=>x.disabled=true);const f=q.querySelector('.feedback');f.textContent=ok?'正确。请不用看答案，再口头解释一次原因。':'不对。展开解析后合上，再从因果关系重新回答。';f.className='feedback '+(ok?'correct':'wrong');});

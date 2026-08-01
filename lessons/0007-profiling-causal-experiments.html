@@ -1,0 +1,21 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>07 Profiling 与因果实验</title><link rel="stylesheet" href="../assets/course.css"><script defer src="../assets/quiz.js"></script></head><body><main>
+<div class="kicker">Lesson 07 · 科研与实验方法 · 65 min</div><h1>从相关性截图到 CUDA Profiling 因果链</h1><p class="lead">本节目标：能设计可信 A/B，识别噪声、选择偏差和错误统计，并诚实解释本项目的负结果。</p>
+<h2>1. 为什么 profiler 截图不是因果证据</h2><p>看到 TTFT 高时 GPU busy 也高，只能说明相关；可能共同由更长 prompt、温度、后台进程或进程顺序造成。因果需要主动改变策略，同时尽量保持其他条件不变，并确认干预真的穿过预期中介。</p>
+<div class="diagram">Intervention                    Mediators                         Outcome
+upstream ↔ always  →  decisions → prefill chunks/tokens
+                   →  KV launch/copy/Event + GPU samples
+                   →  Engine execute → SSE TTFT P95</div>
+<p>如果 policy 参数改变但 decision counter 没变，干预无效；如果 scheduler 改变但没有 CUDA 中介，不能声称 CUDA 路径导致；如果只见 CUDA noise、Engine/TTFT 不变，也不能声称有系统影响。</p>
+<h2>2. Paired Latin 设计</h2><p>每个 trial 将 upstream 与 always 配成一对，以同一 workload/seed 比较；Latin 顺序轮换避免总是先跑某策略而把热机/温度趋势混入策略效应。统计应先算每对差或比，再对 paired effect 求中位数。</p>
+<div class="callout danger"><strong>曾修正的错误：</strong>“learned 的独立中位数 ÷ upstream 的独立中位数”不是 paired estimator。两个中位数可能来自不同 trial，破坏配对。当前短门禁按同一 trial 计算 ratio 后取中位数。</div>
+<h2>3. 冷启动与长驻实验为何分开</h2><p>fresh-process A/B 回答“重启后短 trace 是否安全、回归是否受控”；53-wave 单 PID 回答“在线模型能否积累数据并持续利用”。把二者混在一起，会把冷启动探索税误判成稳态性能，或把长驻模型状态泄漏到独立 trial。</p>
+<h2>4. Material effect 门槛</h2><p>任何采样都有抖动。CUDA 因果门禁除了要求中介，还要求 <code>|ΔTTFT|≥5ms</code> 且 <code>|ΔEngine execute|≥1000µs</code>。这不是统计显著性的替代，而是先拒绝工程上无意义的微小波动。更完整研究还应报告置信区间、功效分析和更多硬件。</p>
+<h2>5. 最终结果怎么解释</h2><p>always 相对 upstream 的配对中位差：决策 +15、prefill chunk +23、prefill token −145、KV copy −2.519MB、CUDA Event −0.260ms、GPU busy +1.19%，但 Engine execute +31.23ms、TTFT P95 +44.79ms。</p>
+<p>正确结论不是“CUDA kernel 变慢”，因为 copy/Event 实际下降；也不是“GPU busy 上升导致 TTFT”，因为 100ms 采样太粗。更稳健的解释是：策略改变了 batch/分块/排队结构，局部 KV 搬运改善没有转化为端到端尾延迟改善。进一步定位需要 Nsight Systems timeline、Compute occupancy/roofline 和更多 paired trials。</p>
+<h2>6. 指标契约</h2><p>decision/observation/fallback/drift 是累计 counter；terminal predicted benefit/uncertainty 是 gauge。抓 phase 差值时只对 counter 做减法，gauge 保留末值；counter 若回退说明进程重启或抓错实例，验收应失败。</p>
+<h2>7. 常见实验威胁</h2><table><thead><tr><th>威胁</th><th>控制</th></tr></thead><tbody><tr><td>进程热身/模型加载</td><td>ready 后 donor warmup；计时窗口明确</td></tr><tr><td>顺序/温度漂移</td><td>Latin rotation、fresh process、paired effect</td></tr><tr><td>选择最好一次</td><td>预先固定 trial 数；报告中位/P95和原始数据</td></tr><tr><td>输出质量变化</td><td>兼容/质量 gate 与性能 gate 分离</td></tr><tr><td>采样器失败泄漏服务进程</td><td>嵌套 finally，sampler 异常仍终止 server</td></tr><tr><td>指标无实际效应</td><td>material Engine/TTFT 双门槛</td></tr></tbody></table>
+<div class="task"><strong>审稿人练习：</strong>给最终 causal JSON 写一段“支持什么、不支持什么”。必须分别涉及干预、中介、结果、采样粒度、外部有效性和下一步实验。</div>
+<div class="quiz"><h3>主动回忆</h3><p>为什么先求 paired ratio 再取中位数？</p><button data-answer="true">保留同一 trial 的共同环境，减少进程间混杂</button><button data-answer="false">让任何策略都必然显示为性能提升</button><button data-answer="false">因为独立中位数在数学上始终不存在</button><div class="feedback"></div><details><summary>解析</summary>配对利用同 trial 的共同条件；它不保证通过，只让估计更符合实验设计。</details></div>
+<p class="source">指标语义：<a href="https://prometheus.io/docs/concepts/metric_types/">Prometheus Metric Types</a>；CUDA 计时：<a href="https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html">CUDA Events</a>。</p>
+<nav class="nav"><a href="0006-adaptive-prefill-and-speculation.html">← Adaptive 算法</a><a href="0008-interview-defense-lab.html">下一课：面试答辩 →</a></nav><p>若你拿不准某个结论是否过度外推，把原始结果交给学习助手扮演审稿人反驳。</p>
+</main></body></html>
