@@ -70,6 +70,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "OpenAI stream/non-stream compatibility failed" }
         python scripts\run_serving_control_smoke.py
         if ($LASTEXITCODE -ne 0) { throw "cancel/deadline/backpressure smoke failed" }
+        python scripts\run_benefit_checkpoint_smoke.py
+        if ($LASTEXITCODE -ne 0) { throw "benefit checkpoint restart/corruption smoke failed" }
         python scripts\run_upstream_compat.py
         if ($LASTEXITCODE -ne 0) { throw "same-toolchain upstream compatibility failed" }
         python scripts\run_model_acceptance_matrix.py

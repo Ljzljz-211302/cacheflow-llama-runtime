@@ -989,7 +989,7 @@ sequenceDiagram
 
 - 一键构建、测试、Sanitizer 和 benchmark 已纳入 `verify.ps1 -Full`，2026-08-01 最终提交版本整链 1224.9 秒通过；
 - 架构图、生产 Engine trace 火焰图、mixed workload 原始 trial 和自动报告已生成；
-- 当前个人贡献统计为相对固定上游 56 files、+7533/-99；patch 可逆性由全量入口检查；
+- 当前个人贡献统计为相对固定上游 59 files、+8401/-99；patch 可逆性由全量入口检查；
 - 三分钟演示、算法/状态/失败模式/实验限制深挖手册已完成。
 
 ## 16. 当前代码到目标 Module 的映射
@@ -1133,7 +1133,7 @@ CLI 支持 `--benefit-policy upstream|always|rule|learned` 及样本、探索、
 
 `run_long_lived_benefit.py` 保持同一个 CUDA server PID，逐 wave 抓取带 backend/action label 的累积 counter 与最后一次预测 gauge。实验顺序固定为短冷启动、稳定高复用/长短请求混合、独立 throughput-only 分布切换。主门禁使用生产级 `confidence_beta=1.0`、每动作最少 12 个样本：冷启动不得提前启用；稳定阶段必须出现 `predicted_benefit > joint_uncertainty` 的非探索动作；切换后不得继续错误启用，并须由 drift 或 structural safety fallback 回到 upstream。不同 phase 的请求复杂度不同，禁止互相作为相对性能 baseline，只使用统一 TTFT SLO；同 workload 相对性能由下一节配对 A/B 提供。
 
-最终 53-wave CUDA 结果为：冷启动 CacheFlow/positive 均为 0；稳定阶段 exploration 17、positive-lower-bound 143，positive 覆盖 39 waves、最长连续 35 waves，终态预测收益/不确定性 11.24/5.27 ms；分布切换 CacheFlow/positive 均为 0、安全回退 3。门禁要求至少连续 3 个 positive wave，且终态收益仍须大于终态不确定性；不以全程最大值制造选择偏差。
+最终 53-wave CUDA 结果为：冷启动 CacheFlow/positive 均为 0；稳定阶段 exploration 18、positive-lower-bound 142，positive 覆盖 33 waves、最长连续 13 waves，终态预测收益/不确定性 21.29/8.82 ms；分布切换 CacheFlow/positive 均为 0、安全回退 3。门禁要求至少连续 3 个 positive wave，且终态收益仍须大于终态不确定性；不以全程最大值制造选择偏差。
 
 ### 21.6 CUDA profiling 因果链
 
@@ -1144,4 +1144,24 @@ CLI 支持 `--benefit-policy upstream|always|rule|learned` 及样本、探索、
 3. 自研 KV kernel launch/copy byte、CUDA Event 时间与 100 ms `nvidia-smi` busy/idle 样本确认 CUDA mediator；
 4. production Engine Chrome trace 与 SSE TTFT 确认系统结果。
 
-最终 always 相对 upstream 的配对中位差为 CacheFlow 决策 +15、prefill chunk +23、prefill token -145、自研 KV kernel launch不变、KV copy -2,519,000 B、CUDA Event -0.260 ms、GPU busy +1.19%、最大 idle gap不变、Engine execute +31,230 us、TTFT P95 +44.79 ms。CUDA 搬运指标改善但 Engine/TTFT 恶化，说明更多分块带来的排队/执行结构效应不能由单一 kernel 或 copy 指标代表；100 ms GPU busy 只是辅助信号。门禁要求 TTFT 至少 5 ms 且 Engine 至少 1000 us 的 material paired effect；完整 GPU samples、Engine events 和相关 Prometheus snapshot 保存在可提交的 `results/cuda_causal_profile_evidence.json`。当前机器未安装 Nsight Systems/Compute，因此不声称完整 kernel census、occupancy 或 roofline。
+最终 always 相对 upstream 的配对中位差为 CacheFlow 决策 +13、prefill chunk +23、prefill token -354、自研 KV kernel launch +2、KV copy +20,066,300 B、CUDA Event +0.808 ms、GPU busy 与最大 idle gap中位差不变、Engine execute 汇总 -11,446 us、TTFT P95 +85.61 ms。总 execute 时间下降而请求尾延迟恶化，说明更多分块和不同批次/请求顺序会改变等待结构，不能由单一 kernel、copy 指标或 phase 汇总代替请求级结果；100 ms GPU busy 只是辅助信号。门禁要求存在调度干预、CUDA mediator 与至少 5 ms 的 material TTFT effect；完整 GPU samples、Engine events 和相关 Prometheus snapshot 保存在可提交的 `results/cuda_causal_profile_evidence.json`。当前机器未安装 Nsight Systems/Compute，因此不声称完整 kernel census、occupancy 或 roofline。
+
+## 22. 生产生命周期切片：在线策略跨重启恢复
+
+长期在线收益门控原先有一个明确的进程边界缺口：ridge normal matrix、右端项、残差方差、漂移 cooldown 和探索进度全部只在内存中。进程重启会重新探索，滚动发布与故障恢复因此改变线上行为。
+
+新增 `server_benefit_checkpoint` 深模块，Interface 只有 `load / enqueue / flush / snapshot`。推理策略拥有状态 schema 和验证规则，文件 Store 只拥有 durable bytes；这样策略算法不会依赖文件系统细节，文件实现也不解释模型系数。后台 writer 使用单槽 latest-value queue，磁盘慢时合并过时快照，避免把无界队列和同步 I/O 引入 inference iteration。
+
+状态提交顺序是 `serialize -> temporary file -> fflush -> fsync/_commit -> atomic replace`。恢复采用事务语义：先验证 schema、feature count、compatibility key、策略配置、CRC32、矩阵维数/对称性/正则化对角线和所有有限数值，再一次性替换内存状态。任何缺失、损坏、不兼容或读取失败都保持已初始化的空模型，绝不部分恢复。
+
+真实服务通过以下配置接入：
+
+```text
+--benefit-checkpoint PATH
+--benefit-checkpoint-key KEY
+--benefit-checkpoint-interval N
+```
+
+`server_context` 默认从模型绝对路径、描述、模型字节数、参数量、文件大小/mtime 和 GPU layer 数生成 compatibility key；生产启动器进一步使用完整模型 SHA-256、主机、backend、context 和 parallel 生成显式 key。恢复/不兼容/失败、提交/合并/失败和 pending 状态均进入原生 Prometheus。
+
+验收不是仅做序列化 round-trip：原生测试覆盖有界异步写、最后值语义、未提交临时文件隔离、决策等价恢复、错误模型拒绝和截断文件 fail closed；真实模型 smoke 覆盖三个独立 server process 的落盘、强制终止、恢复和损坏后继续服务。

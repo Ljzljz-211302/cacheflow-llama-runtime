@@ -79,15 +79,15 @@ P95 改善 97.41%。这证明被隔离的 COW hot path，不等价于整个 serv
 
 ### Conservative Benefit Gating
 
-新控制器不再按 backend 硬编码开关，而是在真实 prefill 决策点生成 upstream greedy 与 CacheFlow shadow plan，按 backend-local contextual confidence model 保守选择。最终 10-trial Latin 结果：CPU learned objective median 3997.56 ms、paired upstream regression -12.46%、paired-oracle regret 16.34%；CUDA learned 209.74 ms、paired regression -6.17%、paired-oracle regret 2.44%。两端均通过原 3% fresh-process paired regression、20% paired upstream/always/rule oracle regret 和 harmful-trace wrong-enable 门槛。此前“两个独立中位数之比”的错误统计口径已移除，阈值未放宽。
+新控制器不再按 backend 硬编码开关，而是在真实 prefill 决策点生成 upstream greedy 与 CacheFlow shadow plan，按 backend-local contextual confidence model 保守选择。最终 10-trial Latin 结果：CPU learned objective median 4177.39 ms、paired upstream regression -18.11%、paired-oracle regret 15.35%；CUDA learned 190.70 ms、paired regression -2.82%、paired-oracle regret 1.02%。两端均通过原 3% fresh-process paired regression、20% paired upstream/always/rule oracle regret 和 harmful-trace wrong-enable 门槛。此前“两个独立中位数之比”的错误统计口径已移除，阈值未放宽。
 
 短生命周期风险预算按 backend 隔离：CPU learned 产生 19 次 `safe_exploration`；已知 always 有害的 CUDA fresh process 提高最小样本门槛，在该 trace 内 0 次 probe 并 fail closed；`positive_lower_bound_decisions` 均为 0。CUDA positive-lower-bound 的生产实证由下一段长驻实验提供。
 
-随后新增的单进程长驻门禁补齐了这一限制：CUDA server 连续运行 53 waves，`confidence_beta=1.0`、每动作最少 12 个样本。冷启动 CacheFlow/positive 均为 0；稳定阶段 17 次有限探索后产生 143 次 positive-lower-bound，覆盖 39 waves、最长连续 35 waves，终态收益 11.24 ms 大于 5.27 ms 不确定性；切换后 CacheFlow/positive 均为 0、安全回退为 3。门禁要求持续启用且终态仍保持置信，不取最大置信快照。
+随后新增的单进程长驻门禁补齐了这一限制：CUDA server 连续运行 53 waves，`confidence_beta=1.0`、每动作最少 12 个样本。冷启动 CacheFlow/positive 均为 0；稳定阶段 18 次有限探索后产生 142 次 positive-lower-bound，覆盖 33 waves、最长连续 13 waves，终态收益 21.29 ms 大于 8.82 ms 不确定性；切换后 CacheFlow/positive 均为 0、安全回退为 3。门禁要求持续启用且终态仍保持置信，不取最大置信快照。
 
 ### CUDA profiling 因果链
 
-3 组 paired Latin upstream/always 干预通过。强制 CacheFlow 中位造成决策 +15、prefill chunk +23、prefill token -145、自研 KV kernel launch不变、KV copy -2,519,000 B、CUDA Event -0.260 ms、GPU busy +1.19%、最大 idle gap不变，继而 Engine execute +31,230 us、TTFT P95 +44.79 ms。完整 GPU samples、Engine events 和相关 Prometheus 快照保存在 `results/cuda_causal_profile_evidence.json`；门禁拒绝仅有采样噪声而没有 material Engine/TTFT 结果的 trace。本机没有 Nsight，因此不声称全模型 occupancy/roofline。
+3 组 paired Latin upstream/always 干预通过。强制 CacheFlow 中位造成决策 +13、prefill chunk +23、prefill token -354、自研 KV kernel launch +2、KV copy +20,066,300 B、CUDA Event +0.808 ms、GPU busy 与最大 idle gap中位差不变，Engine execute 汇总 -11,446 us，但 TTFT P95 +85.61 ms。完整 GPU samples、Engine events 和相关 Prometheus 快照保存在 `results/cuda_causal_profile_evidence.json`；门禁拒绝仅有采样噪声而没有 material 请求级结果的 trace。本机没有 Nsight，因此不声称全模型 occupancy/roofline。
 
 exact output hash 被保留为审计指标而非并发性能硬门槛：batch composition 会改变近似相等 logits 与 EOS 位置；HTTP/SSE、上游兼容和语义质量分别由专门 gate 验证。
 
@@ -117,7 +117,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 
 ## 个人贡献边界
 
-固定上游提供 GGUF/模型 graph、GGML 通用算子、既有 backend、HTTP 基础设施和 sampling。个人差异是 Engine 拆分、Scheduler、KV 资源/块/事务 Swap、真实 CUDA KV Adapter 与 kernels、自适应/收益门控、metrics、fault injection 和复现实验。当前相对固定上游为 56 files、+7533/-99。代码量只统计该 patch；不得把 `vendor/llama.cpp` 原有代码算作个人实现，也不得声称“重写了 llama.cpp”。
+固定上游提供 GGUF/模型 graph、GGML 通用算子、既有 backend、HTTP 基础设施和 sampling。个人差异是 Engine 拆分、Scheduler、KV 资源/块/事务 Swap、真实 CUDA KV Adapter 与 kernels、自适应/收益门控、在线策略持久化、metrics、fault injection 和复现实验。当前相对固定上游为 59 files、+8401/-99。代码量只统计该 patch；不得把 `vendor/llama.cpp` 原有代码算作个人实现，也不得声称“重写了 llama.cpp”。
+
+### 生产重启与状态损坏
+
+真实 CPU `llama-server` 三进程 smoke 已通过：第一进程产生 10 次 benefit observation 并完成 10 次后台原子保存；强制终止后第二进程报告 `restored=1` 且恢复全部 10 次观测；第三进程读取人为截断的 checkpoint 时报告 `failed=1`、保持 0 次模型观测并继续成功处理请求。证据位于 `results/benefit-checkpoint-smoke.json`。该结果证明单机单 writer 边界内的在线模型可恢复，不外推为跨副本模型同步。
 
 早期 Python 控制面已归档到 `prototypes/cacheflow`，只保留设计演进与原型测试证据；生产 `llama-server` 不导入或调用它。
 

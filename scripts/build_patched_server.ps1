@@ -17,6 +17,7 @@ $nativeTests = @(
     "test-runtime-adapter",
     "test-model-cost-model",
     "test-benefit-policy"
+    "test-benefit-checkpoint"
 )
 
 if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot ".git"))) {

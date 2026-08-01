@@ -12,7 +12,7 @@
 <div class="callout"><strong>关键区分：</strong><code>safe_exploration</code> 是“为获取信息而承担受限风险”；<code>positive_lower_bound</code> 是“模型已有足够证据后的利用”。面试绝不能把探索次数说成学习成功次数。</div>
 <h2>5. 反馈、SLO penalty 与 drift</h2><p>反馈成本可写成：</p><div class="formula">cost = elapsed + α·max(0, elapsed−target) + failure_penalty</div>
 <p>SLO miss 会改变优化目标，但不一定是分布漂移：如果系统一直慢、模型也准确预测很慢，残差不大。项目只有在模型成熟后出现连续的大残差，或执行失败，才累计 drift streak；达到门槛后 reset 相应模型并进入 cooldown/upstream。</p>
-<h2>6. 53-wave 证据如何解释</h2><p>最终 CUDA 单 PID：冷启动 0 次提前启用；稳定阶段 17 次探索、143 次正下界动作，覆盖 39 waves、最长连续 35 waves；终态收益 11.24ms 大于不确定性 5.27ms；切换 throughput-only 后 0 次 CacheFlow、3 次结构安全回退。</p>
+<h2>6. 53-wave 证据如何解释</h2><p>最终 CUDA 单 PID：冷启动 0 次提前启用；稳定阶段 18 次探索、142 次正下界动作，覆盖 33 waves、最长连续 13 waves；终态收益 21.29ms 大于不确定性 8.82ms；切换 throughput-only 后 0 次 CacheFlow、3 次结构安全回退。</p>
 <p>这比“某一时刻最大置信度”强，因为门禁同时要求连续 wave 和终态仍有置信；但它仍只证明当前模型/硬件/workload。分布切换由结构条件直接回退，并未触发统计 drift，这同样是正确结果。</p>
 <div class="task"><strong>手算练习：</strong>设 upstream 预测 20±3ms，CacheFlow 14±2ms，margin=1ms，判断是否启用。再把 CacheFlow 半径改成 6ms，解释为何平均预测仍更好却必须回退。</div>
 <div class="quiz"><h3>主动回忆</h3><p>为什么一次 SLO miss 不应立刻 reset 模型？</p><button data-answer="true">高成本可能已被模型准确预测</button><button data-answer="false">服务目标与反馈成本完全无关</button><button data-answer="false">岭回归模型无法处理较大数值</button><div class="feedback"></div><details><summary>解析</summary>drift 关心预测关系失效，即成熟模型的连续大残差；SLO miss 会加 penalty，但可能早已被模型预测。</details></div>

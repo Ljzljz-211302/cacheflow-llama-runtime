@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 9e7b1253c7264c63cf52a1ca3e58df81fc7f15a3..6195e3f0f9d1592ff06b1f157b596e117a9e9237 100644
+index 9e7b125..6195e3f 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -169,6 +169,14 @@ llama_option_depr(WARNING     LLAMA_SYCL_F16            GGML_SYCL_F16)
@@ -18,10 +18,10 @@ index 9e7b1253c7264c63cf52a1ca3e58df81fc7f15a3..6195e3f0f9d1592ff06b1f157b596e11
  license_add_file("llama.cpp" "LICENSE")
  
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 8382c1d85dde4bdba0fca83a64644e2daf03a353..84c426f37528c0a52e924ad4f54a231a4a4c2f43 100644
+index 8382c1d..523b5dc 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -3256,6 +3256,246 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3256,6 +3256,270 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.slot_prompt_similarity = std::stof(value);
          }
      ).set_examples({LLAMA_EXAMPLE_SERVER}));
@@ -118,6 +118,30 @@ index 8382c1d85dde4bdba0fca83a64644e2daf03a353..84c426f37528c0a52e924ad4f54a231a
 +        [](common_params & params, int value) {
 +            if (value < 0) throw std::invalid_argument("benefit cooldown decisions must be non-negative");
 +            params.benefit_cooldown_decisions = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--benefit-checkpoint"}, "PATH",
++        "persist learned benefit-policy state asynchronously (use one path per server replica)",
++        [](common_params & params, const std::string & value) {
++            if (value.empty()) throw std::invalid_argument("benefit checkpoint path must not be empty");
++            params.benefit_checkpoint_path = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--benefit-checkpoint-key"}, "KEY",
++        "explicit model/deployment identity for checkpoint compatibility (default: derived from loaded model)",
++        [](common_params & params, const std::string & value) {
++            if (value.empty()) throw std::invalid_argument("benefit checkpoint key must not be empty");
++            params.benefit_checkpoint_key = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--benefit-checkpoint-interval"}, "N",
++        "observations between asynchronous benefit checkpoints (default: 128)",
++        [](common_params & params, int value) {
++            if (value <= 0) throw std::invalid_argument("benefit checkpoint interval must be positive");
++            params.benefit_checkpoint_interval = value;
 +        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
@@ -268,7 +292,7 @@ index 8382c1d85dde4bdba0fca83a64644e2daf03a353..84c426f37528c0a52e924ad4f54a231a
      add_opt(common_arg(
          {"--lora-init-without-apply"},
          string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),
-@@ -3413,6 +3653,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3413,6 +3677,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
  
      //
      // speculative parameters
@@ -323,10 +347,10 @@ index 8382c1d85dde4bdba0fca83a64644e2daf03a353..84c426f37528c0a52e924ad4f54a231a
  
      add_opt(common_arg(
 diff --git a/common/common.h b/common/common.h
-index 0b284cbb36c7d039a523e53b47bd63de097683af..1dde43e939aabea2e634676c3da933a4a79d4b8e 100644
+index 0b284cb..618baf5 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -653,6 +653,33 @@ struct common_params {
+@@ -653,6 +653,36 @@ struct common_params {
      std::string media_path; // path to directory for loading media files
  
      float slot_prompt_similarity = 0.1f;
@@ -340,6 +364,9 @@ index 0b284cbb36c7d039a523e53b47bd63de097683af..1dde43e939aabea2e634676c3da933a4
 +    float benefit_drift_ratio = 2.5f;
 +    int32_t benefit_drift_consecutive = 3;
 +    int32_t benefit_cooldown_decisions = 16;
++    std::string benefit_checkpoint_path;
++    std::string benefit_checkpoint_key;
++    int32_t benefit_checkpoint_interval = 128;
 +    std::string spec_policy = "fixed";
 +    float slot_cache_eviction_penalty = 0.0f;
 +    int32_t prefill_chunk_size = 0;
@@ -361,7 +388,7 @@ index 0b284cbb36c7d039a523e53b47bd63de097683af..1dde43e939aabea2e634676c3da933a4
      // batched-bench params
      bool is_pp_shared   = false;
 diff --git a/include/llama.h b/include/llama.h
-index 27e4806742821cad98ca0302ec0ac5b0a6a6f28e..49eae1f6499106d373c3a729360ca11cd5f57f4d 100644
+index 27e4806..49eae1f 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -730,6 +730,35 @@ extern "C" {
@@ -401,7 +428,7 @@ index 27e4806742821cad98ca0302ec0ac5b0a6a6f28e..49eae1f6499106d373c3a729360ca11c
      LLAMA_API void llama_memory_seq_keep(
              llama_memory_t mem,
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index d15ccfd99f143ef1365259f2ad013a6f9c2ff585..eb17aab06d3689e722395825ccd9b8ada201ab28 100644
+index d15ccfd..eb17aab 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
 @@ -54,6 +54,13 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
@@ -419,7 +446,7 @@ index d15ccfd99f143ef1365259f2ad013a6f9c2ff585..eb17aab06d3689e722395825ccd9b8ad
      set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
      target_compile_definitions(llama PRIVATE LLAMA_BUILD)
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 168dbabd76678cb8f66086147373c919daa13b10..24b25ecba9ca12800386aa1a45e1c9b3dbf77027 100644
+index 168dbab..24b25ec 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -3849,6 +3849,31 @@ void llama_memory_seq_cp(
@@ -456,7 +483,7 @@ index 168dbabd76678cb8f66086147373c919daa13b10..24b25ecba9ca12800386aa1a45e1c9b3
            llama_seq_id seq_id) {
 diff --git a/src/llama-kv-cache-paged.cu b/src/llama-kv-cache-paged.cu
 new file mode 100644
-index 0000000000000000000000000000000000000000..20111ef6f6b65680f66df663ce98fefbf1409760
+index 0000000..20111ef
 --- /dev/null
 +++ b/src/llama-kv-cache-paged.cu
 @@ -0,0 +1,396 @@
@@ -857,7 +884,7 @@ index 0000000000000000000000000000000000000000..20111ef6f6b65680f66df663ce98fefb
 +    return success;
 +}
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 2802103bdd82ccb80547e18f456469c9970619df..c74d73f643d6d9c25a30dc006a8e7c1de31b22be 100644
+index 2802103..c74d73f 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
 @@ -376,6 +376,63 @@ llama_kv_cache::llama_kv_cache(
@@ -998,7 +1025,7 @@ index 2802103bdd82ccb80547e18f456469c9970619df..c74d73f643d6d9c25a30dc006a8e7c1d
          if (!get_can_shift()) {
              GGML_ABORT("The current KV cache / model configuration does not support K-shift");
 diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
-index 3d68f98c1424d77fbba0090813c872766b3e951c..757fa0b1a68a52d7d0f1cbc345551bd21fd26939 100644
+index 3d68f98..757fa0b 100644
 --- a/src/llama-kv-cache.h
 +++ b/src/llama-kv-cache.h
 @@ -22,11 +22,13 @@ public:
@@ -1067,7 +1094,7 @@ index 3d68f98c1424d77fbba0090813c872766b3e951c..757fa0b1a68a52d7d0f1cbc345551bd2
      const llama_hparams & hparams;
  
 diff --git a/src/llama-memory.h b/src/llama-memory.h
-index db825396645e61c94213ca1e94b78d71d1538d67..e749164ddeac0cd9741e9377b6de2765ff61a7a6 100644
+index db82539..e749164 100644
 --- a/src/llama-memory.h
 +++ b/src/llama-memory.h
 @@ -116,6 +116,15 @@ struct llama_memory_i {
@@ -1087,10 +1114,10 @@ index db825396645e61c94213ca1e94b78d71d1538d67..e749164ddeac0cd9741e9377b6de2765
  
      //
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index e284a58d1c67425382dcdb932e7f5663aa716484..e97f439ab3796ff0a0cd2a241b17bde90a77c581 100644
+index e284a58..d6f3cc1 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -116,6 +116,116 @@ function(llama_build_and_test source)
+@@ -116,6 +116,123 @@ function(llama_build_and_test source)
      set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})
  endfunction()
  
@@ -1111,6 +1138,7 @@ index e284a58d1c67425382dcdb932e7f5663aa716484..e97f439ab3796ff0a0cd2a241b17bde9
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-inference-scheduler.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-model-cost-model.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-benefit-policy.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-benefit-checkpoint.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-capacity-planner.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-runtime.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-block-manager.cpp
@@ -1132,9 +1160,15 @@ index e284a58d1c67425382dcdb932e7f5663aa716484..e97f439ab3796ff0a0cd2a241b17bde9
 +llama_test(test-model-cost-model)
 +
 +llama_build(test-benefit-policy.cpp
-+    ${PROJECT_SOURCE_DIR}/tools/server/server-benefit-policy.cpp)
++    ${PROJECT_SOURCE_DIR}/tools/server/server-benefit-policy.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-benefit-checkpoint.cpp)
 +target_include_directories(test-benefit-policy PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
 +llama_test(test-benefit-policy)
++
++llama_build(test-benefit-checkpoint.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-benefit-checkpoint.cpp)
++target_include_directories(test-benefit-checkpoint PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++llama_test(test-benefit-checkpoint)
 +
 +llama_build(test-kv-capacity-planner.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-capacity-planner.cpp)
@@ -1209,7 +1243,7 @@ index e284a58d1c67425382dcdb932e7f5663aa716484..e97f439ab3796ff0a0cd2a241b17bde9
  
 diff --git a/tests/bench-kv-block-cuda.cu b/tests/bench-kv-block-cuda.cu
 new file mode 100644
-index 0000000000000000000000000000000000000000..8c25a567361e8e81aa9f9e9913e24d6e816f124e
+index 0000000..8c25a56
 --- /dev/null
 +++ b/tests/bench-kv-block-cuda.cu
 @@ -0,0 +1,176 @@
@@ -1391,7 +1425,7 @@ index 0000000000000000000000000000000000000000..8c25a567361e8e81aa9f9e9913e24d6e
 +}
 diff --git a/tests/bench-kv-cow-cuda.cpp b/tests/bench-kv-cow-cuda.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3af8e590d6f0182def3f13e6520c220288880129
+index 0000000..3af8e59
 --- /dev/null
 +++ b/tests/bench-kv-cow-cuda.cpp
 @@ -0,0 +1,64 @@
@@ -1459,12 +1493,154 @@ index 0000000000000000000000000000000000000000..3af8e590d6f0182def3f13e6520c2202
 +    if (!backend->verify_integrity()) return 1;
 +    return 0;
 +}
+diff --git a/tests/test-benefit-checkpoint.cpp b/tests/test-benefit-checkpoint.cpp
+new file mode 100644
+index 0000000..b771e4b
+--- /dev/null
++++ b/tests/test-benefit-checkpoint.cpp
+@@ -0,0 +1,136 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
++#include "server-benefit-checkpoint.h"
++
++#include <cassert>
++#include <chrono>
++#include <condition_variable>
++#include <filesystem>
++#include <fstream>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++
++namespace fs = std::filesystem;
++
++struct blocking_state {
++    std::mutex mutex;
++    std::condition_variable condition;
++    std::vector<std::string> saves;
++    bool entered = false;
++    bool released = false;
++};
++
++class blocking_store final : public server_benefit_checkpoint_store {
++public:
++    explicit blocking_store(std::shared_ptr<blocking_state> state) : state_(std::move(state)) {}
++
++    server_benefit_checkpoint_load_result load() override { return {}; }
++
++    bool save(const std::string & payload, std::string &) override {
++        std::unique_lock<std::mutex> lock(state_->mutex);
++        state_->entered = true;
++        state_->condition.notify_all();
++        state_->condition.wait(lock, [&]() { return state_->released; });
++        state_->saves.push_back(payload);
++        return true;
++    }
++
++private:
++    std::shared_ptr<blocking_state> state_;
++};
++
++class failing_store final : public server_benefit_checkpoint_store {
++public:
++    server_benefit_checkpoint_load_result load() override { return {}; }
++    bool save(const std::string &, std::string & error) override {
++        error = "injected disk failure";
++        return false;
++    }
++};
++
++static fs::path temporary_checkpoint() {
++    return fs::temp_directory_path() /
++            ("cacheflow-benefit-checkpoint-" +
++             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
++}
++
++int main() {
++    const fs::path path = temporary_checkpoint();
++    fs::remove(path);
++    fs::remove(path.string() + ".tmp");
++
++    // Force the first write to remain in flight while later snapshots arrive:
++    // only the newest pending value may survive the bounded queue.
++    {
++        auto state = std::make_shared<blocking_state>();
++        server_benefit_checkpoint checkpoint(std::make_unique<blocking_store>(state));
++        checkpoint.enqueue("first");
++        {
++            std::unique_lock<std::mutex> lock(state->mutex);
++            state->condition.wait(lock, [&]() { return state->entered; });
++        }
++        checkpoint.enqueue("obsolete");
++        checkpoint.enqueue("latest");
++        {
++            std::lock_guard<std::mutex> lock(state->mutex);
++            state->released = true;
++        }
++        state->condition.notify_all();
++        assert(checkpoint.flush());
++        assert((state->saves == std::vector<std::string>{"first", "latest"}));
++        assert(checkpoint.snapshot().coalesced == 1);
++    }
++
++    // Persistence failure is observable and cannot stall flush/shutdown.
++    {
++        server_benefit_checkpoint checkpoint(std::make_unique<failing_store>());
++        checkpoint.enqueue("state");
++        assert(!checkpoint.flush());
++        assert(checkpoint.snapshot().save_failures == 1);
++    }
++
++    {
++        server_benefit_checkpoint checkpoint(server_benefit_create_file_checkpoint_store(path));
++        const auto missing = checkpoint.load();
++        assert(missing.status == server_benefit_checkpoint_load_status::missing);
++
++        // The producer never waits for disk I/O. A one-element latest-value
++        // queue coalesces obsolete snapshots instead of growing without bound.
++        checkpoint.enqueue("generation-1");
++        checkpoint.enqueue("generation-2");
++        checkpoint.enqueue("generation-3");
++        assert(checkpoint.flush());
++        const auto status = checkpoint.snapshot();
++        assert(status.saves_completed >= 1);
++        assert(status.pending == 0);
++        assert(status.enqueued == 3);
++        assert(status.coalesced <= 2);
++    }
++
++    {
++        server_benefit_checkpoint checkpoint(server_benefit_create_file_checkpoint_store(path));
++        const auto restored = checkpoint.load();
++        assert(restored.status == server_benefit_checkpoint_load_status::restored);
++        assert(restored.payload == "generation-3");
++    }
++
++    // A stale temporary file is never mistaken for committed state.
++    {
++        std::ofstream stale(path.string() + ".tmp", std::ios::binary | std::ios::trunc);
++        stale << "uncommitted";
++    }
++    {
++        server_benefit_checkpoint checkpoint(server_benefit_create_file_checkpoint_store(path));
++        const auto restored = checkpoint.load();
++        assert(restored.status == server_benefit_checkpoint_load_status::restored);
++        assert(restored.payload == "generation-3");
++    }
++
++    fs::remove(path);
++    fs::remove(path.string() + ".tmp");
++    return 0;
++}
 diff --git a/tests/test-benefit-policy.cpp b/tests/test-benefit-policy.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..46dabda5746985a7f8586fcd54bd2000ac13fe30
+index 0000000..3d9c648
 --- /dev/null
 +++ b/tests/test-benefit-policy.cpp
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,200 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -1473,6 +1649,9 @@ index 0000000000000000000000000000000000000000..46dabda5746985a7f8586fcd54bd2000
 +
 +#include <cassert>
 +#include <cmath>
++#include <chrono>
++#include <filesystem>
++#include <fstream>
 +
 +static server_benefit_features workload(bool cuda = false) {
 +    server_benefit_features value;
@@ -1604,11 +1783,67 @@ index 0000000000000000000000000000000000000000..46dabda5746985a7f8586fcd54bd2000
 +        replay_b.observe(right, { elapsed, false, false });
 +    }
 +
++    // Learned evidence survives a process restart. Checkpoints are bound to
++    // an explicit compatibility key so another model/backend cannot consume
++    // stale latency evidence.
++    const auto checkpoint_path = std::filesystem::temp_directory_path() /
++            ("cacheflow-benefit-policy-" +
++             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
++    std::filesystem::remove(checkpoint_path);
++    config.checkpoint_path = checkpoint_path.string();
++    config.checkpoint_compatibility_key = "model=qwen-test;backend=cpu";
++    config.checkpoint_interval = 1;
++    server_benefit_decision before_restart;
++    {
++        server_benefit_policy persistent(config);
++        for (size_t i = 0; i < 24; ++i) {
++            const auto decision = persistent.choose(features);
++            persistent.observe(decision, {
++                decision.action == server_benefit_action::cacheflow ? 9.0 : 21.0,
++                false,
++                false,
++            });
++        }
++        before_restart = persistent.choose(features);
++        assert(persistent.flush_checkpoint());
++    }
++    {
++        server_benefit_policy restored(config);
++        const auto status = restored.checkpoint_snapshot();
++        assert(status.restored == 1);
++        const auto after_restart = restored.choose(features);
++        assert(after_restart.action == before_restart.action);
++        assert(after_restart.reason == before_restart.reason);
++        assert(std::abs(after_restart.predicted_benefit_ms - before_restart.predicted_benefit_ms) < 1e-12);
++        assert(std::abs(after_restart.uncertainty_ms - before_restart.uncertainty_ms) < 1e-12);
++    }
++    {
++        auto incompatible_config = config;
++        incompatible_config.checkpoint_compatibility_key = "model=different;backend=cpu";
++        server_benefit_policy incompatible(incompatible_config);
++        assert(incompatible.checkpoint_snapshot().incompatible == 1);
++        assert(incompatible.snapshot(server_benefit_backend::cpu).upstream_observations == 0);
++    }
++
++    // Corruption never produces decisions from partially parsed coefficients.
++    {
++        std::ofstream corrupt(checkpoint_path, std::ios::binary | std::ios::trunc);
++        corrupt << "{\"schema_version\":1,\"state\":\"truncated";
++    }
++    {
++        server_benefit_policy corrupted(config);
++        assert(corrupted.checkpoint_snapshot().restore_failures == 1);
++        assert(corrupted.snapshot(server_benefit_backend::cpu).upstream_observations == 0);
++        assert(corrupted.choose(features).reason == server_benefit_reason::cold_start);
++    }
++    std::filesystem::remove(checkpoint_path);
++    std::filesystem::remove(checkpoint_path.string() + ".tmp");
++
 +    return 0;
 +}
 diff --git a/tests/test-inference-engine.cpp b/tests/test-inference-engine.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..9ba8b55d5bd814a576e670432d015e10c8760138
+index 0000000..9ba8b55
 --- /dev/null
 +++ b/tests/test-inference-engine.cpp
 @@ -0,0 +1,93 @@
@@ -1707,7 +1942,7 @@ index 0000000000000000000000000000000000000000..9ba8b55d5bd814a576e670432d015e10
 +}
 diff --git a/tests/test-inference-iteration.cpp b/tests/test-inference-iteration.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..298af3654257ea5d17527b082629e93b24a96b1e
+index 0000000..298af36
 --- /dev/null
 +++ b/tests/test-inference-iteration.cpp
 @@ -0,0 +1,36 @@
@@ -1749,7 +1984,7 @@ index 0000000000000000000000000000000000000000..298af3654257ea5d17527b082629e93b
 +}
 diff --git a/tests/test-inference-scheduler.cpp b/tests/test-inference-scheduler.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..dd36becbf9db64d37adaf5114b3025a1432d28ce
+index 0000000..dd36bec
 --- /dev/null
 +++ b/tests/test-inference-scheduler.cpp
 @@ -0,0 +1,130 @@
@@ -1885,7 +2120,7 @@ index 0000000000000000000000000000000000000000..dd36becbf9db64d37adaf5114b3025a1
 +}
 diff --git a/tests/test-kv-block-backend.cpp b/tests/test-kv-block-backend.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e1bfb1b78013c1aa4a1dcd1a26af0c4b4cb5fbc4
+index 0000000..e1bfb1b
 --- /dev/null
 +++ b/tests/test-kv-block-backend.cpp
 @@ -0,0 +1,95 @@
@@ -1986,7 +2221,7 @@ index 0000000000000000000000000000000000000000..e1bfb1b78013c1aa4a1dcd1a26af0c4b
 +}
 diff --git a/tests/test-kv-block-cuda.cpp b/tests/test-kv-block-cuda.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..914774fd136da5f0468cf5c7e1bc4386c43b87ad
+index 0000000..914774f
 --- /dev/null
 +++ b/tests/test-kv-block-cuda.cpp
 @@ -0,0 +1,162 @@
@@ -2154,7 +2389,7 @@ index 0000000000000000000000000000000000000000..914774fd136da5f0468cf5c7e1bc4386
 +}
 diff --git a/tests/test-kv-block-manager.cpp b/tests/test-kv-block-manager.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..076f74783446ce1e57f42d5e4cf3948fad4ec933
+index 0000000..076f747
 --- /dev/null
 +++ b/tests/test-kv-block-manager.cpp
 @@ -0,0 +1,168 @@
@@ -2328,7 +2563,7 @@ index 0000000000000000000000000000000000000000..076f74783446ce1e57f42d5e4cf3948f
 +}
 diff --git a/tests/test-kv-capacity-planner.cpp b/tests/test-kv-capacity-planner.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..acabcd20cd800ffc0e7d4c99692dfbd3dd3d6615
+index 0000000..acabcd2
 --- /dev/null
 +++ b/tests/test-kv-capacity-planner.cpp
 @@ -0,0 +1,44 @@
@@ -2378,7 +2613,7 @@ index 0000000000000000000000000000000000000000..acabcd20cd800ffc0e7d4c99692dfbd3
 +}
 diff --git a/tests/test-kv-real-cuda-swap.cpp b/tests/test-kv-real-cuda-swap.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b448bf4cc186ded3b3fcff49945e5faa4b93f185
+index 0000000..b448bf4
 --- /dev/null
 +++ b/tests/test-kv-real-cuda-swap.cpp
 @@ -0,0 +1,93 @@
@@ -2477,7 +2712,7 @@ index 0000000000000000000000000000000000000000..b448bf4cc186ded3b3fcff49945e5faa
 +}
 diff --git a/tests/test-kv-runtime.cpp b/tests/test-kv-runtime.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..46a6ddb65520ad536790b2f6723c3f1275694c82
+index 0000000..46a6ddb
 --- /dev/null
 +++ b/tests/test-kv-runtime.cpp
 @@ -0,0 +1,100 @@
@@ -2583,7 +2818,7 @@ index 0000000000000000000000000000000000000000..46a6ddb65520ad536790b2f6723c3f12
 +}
 diff --git a/tests/test-kv-swap-store.cpp b/tests/test-kv-swap-store.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..efec1ba0ab8471c94c0c7ada846c20e72aefbd13
+index 0000000..efec1ba
 --- /dev/null
 +++ b/tests/test-kv-swap-store.cpp
 @@ -0,0 +1,97 @@
@@ -2686,7 +2921,7 @@ index 0000000000000000000000000000000000000000..efec1ba0ab8471c94c0c7ada846c20e7
 +}
 diff --git a/tests/test-model-cost-model.cpp b/tests/test-model-cost-model.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1a944debde91b26edd7442f1afeb6ee10695b9e3
+index 0000000..1a944de
 --- /dev/null
 +++ b/tests/test-model-cost-model.cpp
 @@ -0,0 +1,28 @@
@@ -2720,7 +2955,7 @@ index 0000000000000000000000000000000000000000..1a944debde91b26edd7442f1afeb6ee1
 +}
 diff --git a/tests/test-runtime-adapter.cpp b/tests/test-runtime-adapter.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..383e0c5bf6b2062ddf3ca33ca95bc70b4883dca3
+index 0000000..383e0c5
 --- /dev/null
 +++ b/tests/test-runtime-adapter.cpp
 @@ -0,0 +1,25 @@
@@ -2751,7 +2986,7 @@ index 0000000000000000000000000000000000000000..383e0c5bf6b2062ddf3ca33ca95bc70b
 +}
 diff --git a/tests/test-speculation-controller.cpp b/tests/test-speculation-controller.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..297ccfe6640353ad75d7091a8f88689ec6f1d55b
+index 0000000..297ccfe
 --- /dev/null
 +++ b/tests/test-speculation-controller.cpp
 @@ -0,0 +1,61 @@
@@ -2817,10 +3052,10 @@ index 0000000000000000000000000000000000000000..297ccfe6640353ad75d7091a8f88689e
 +    return 0;
 +}
 diff --git a/tools/server/CMakeLists.txt b/tools/server/CMakeLists.txt
-index 7d427431db936358731fdd27fce147aa929416fb..62b13dbbce26b7435e7447264f554667747de7fc 100644
+index 7d42743..b0c1d87 100644
 --- a/tools/server/CMakeLists.txt
 +++ b/tools/server/CMakeLists.txt
-@@ -11,6 +11,30 @@ add_library(${TARGET} STATIC
+@@ -11,6 +11,32 @@ add_library(${TARGET} STATIC
      server-task.h
      server-queue.cpp
      server-queue.h
@@ -2848,10 +3083,12 @@ index 7d427431db936358731fdd27fce147aa929416fb..62b13dbbce26b7435e7447264f554667
 +    server-model-cost-model.h
 +    server-benefit-policy.cpp
 +    server-benefit-policy.h
++    server-benefit-checkpoint.cpp
++    server-benefit-checkpoint.h
      server-common.cpp
      server-common.h
      server-context.cpp
-@@ -27,6 +51,12 @@ target_include_directories(${TARGET} PRIVATE ../mtmd)
+@@ -27,6 +53,12 @@ target_include_directories(${TARGET} PRIVATE ../mtmd)
  target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
  target_link_libraries(${TARGET} PUBLIC llama-common mtmd ${CMAKE_THREAD_LIBS_INIT})
  
@@ -2864,18 +3101,346 @@ index 7d427431db936358731fdd27fce147aa929416fb..62b13dbbce26b7435e7447264f554667
  # llama-server-impl: server logic, reusable by app
  
  set(TARGET llama-server-impl)
+diff --git a/tools/server/server-benefit-checkpoint.cpp b/tools/server/server-benefit-checkpoint.cpp
+new file mode 100644
+index 0000000..a2e374a
+--- /dev/null
++++ b/tools/server/server-benefit-checkpoint.cpp
+@@ -0,0 +1,200 @@
++#include "server-benefit-checkpoint.h"
++
++#include <cerrno>
++#include <cstdio>
++#include <cstring>
++#include <fstream>
++#include <iterator>
++#include <limits>
++#include <stdexcept>
++#include <system_error>
++#include <utility>
++
++#ifdef _WIN32
++#  define WIN32_LEAN_AND_MEAN
++#  include <windows.h>
++#  include <io.h>
++#else
++#  include <fcntl.h>
++#  include <unistd.h>
++#endif
++
++namespace {
++constexpr uintmax_t maximum_checkpoint_bytes = 4U * 1024U * 1024U;
++
++class server_benefit_file_checkpoint_store final : public server_benefit_checkpoint_store {
++public:
++    explicit server_benefit_file_checkpoint_store(std::filesystem::path path) : path_(std::move(path)) {}
++
++    server_benefit_checkpoint_load_result load() override {
++        std::error_code ec;
++        if (!std::filesystem::exists(path_, ec)) {
++            if (ec) return {server_benefit_checkpoint_load_status::io_error, {}, ec.message()};
++            return {};
++        }
++        const auto size = std::filesystem::file_size(path_, ec);
++        if (ec) return {server_benefit_checkpoint_load_status::io_error, {}, ec.message()};
++        if (size > maximum_checkpoint_bytes) {
++            return {server_benefit_checkpoint_load_status::io_error, {}, "checkpoint exceeds 4 MiB limit"};
++        }
++        std::ifstream input(path_, std::ios::binary);
++        if (!input) {
++            return {server_benefit_checkpoint_load_status::io_error, {}, "cannot open checkpoint for reading"};
++        }
++        std::string payload((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
++        if (!input.good() && !input.eof()) {
++            return {server_benefit_checkpoint_load_status::io_error, {}, "checkpoint read failed"};
++        }
++        return {server_benefit_checkpoint_load_status::restored, std::move(payload), {}};
++    }
++
++    bool save(const std::string & payload, std::string & error) override {
++        if (payload.size() > maximum_checkpoint_bytes) {
++            error = "checkpoint exceeds 4 MiB limit";
++            return false;
++        }
++        std::error_code ec;
++        const auto parent = path_.parent_path();
++        if (!parent.empty()) {
++            std::filesystem::create_directories(parent, ec);
++            if (ec) {
++                error = "cannot create checkpoint directory: " + ec.message();
++                return false;
++            }
++        }
++        const std::filesystem::path temporary = path_.string() + ".tmp";
++#ifdef _WIN32
++        std::FILE * file = _wfopen(temporary.c_str(), L"wb");
++#else
++        std::FILE * file = std::fopen(temporary.c_str(), "wb");
++#endif
++        if (file == nullptr) {
++            error = "cannot open temporary checkpoint: " + std::string(std::strerror(errno));
++            return false;
++        }
++        bool ok = std::fwrite(payload.data(), 1, payload.size(), file) == payload.size();
++        if (ok) ok = std::fflush(file) == 0;
++#ifdef _WIN32
++        if (ok) ok = _commit(_fileno(file)) == 0;
++#else
++        if (ok) ok = ::fsync(fileno(file)) == 0;
++#endif
++        if (std::fclose(file) != 0) ok = false;
++        if (!ok) {
++            error = "cannot durably write temporary checkpoint: " + std::string(std::strerror(errno));
++            std::filesystem::remove(temporary, ec);
++            return false;
++        }
++#ifdef _WIN32
++        if (!MoveFileExW(temporary.c_str(), path_.c_str(),
++                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
++            error = "cannot atomically replace checkpoint: Win32 error " + std::to_string(GetLastError());
++            std::filesystem::remove(temporary, ec);
++            return false;
++        }
++#else
++        if (std::rename(temporary.c_str(), path_.c_str()) != 0) {
++            error = "cannot atomically replace checkpoint: " + std::string(std::strerror(errno));
++            std::filesystem::remove(temporary, ec);
++            return false;
++        }
++        const std::filesystem::path directory = parent.empty() ? std::filesystem::path(".") : parent;
++        int directory_flags = O_RDONLY;
++#ifdef O_DIRECTORY
++        directory_flags |= O_DIRECTORY;
++#endif
++        const int directory_fd = ::open(directory.c_str(), directory_flags);
++        if (directory_fd < 0 || ::fsync(directory_fd) != 0) {
++            error = "checkpoint committed but directory sync failed: " + std::string(std::strerror(errno));
++            if (directory_fd >= 0) ::close(directory_fd);
++            return false;
++        }
++        ::close(directory_fd);
++#endif
++        return true;
++    }
++
++private:
++    std::filesystem::path path_;
++};
++}
++
++std::unique_ptr<server_benefit_checkpoint_store> server_benefit_create_file_checkpoint_store(
++        const std::filesystem::path & path) {
++    return std::make_unique<server_benefit_file_checkpoint_store>(path);
++}
++
++server_benefit_checkpoint::server_benefit_checkpoint(
++        std::unique_ptr<server_benefit_checkpoint_store> store) : store_(std::move(store)) {
++    if (!store_) throw std::invalid_argument("benefit checkpoint store must not be null");
++    worker_ = std::thread(&server_benefit_checkpoint::run, this);
++}
++
++server_benefit_checkpoint::~server_benefit_checkpoint() {
++    flush();
++    {
++        std::lock_guard<std::mutex> lock(mutex_);
++        stopping_ = true;
++    }
++    condition_.notify_one();
++    if (worker_.joinable()) worker_.join();
++}
++
++server_benefit_checkpoint_load_result server_benefit_checkpoint::load() {
++    std::lock_guard<std::mutex> lock(mutex_);
++    if (pending_ || writing_ || enqueued_ != 0) {
++        return {server_benefit_checkpoint_load_status::io_error, {},
++                "checkpoint load is only valid before the first enqueue"};
++    }
++    return store_->load();
++}
++
++void server_benefit_checkpoint::enqueue(std::string payload) {
++    {
++        std::lock_guard<std::mutex> lock(mutex_);
++        if (pending_) coalesced_++;
++        pending_payload_ = std::move(payload);
++        pending_sequence_ = ++enqueued_;
++        pending_ = true;
++    }
++    condition_.notify_one();
++}
++
++bool server_benefit_checkpoint::flush() {
++    std::unique_lock<std::mutex> lock(mutex_);
++    const uint64_t target = enqueued_;
++    condition_.notify_one();
++    flushed_.wait(lock, [&]() { return completed_sequence_ >= target; });
++    return save_failures_ == 0;
++}
++
++server_benefit_checkpoint_io_snapshot server_benefit_checkpoint::snapshot() const {
++    std::lock_guard<std::mutex> lock(mutex_);
++    return {enqueued_, coalesced_, saves_completed_, save_failures_, pending_ || writing_ ? 1U : 0U};
++}
++
++void server_benefit_checkpoint::run() {
++    for (;;) {
++        std::string payload;
++        uint64_t sequence = 0;
++        {
++            std::unique_lock<std::mutex> lock(mutex_);
++            condition_.wait(lock, [&]() { return pending_ || stopping_; });
++            if (!pending_ && stopping_) return;
++            payload = std::move(pending_payload_);
++            sequence = pending_sequence_;
++            pending_ = false;
++            writing_ = true;
++        }
++        std::string error;
++        const bool saved = store_->save(payload, error);
++        {
++            std::lock_guard<std::mutex> lock(mutex_);
++            writing_ = false;
++            completed_sequence_ = sequence;
++            if (saved) saves_completed_++;
++            else save_failures_++;
++        }
++        flushed_.notify_all();
++    }
++}
+diff --git a/tools/server/server-benefit-checkpoint.h b/tools/server/server-benefit-checkpoint.h
+new file mode 100644
+index 0000000..609dc02
+--- /dev/null
++++ b/tools/server/server-benefit-checkpoint.h
+@@ -0,0 +1,76 @@
++#pragma once
++
++#include <condition_variable>
++#include <cstdint>
++#include <filesystem>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <thread>
++
++enum class server_benefit_checkpoint_load_status {
++    missing,
++    restored,
++    io_error,
++};
++
++struct server_benefit_checkpoint_load_result {
++    server_benefit_checkpoint_load_status status = server_benefit_checkpoint_load_status::missing;
++    std::string payload;
++    std::string error;
++};
++
++struct server_benefit_checkpoint_io_snapshot {
++    uint64_t enqueued = 0;
++    uint64_t coalesced = 0;
++    uint64_t saves_completed = 0;
++    uint64_t save_failures = 0;
++    uint64_t pending = 0;
++};
++
++// Storage is deliberately narrower than the policy state format. The policy
++// owns schema/compatibility validation; stores only provide durable bytes.
++class server_benefit_checkpoint_store {
++public:
++    virtual ~server_benefit_checkpoint_store() = default;
++    virtual server_benefit_checkpoint_load_result load() = 0;
++    virtual bool save(const std::string & payload, std::string & error) = 0;
++};
++
++std::unique_ptr<server_benefit_checkpoint_store> server_benefit_create_file_checkpoint_store(
++        const std::filesystem::path & path);
++
++// A single-worker, latest-value queue. enqueue() never performs file I/O and
++// never grows an unbounded backlog on the inference thread.
++class server_benefit_checkpoint {
++public:
++    explicit server_benefit_checkpoint(std::unique_ptr<server_benefit_checkpoint_store> store);
++    ~server_benefit_checkpoint();
++
++    server_benefit_checkpoint(const server_benefit_checkpoint &) = delete;
++    server_benefit_checkpoint & operator=(const server_benefit_checkpoint &) = delete;
++
++    server_benefit_checkpoint_load_result load();
++    void enqueue(std::string payload);
++    bool flush();
++    server_benefit_checkpoint_io_snapshot snapshot() const;
++
++private:
++    void run();
++
++    std::unique_ptr<server_benefit_checkpoint_store> store_;
++    mutable std::mutex mutex_;
++    std::condition_variable condition_;
++    std::condition_variable flushed_;
++    std::thread worker_;
++    std::string pending_payload_;
++    uint64_t enqueued_ = 0;
++    uint64_t pending_sequence_ = 0;
++    uint64_t completed_sequence_ = 0;
++    uint64_t coalesced_ = 0;
++    uint64_t saves_completed_ = 0;
++    uint64_t save_failures_ = 0;
++    bool pending_ = false;
++    bool writing_ = false;
++    bool stopping_ = false;
++};
 diff --git a/tools/server/server-benefit-policy.cpp b/tools/server/server-benefit-policy.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..aa009065773815599681aa32c6aac15d8ed60d4b
+index 0000000..436f8b5
 --- /dev/null
 +++ b/tools/server/server-benefit-policy.cpp
-@@ -0,0 +1,295 @@
+@@ -0,0 +1,576 @@
 +#include "server-benefit-policy.h"
 +
 +#include <algorithm>
 +#include <cmath>
++#include <limits>
++#include <stdexcept>
++#include <utility>
++
++#include <nlohmann/json.hpp>
 +
 +namespace {
++using checkpoint_json = nlohmann::ordered_json;
++
++uint32_t checkpoint_crc32(const std::string & value) {
++    uint32_t crc = 0xffffffffU;
++    for (const unsigned char byte : value) {
++        crc ^= byte;
++        for (int bit = 0; bit < 8; ++bit) {
++            crc = (crc >> 1U) ^ (0xedb88320U & (0U - (crc & 1U)));
++        }
++    }
++    return ~crc;
++}
++
++checkpoint_json checkpoint_configuration(const server_benefit_config & config) {
++    return {
++        {"minimum_observations", config.minimum_observations},
++        {"exploration_interval", config.exploration_interval},
++        {"ridge_lambda", config.ridge_lambda},
++        {"confidence_beta", config.confidence_beta},
++        {"safety_margin_ms", config.safety_margin_ms},
++        {"maximum_kv_pressure", config.maximum_kv_pressure},
++        {"target_iteration_ms", config.target_iteration_ms},
++        {"slo_penalty", config.slo_penalty},
++        {"failure_penalty_ms", config.failure_penalty_ms},
++        {"drift_ratio", config.drift_ratio},
++        {"drift_consecutive_limit", config.drift_consecutive_limit},
++        {"cooldown_decisions", config.cooldown_decisions},
++    };
++}
++
++std::string checkpoint_checksum_input(const std::string & compatibility,
++        const checkpoint_json & configuration, const checkpoint_json & state) {
++    return compatibility + "\n" + configuration.dump() + "\n" + state.dump();
++}
++
 +template <size_t N>
 +bool invert(const double (&input)[N][N], double (&output)[N][N]) {
 +    double matrix[N][2 * N]{};
@@ -2967,12 +3532,26 @@ index 0000000000000000000000000000000000000000..aa009065773815599681aa32c6aac15d
 +    configure(config);
 +}
 +
++server_benefit_policy::~server_benefit_policy() {
++    try {
++        flush_checkpoint();
++    } catch (...) {
++        // Destructors cannot surface persistence failures. The synchronous
++        // shutdown path can call flush_checkpoint(), and metrics retain errors.
++    }
++}
++
 +void server_benefit_policy::configure(server_benefit_config config) {
++    if (checkpoint_) {
++        flush_checkpoint();
++        checkpoint_.reset();
++    }
 +    config_ = config;
 +    config_.minimum_observations = std::max<size_t>(1, config_.minimum_observations);
 +    config_.exploration_interval = std::max<size_t>(1, config_.exploration_interval);
 +    config_.ridge_lambda = std::max(1e-6, config_.ridge_lambda);
 +    config_.drift_consecutive_limit = std::max<size_t>(1, config_.drift_consecutive_limit);
++    config_.checkpoint_interval = std::max<size_t>(1, config_.checkpoint_interval);
 +    cpu_ = {};
 +    cuda_ = {};
 +    cpu_.upstream.reset(config_.ridge_lambda);
@@ -2980,6 +3559,27 @@ index 0000000000000000000000000000000000000000..aa009065773815599681aa32c6aac15d
 +    cuda_.upstream.reset(config_.ridge_lambda);
 +    cuda_.cacheflow.reset(config_.ridge_lambda);
 +    next_id_ = 1;
++    observations_since_checkpoint_ = 0;
++    checkpoints_restored_ = 0;
++    checkpoints_incompatible_ = 0;
++    checkpoint_restore_failures_ = 0;
++    checkpoint_enqueue_failures_ = 0;
++    if (!config_.checkpoint_path.empty() && config_.mode == server_benefit_mode::learned) {
++        if (config_.checkpoint_compatibility_key.empty()) {
++            throw std::invalid_argument("benefit checkpoint requires a non-empty compatibility key");
++        }
++        checkpoint_ = std::make_unique<server_benefit_checkpoint>(
++                server_benefit_create_file_checkpoint_store(config_.checkpoint_path));
++        const auto loaded = checkpoint_->load();
++        if (loaded.status == server_benefit_checkpoint_load_status::restored) {
++            const auto result = restore_checkpoint(loaded.payload);
++            if (result == restore_result::restored) checkpoints_restored_++;
++            else if (result == restore_result::incompatible) checkpoints_incompatible_++;
++            else checkpoint_restore_failures_++;
++        } else if (loaded.status == server_benefit_checkpoint_load_status::io_error) {
++            checkpoint_restore_failures_++;
++        }
++    }
 +}
 +
 +server_benefit_policy::backend_state & server_benefit_policy::state(server_benefit_backend backend) {
@@ -3141,6 +3741,14 @@ index 0000000000000000000000000000000000000000..aa009065773815599681aa32c6aac15d
 +        backend.cooldown_remaining = config_.cooldown_decisions;
 +        model.reset(config_.ridge_lambda);
 +    }
++    if (checkpoint_ && ++observations_since_checkpoint_ >= config_.checkpoint_interval) {
++        try {
++            checkpoint_->enqueue(encode_checkpoint());
++            observations_since_checkpoint_ = 0;
++        } catch (...) {
++            checkpoint_enqueue_failures_++;
++        }
++    }
 +}
 +
 +server_benefit_snapshot server_benefit_policy::snapshot(server_benefit_backend backend_id) const {
@@ -3165,17 +3773,219 @@ index 0000000000000000000000000000000000000000..aa009065773815599681aa32c6aac15d
 +        backend.last_uncertainty_ms,
 +    };
 +}
++
++std::string server_benefit_policy::encode_checkpoint() const {
++    auto encode_model = [](const ridge_model & model) {
++        checkpoint_json normal = checkpoint_json::array();
++        for (size_t row = 0; row < feature_count; ++row) {
++            checkpoint_json values = checkpoint_json::array();
++            for (size_t column = 0; column < feature_count; ++column) {
++                values.push_back(model.normal[row][column]);
++            }
++            normal.push_back(std::move(values));
++        }
++        checkpoint_json rhs = checkpoint_json::array();
++        for (const double value : model.rhs) rhs.push_back(value);
++        return checkpoint_json{
++            {"normal", std::move(normal)},
++            {"rhs", std::move(rhs)},
++            {"observations", model.observations},
++            {"residual_variance_ewma", model.residual_variance_ewma},
++        };
++    };
++    auto encode_backend = [&](const backend_state & backend) {
++        return checkpoint_json{
++            {"upstream", encode_model(backend.upstream)},
++            {"cacheflow", encode_model(backend.cacheflow)},
++            {"upstream_decisions", backend.upstream_decisions},
++            {"cacheflow_decisions", backend.cacheflow_decisions},
++            {"exploration_decisions", backend.exploration_decisions},
++            {"cold_start_decisions", backend.cold_start_decisions},
++            {"positive_lower_bound_decisions", backend.positive_lower_bound_decisions},
++            {"insufficient_evidence_decisions", backend.insufficient_evidence_decisions},
++            {"safety_fallbacks", backend.safety_fallbacks},
++            {"drift_events", backend.drift_events},
++            {"upstream_bad_residuals", backend.upstream_bad_residuals},
++            {"cacheflow_bad_residuals", backend.cacheflow_bad_residuals},
++            {"cooldown_remaining", backend.cooldown_remaining},
++            {"decisions_since_probe", backend.decisions_since_probe},
++            {"last_predicted_benefit_ms", backend.last_predicted_benefit_ms},
++            {"last_uncertainty_ms", backend.last_uncertainty_ms},
++        };
++    };
++
++    checkpoint_json state = {
++        {"next_id", next_id_},
++        {"cpu", encode_backend(cpu_)},
++        {"cuda", encode_backend(cuda_)},
++    };
++    const checkpoint_json configuration = checkpoint_configuration(config_);
++    const uint32_t checksum = checkpoint_crc32(checkpoint_checksum_input(
++            config_.checkpoint_compatibility_key, configuration, state));
++    checkpoint_json envelope = {
++        {"schema_version", 1},
++        {"feature_count", feature_count},
++        {"compatibility_key", config_.checkpoint_compatibility_key},
++        {"configuration", configuration},
++        {"state", std::move(state)},
++        {"crc32", checksum},
++    };
++    return envelope.dump();
++}
++
++server_benefit_policy::restore_result server_benefit_policy::restore_checkpoint(
++        const std::string & payload) {
++    try {
++        const checkpoint_json envelope = checkpoint_json::parse(payload);
++        if (envelope.at("schema_version").get<int>() != 1 ||
++                envelope.at("feature_count").get<size_t>() != feature_count) {
++            return restore_result::incompatible;
++        }
++        const std::string compatibility = envelope.at("compatibility_key").get<std::string>();
++        const checkpoint_json configuration = envelope.at("configuration");
++        if (compatibility != config_.checkpoint_compatibility_key ||
++                configuration != checkpoint_configuration(config_)) {
++            return restore_result::incompatible;
++        }
++        const checkpoint_json & state_json = envelope.at("state");
++        const uint32_t expected_crc = checkpoint_crc32(
++                checkpoint_checksum_input(compatibility, configuration, state_json));
++        if (envelope.at("crc32").get<uint32_t>() != expected_crc) return restore_result::invalid;
++
++        auto finite = [](double value) {
++            return std::isfinite(value) && std::abs(value) <= 1e18;
++        };
++        auto load_size = [](const checkpoint_json & value) {
++            const uint64_t parsed = value.get<uint64_t>();
++            if (parsed > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
++                throw std::out_of_range("checkpoint size does not fit size_t");
++            }
++            return static_cast<size_t>(parsed);
++        };
++        auto load_model = [&](const checkpoint_json & value, ridge_model & model) {
++            const auto & normal = value.at("normal");
++            const auto & rhs = value.at("rhs");
++            if (!normal.is_array() || normal.size() != feature_count ||
++                    !rhs.is_array() || rhs.size() != feature_count) {
++                throw std::invalid_argument("invalid ridge checkpoint dimensions");
++            }
++            for (size_t row = 0; row < feature_count; ++row) {
++                if (!normal[row].is_array() || normal[row].size() != feature_count) {
++                    throw std::invalid_argument("invalid ridge checkpoint matrix row");
++                }
++                model.rhs[row] = rhs[row].get<double>();
++                if (!finite(model.rhs[row])) throw std::invalid_argument("non-finite ridge rhs");
++                for (size_t column = 0; column < feature_count; ++column) {
++                    model.normal[row][column] = normal[row][column].get<double>();
++                    if (!finite(model.normal[row][column])) {
++                        throw std::invalid_argument("non-finite ridge matrix");
++                    }
++                }
++                if (model.normal[row][row] < config_.ridge_lambda) {
++                    throw std::invalid_argument("ridge matrix lost regularization diagonal");
++                }
++            }
++            for (size_t row = 0; row < feature_count; ++row) {
++                for (size_t column = row + 1; column < feature_count; ++column) {
++                    const double scale = std::max({1.0, std::abs(model.normal[row][column]),
++                            std::abs(model.normal[column][row])});
++                    if (std::abs(model.normal[row][column] - model.normal[column][row]) > 1e-10 * scale) {
++                        throw std::invalid_argument("ridge matrix is not symmetric");
++                    }
++                }
++            }
++            model.observations = value.at("observations").get<uint64_t>();
++            if (model.observations > 1000000000000ULL) {
++                throw std::invalid_argument("ridge observation count is implausible");
++            }
++            model.residual_variance_ewma = value.at("residual_variance_ewma").get<double>();
++            if (!finite(model.residual_variance_ewma) || model.residual_variance_ewma < 0.0) {
++                throw std::invalid_argument("invalid residual variance");
++            }
++        };
++        auto load_backend = [&](const checkpoint_json & value, backend_state & backend) {
++            load_model(value.at("upstream"), backend.upstream);
++            load_model(value.at("cacheflow"), backend.cacheflow);
++            backend.upstream_decisions = value.at("upstream_decisions").get<uint64_t>();
++            backend.cacheflow_decisions = value.at("cacheflow_decisions").get<uint64_t>();
++            backend.exploration_decisions = value.at("exploration_decisions").get<uint64_t>();
++            backend.cold_start_decisions = value.at("cold_start_decisions").get<uint64_t>();
++            backend.positive_lower_bound_decisions = value.at("positive_lower_bound_decisions").get<uint64_t>();
++            backend.insufficient_evidence_decisions = value.at("insufficient_evidence_decisions").get<uint64_t>();
++            backend.safety_fallbacks = value.at("safety_fallbacks").get<uint64_t>();
++            backend.drift_events = value.at("drift_events").get<uint64_t>();
++            backend.upstream_bad_residuals = load_size(value.at("upstream_bad_residuals"));
++            backend.cacheflow_bad_residuals = load_size(value.at("cacheflow_bad_residuals"));
++            backend.cooldown_remaining = load_size(value.at("cooldown_remaining"));
++            backend.decisions_since_probe = value.at("decisions_since_probe").get<uint64_t>();
++            backend.last_predicted_benefit_ms = value.at("last_predicted_benefit_ms").get<double>();
++            backend.last_uncertainty_ms = value.at("last_uncertainty_ms").get<double>();
++            if (!finite(backend.last_predicted_benefit_ms) ||
++                    !finite(backend.last_uncertainty_ms) || backend.last_uncertainty_ms < 0.0) {
++                throw std::invalid_argument("invalid benefit prediction telemetry");
++            }
++        };
++
++        backend_state restored_cpu{};
++        backend_state restored_cuda{};
++        load_backend(state_json.at("cpu"), restored_cpu);
++        load_backend(state_json.at("cuda"), restored_cuda);
++        const uint64_t restored_next_id = state_json.at("next_id").get<uint64_t>();
++        if (restored_next_id == 0) throw std::invalid_argument("invalid next decision id");
++        cpu_ = std::move(restored_cpu);
++        cuda_ = std::move(restored_cuda);
++        next_id_ = restored_next_id;
++        return restore_result::restored;
++    } catch (...) {
++        return restore_result::invalid;
++    }
++}
++
++bool server_benefit_policy::flush_checkpoint() {
++    if (!checkpoint_) return true;
++    if (observations_since_checkpoint_ > 0) {
++        try {
++            checkpoint_->enqueue(encode_checkpoint());
++            observations_since_checkpoint_ = 0;
++        } catch (...) {
++            checkpoint_enqueue_failures_++;
++            return false;
++        }
++    }
++    return checkpoint_->flush();
++}
++
++server_benefit_persistence_snapshot server_benefit_policy::checkpoint_snapshot() const {
++    server_benefit_persistence_snapshot result;
++    result.restored = checkpoints_restored_;
++    result.incompatible = checkpoints_incompatible_;
++    result.restore_failures = checkpoint_restore_failures_;
++    result.save_failures = checkpoint_enqueue_failures_;
++    if (checkpoint_) {
++        const auto io = checkpoint_->snapshot();
++        result.checkpoints_enqueued = io.enqueued;
++        result.checkpoints_coalesced = io.coalesced;
++        result.saves_completed = io.saves_completed;
++        result.save_failures += io.save_failures;
++        result.pending = io.pending;
++    }
++    return result;
++}
 diff --git a/tools/server/server-benefit-policy.h b/tools/server/server-benefit-policy.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..40fc2fb8b8303f2084a651172a94f35193b89212
+index 0000000..ce7efcc
 --- /dev/null
 +++ b/tools/server/server-benefit-policy.h
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,175 @@
 +#pragma once
++
++#include "server-benefit-checkpoint.h"
 +
 +#include <array>
 +#include <cstddef>
 +#include <cstdint>
++#include <memory>
++#include <string>
 +
 +enum class server_benefit_backend { cpu, cuda };
 +enum class server_benefit_action { upstream, cacheflow };
@@ -3210,6 +4020,9 @@ index 0000000000000000000000000000000000000000..40fc2fb8b8303f2084a651172a94f351
 +    double drift_ratio = 2.5;
 +    size_t drift_consecutive_limit = 3;
 +    size_t cooldown_decisions = 16;
++    std::string checkpoint_path;
++    std::string checkpoint_compatibility_key;
++    size_t checkpoint_interval = 128;
 +};
 +
 +struct server_benefit_features {
@@ -3262,16 +4075,30 @@ index 0000000000000000000000000000000000000000..40fc2fb8b8303f2084a651172a94f351
 +    double last_uncertainty_ms = 0.0;
 +};
 +
++struct server_benefit_persistence_snapshot {
++    uint64_t restored = 0;
++    uint64_t incompatible = 0;
++    uint64_t restore_failures = 0;
++    uint64_t checkpoints_enqueued = 0;
++    uint64_t checkpoints_coalesced = 0;
++    uint64_t saves_completed = 0;
++    uint64_t save_failures = 0;
++    uint64_t pending = 0;
++};
++
 +// Conservative contextual policy for the production scheduling seam. It owns
 +// backend-local online models and exposes only choose/observe/snapshot.
 +class server_benefit_policy {
 +public:
 +    explicit server_benefit_policy(server_benefit_config config = {});
++    ~server_benefit_policy();
 +
 +    void configure(server_benefit_config config);
 +    server_benefit_decision choose(const server_benefit_features & features);
 +    void observe(const server_benefit_decision & decision, const server_benefit_feedback & feedback);
 +    server_benefit_snapshot snapshot(server_benefit_backend backend) const;
++    bool flush_checkpoint();
++    server_benefit_persistence_snapshot checkpoint_snapshot() const;
 +
 +private:
 +    static constexpr size_t feature_count = server_benefit_feature_count;
@@ -3311,13 +4138,22 @@ index 0000000000000000000000000000000000000000..40fc2fb8b8303f2084a651172a94f351
 +    backend_state cpu_;
 +    backend_state cuda_;
 +    uint64_t next_id_ = 1;
++    std::unique_ptr<server_benefit_checkpoint> checkpoint_;
++    size_t observations_since_checkpoint_ = 0;
++    uint64_t checkpoints_restored_ = 0;
++    uint64_t checkpoints_incompatible_ = 0;
++    uint64_t checkpoint_restore_failures_ = 0;
++    uint64_t checkpoint_enqueue_failures_ = 0;
 +
 +    backend_state & state(server_benefit_backend backend);
 +    const backend_state & state(server_benefit_backend backend) const;
 +    std::array<double, feature_count> normalize(const server_benefit_features & features) const;
++    std::string encode_checkpoint() const;
++    enum class restore_result { restored, incompatible, invalid };
++    restore_result restore_checkpoint(const std::string & payload);
 +};
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b1b350aa3 100644
+index 986b2f1..603894f 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -4,6 +4,14 @@
@@ -3335,7 +4171,15 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
  #include "build-info.h"
  #include "common.h"
-@@ -57,16 +65,6 @@ static uint32_t server_n_outputs_max(const common_params & params) {
+@@ -26,6 +34,7 @@
+ #include <exception>
+ #include <memory>
+ #include <filesystem>
++#include <sstream>
+ #include <utility>
+ #include <fstream>
+ 
+@@ -57,16 +66,6 @@ static uint32_t server_n_outputs_max(const common_params & params) {
      return std::max<uint32_t>(1, std::min<uint64_t>(n_batch, n_outputs));
  }
  
@@ -3352,7 +4196,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  enum server_state {
      SERVER_STATE_LOADING_MODEL,  // Server is starting up, model not fully loaded yet
      SERVER_STATE_READY,          // Server is ready and model is loaded
-@@ -126,9 +124,12 @@ struct server_slot {
+@@ -126,9 +125,12 @@ struct server_slot {
      std::string stopping_word;
  
      // state
@@ -3366,7 +4210,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
      bool prompt_save(server_prompt_cache & prompt_cache) const {
          if (prompt.tokens.size() == 0) {
-@@ -325,7 +326,7 @@ struct server_slot {
+@@ -325,7 +327,7 @@ struct server_slot {
      }
  
      bool is_processing() const {
@@ -3375,7 +4219,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
      }
  
      bool can_speculate() const {
-@@ -403,8 +404,6 @@ struct server_slot {
+@@ -403,8 +405,6 @@ struct server_slot {
              t_last_used        =  ggml_time_us();
              t_token_generation = (ggml_time_us() - t_start_generation) / 1e3;
  
@@ -3384,7 +4228,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
              // do not keep context of the child slots - the parent's context is enough
              if (task->is_child()) {
                  prompt_clear(false);
-@@ -570,7 +569,7 @@ struct server_slot {
+@@ -570,7 +570,7 @@ struct server_slot {
      }
  
      void copy_state_to(server_slot & other) const {
@@ -3393,7 +4237,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
          common_context_seq_rm(ctx_tgt, other.id,     -1, -1);
          common_context_seq_cp(ctx_tgt, id, other.id, -1, -1);
-@@ -685,6 +684,7 @@ struct server_metrics {
+@@ -685,6 +685,7 @@ struct server_metrics {
      int64_t t_start = 0;
  
      uint64_t n_prompt_tokens_processed_total = 0;
@@ -3401,7 +4245,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
      uint64_t t_prompt_processing_total       = 0;
      uint64_t n_tokens_predicted_total        = 0;
      uint64_t t_tokens_generation_total       = 0;
-@@ -692,6 +692,7 @@ struct server_metrics {
+@@ -692,6 +693,7 @@ struct server_metrics {
      uint64_t n_tokens_max = 0;
  
      uint64_t n_prompt_tokens_processed = 0;
@@ -3409,7 +4253,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -700,6 +701,33 @@ struct server_metrics {
+@@ -700,6 +702,33 @@ struct server_metrics {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -3443,7 +4287,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
      void init() {
          t_start = ggml_time_us();
      }
-@@ -707,6 +735,8 @@ struct server_metrics {
+@@ -707,6 +736,8 @@ struct server_metrics {
      void on_prompt_eval(const server_slot & slot) {
          n_prompt_tokens_processed_total += slot.n_prompt_tokens_processed;
          n_prompt_tokens_processed       += slot.n_prompt_tokens_processed;
@@ -3452,7 +4296,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
          t_prompt_processing             += slot.t_prompt_processing;
          t_prompt_processing_total       += slot.t_prompt_processing;
  
-@@ -730,8 +760,63 @@ struct server_metrics {
+@@ -730,8 +761,63 @@ struct server_metrics {
          }
      }
  
@@ -3516,7 +4360,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
          t_prompt_processing       = 0;
          n_tokens_predicted        = 0;
          t_tokens_generation       = 0;
-@@ -816,8 +901,7 @@ private:
+@@ -816,8 +902,7 @@ private:
      json json_ui_settings = json::object();    // Primary: new name
      json json_webui_settings = json::object();    // Deprecated: use json_ui_settings instead (kept for compat)
  
@@ -3526,7 +4370,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
      std::string model_name; // name of the loaded model, to be used by API
      std::set<std::string> model_aliases; // additional names for the model
-@@ -864,6 +948,10 @@ private:
+@@ -864,6 +949,10 @@ private:
  
          params_base = params;
          params_base.n_outputs_max = server_n_outputs_max(params_base);
@@ -3537,7 +4381,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
          std::string & mmproj_path = params_base.mmproj.path;
          bool has_mmproj = !mmproj_path.empty();
-@@ -1114,8 +1202,82 @@ private:
+@@ -1114,8 +1203,106 @@ private:
  
          n_swa = params_base.swa_full ? 0 : llama_model_n_swa(model_tgt);
  
@@ -3567,6 +4411,30 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
 +        benefit_config.drift_consecutive_limit = (size_t) params_base.benefit_drift_consecutive;
 +        benefit_config.cooldown_decisions = (size_t) params_base.benefit_cooldown_decisions;
 +        benefit_config.target_iteration_ms = params_base.prefill_target_iteration_ms;
++        benefit_config.checkpoint_path = params_base.benefit_checkpoint_path;
++        benefit_config.checkpoint_interval = (size_t) params_base.benefit_checkpoint_interval;
++        if (!benefit_config.checkpoint_path.empty()) {
++            if (!params_base.benefit_checkpoint_key.empty()) {
++                benefit_config.checkpoint_compatibility_key = params_base.benefit_checkpoint_key;
++            } else {
++                char description[256]{};
++                llama_model_desc(model_tgt, description, sizeof(description));
++                std::error_code identity_error;
++                const auto model_file_size = std::filesystem::file_size(params_base.model.path, identity_error);
++                const auto model_mtime = std::filesystem::last_write_time(params_base.model.path, identity_error);
++                std::ostringstream identity;
++                identity << "model_path=" << std::filesystem::absolute(params_base.model.path).lexically_normal().string()
++                         << ";description=" << description
++                         << ";model_bytes=" << llama_model_size(model_tgt)
++                         << ";parameters=" << llama_model_n_params(model_tgt)
++                         << ";gpu_layers=" << params_base.n_gpu_layers;
++                if (!identity_error) {
++                    identity << ";file_bytes=" << model_file_size
++                             << ";mtime=" << model_mtime.time_since_epoch().count();
++                }
++                benefit_config.checkpoint_compatibility_key = identity.str();
++            }
++        }
 +        inference_engine.benefit_policy().configure(benefit_config);
 +        SRV_INF("CacheFlow policies: scheduler=%s, prefill=%s, benefit=%s, speculation=%s, kv_blocks=%s\n",
 +                params_base.scheduler_policy.c_str(), params_base.prefill_policy.c_str(),
@@ -3622,7 +4490,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
          // setup slots
          SRV_INF("initializing slots, n_slots = %d\n", params_base.n_parallel);
-@@ -1178,6 +1340,9 @@ private:
+@@ -1178,6 +1365,9 @@ private:
              SLT_INF(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
  
              slot.callback_on_release = [this](int id_slot) {
@@ -3632,7 +4500,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
                  queue_tasks.pop_deferred_task(id_slot);
              };
  
-@@ -1383,9 +1548,10 @@ private:
+@@ -1383,9 +1573,10 @@ private:
  
          bool update_cache = false;
  
@@ -3646,7 +4514,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
              for (server_slot & slot : slots) {
                  // skip the slot if it is not available
-@@ -1393,29 +1559,41 @@ private:
+@@ -1393,29 +1584,41 @@ private:
                      continue;
                  }
  
@@ -3708,7 +4576,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
                  // if we are about to lose a large portion of the existing context - save it in the prompt cache
                  if (f_keep < 0.5f) {
-@@ -1443,12 +1621,16 @@ private:
+@@ -1443,12 +1646,16 @@ private:
  
              if (ret != nullptr) {
                  SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
@@ -3725,7 +4593,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
              update_cache = update_cache && prompt_cache;
  
              // cache prompts only for completion tasks
-@@ -1469,41 +1651,114 @@ private:
+@@ -1469,41 +1676,114 @@ private:
  
                  SRV_INF("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
              }
@@ -3861,7 +4729,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
      }
  
      std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
-@@ -1519,7 +1774,234 @@ private:
+@@ -1519,7 +1799,234 @@ private:
          return output;
      }
  
@@ -4096,7 +4964,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
          // process per-request lora adapters
          if (!task.params.lora.empty()) {
              auto task_loras = construct_lora_list(task.params.lora);
-@@ -1590,6 +2072,8 @@ private:
+@@ -1590,6 +2097,8 @@ private:
              return false;
          }
  
@@ -4105,7 +4973,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
          SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
  
          // initialize samplers
-@@ -1629,9 +2113,10 @@ private:
+@@ -1629,9 +2138,10 @@ private:
  
          slot.task = std::make_unique<const server_task>(std::move(task));
  
@@ -4117,7 +4985,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
          // reset server kill-switch counter
          n_empty_consecutive = 0;
-@@ -1966,6 +2451,7 @@ private:
+@@ -1966,6 +2476,7 @@ private:
  
          res->generation_params = slot.task->params; // copy the parameters
  
@@ -4125,7 +4993,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
          queue_results.send(std::move(res));
      }
  
-@@ -2214,12 +2700,14 @@ private:
+@@ -2214,12 +2725,14 @@ private:
                              if (!slot.is_processing()) {
                                  SLT_INF(slot, "%s", "saving idle slot to prompt cache\n");
  
@@ -4142,7 +5010,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
                                      // [TAG_IDLE_SLOT_CLEAR]
                                      slot.prompt_clear(false);
                                  }
-@@ -2301,6 +2789,7 @@ private:
+@@ -2301,6 +2814,7 @@ private:
                      res->t_start             = metrics.t_start;
  
                      res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
@@ -4150,7 +5018,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
                      res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
                      res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
                      res->t_tokens_generation_total       = metrics.t_tokens_generation_total;
-@@ -2308,12 +2797,98 @@ private:
+@@ -2308,12 +2822,99 @@ private:
                      res->n_tokens_max = metrics.n_tokens_max;
  
                      res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
@@ -4194,6 +5062,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
 +                    const auto engine_snapshot = inference_engine.snapshot();
 +                    res->benefit_cpu = engine_snapshot.cpu_benefit;
 +                    res->benefit_cuda = engine_snapshot.cuda_benefit;
++                    res->benefit_persistence = engine_snapshot.benefit_persistence;
 +                    res->time_to_first_token = metrics.time_to_first_token;
 +                    res->time_per_output_token = metrics.time_per_output_token;
 +                    res->request_latency = metrics.request_latency;
@@ -4249,7 +5118,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
                      if (task.metrics_reset_bucket) {
                          metrics.reset_bucket();
-@@ -2479,7 +3054,7 @@ private:
+@@ -2479,7 +3080,7 @@ private:
          }
      }
  
@@ -4258,7 +5127,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
          // check if all slots are idle
          {
              bool all_idle = true;
-@@ -2494,7 +3069,7 @@ private:
+@@ -2494,7 +3095,7 @@ private:
              if (all_idle) {
                  SRV_INF("%s", "all slots are idle\n");
  
@@ -4267,7 +5136,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
              }
          }
  
-@@ -2509,7 +3084,7 @@ private:
+@@ -2509,7 +3110,7 @@ private:
          // apply context-shift if needed
          // TODO: simplify and improve
          for (server_slot & slot : slots) {
@@ -4276,7 +5145,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
                  if (!params_base.ctx_shift) {
                      // this check is redundant (for good)
                      // we should never get here, because generation should already stopped in process_token()
-@@ -2572,6 +3147,10 @@ private:
+@@ -2572,6 +3173,10 @@ private:
              }
          }
  
@@ -4287,7 +5156,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
          // start populating the batch for this iteration
          common_batch_clear(batch);
  
-@@ -2583,7 +3162,7 @@ private:
+@@ -2583,7 +3188,7 @@ private:
  
          // determine which slots are generating and drafting
          for (auto & slot : slots) {
@@ -4296,7 +5165,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
                  continue;
              }
  
-@@ -2602,7 +3181,9 @@ private:
+@@ -2602,7 +3207,9 @@ private:
                  const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                  const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
  
@@ -4307,7 +5176,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
                  if (n_draft_max > 0) {
                      GGML_ASSERT(slot.can_speculate());
-@@ -2643,7 +3224,12 @@ private:
+@@ -2643,7 +3250,12 @@ private:
  
          // generate the actual drafts (if any)
          {
@@ -4320,7 +5189,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
          }
  
          // make checkpoints if needed
-@@ -2705,6 +3291,91 @@ private:
+@@ -2705,6 +3317,91 @@ private:
          int32_t n_batch  = llama_n_batch(ctx_tgt);
          int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
  
@@ -4412,7 +5281,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
          float  alora_scale       = -1.0f;
          size_t alora_disabled_id = 0;
  
-@@ -2721,24 +3392,33 @@ private:
+@@ -2721,24 +3418,33 @@ private:
                  }
  
                  // check if this is a child slot
@@ -4450,7 +5319,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
                          SLT_TRC(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
                                  slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
-@@ -3110,7 +3790,9 @@ private:
+@@ -3110,7 +3816,9 @@ private:
                      const bool n_before_user_known = n_before_user > 0;
  
                      // add prompt tokens for processing in the current batch
@@ -4461,7 +5330,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
                          // get next token to process
                          llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                          if (cur_tok == LLAMA_TOKEN_NULL) {
-@@ -3173,7 +3855,8 @@ private:
+@@ -3173,7 +3881,8 @@ private:
  
                      // entire prompt has been processed
                      if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
@@ -4471,7 +5340,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
                          GGML_ASSERT(batch.n_tokens > 0);
  
-@@ -3249,6 +3932,13 @@ private:
+@@ -3249,6 +3958,13 @@ private:
  
          SRV_DBG("decoding batch, n_tokens = %d\n", batch.n_tokens);
  
@@ -4485,7 +5354,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
          auto accept_special_token = [&](server_slot & slot, llama_token token) {
              return params_base.special ||
                  slot.task->params.sampling.preserved_tokens.find(token) != slot.task->params.sampling.preserved_tokens.end();
-@@ -3294,7 +3984,8 @@ private:
+@@ -3294,7 +4010,8 @@ private:
                  batch.logits   + i,
              };
  
@@ -4495,7 +5364,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
              metrics.on_decoded(slots);
  
-@@ -3320,6 +4011,7 @@ private:
+@@ -3320,6 +4037,7 @@ private:
                      // TODO: handle ret == 2 (abort) when we start aborting
  
                      if (!err.empty()) {
@@ -4503,7 +5372,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
                          SRV_ERR("%s i = %d, n_batch = %d, ret = %d\n", err.c_str(), i, n_batch, ret);
  
                          for (auto & slot : slots) {
-@@ -3394,6 +4086,7 @@ private:
+@@ -3394,6 +4112,7 @@ private:
              //}
              if (!common_speculative_process(spec.get(), batch_view)) {
                  SRV_ERR("%s", "failed to process speculative batch\n");
@@ -4511,7 +5380,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
                  // TODO: handle error
                  break;
-@@ -3407,10 +4100,11 @@ private:
+@@ -3407,10 +4126,11 @@ private:
  
              // handle `n_cmpl > 1` tasks - when the main prompt is processed, activate all child tasks too
              for (auto & slot : slots) {
@@ -4525,7 +5394,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
                              children.push_back(&other);
                          }
                      }
-@@ -3420,17 +4114,19 @@ private:
+@@ -3420,17 +4140,19 @@ private:
                      for (auto & child : children) {
                          SLT_INF(slot, " - copying state to child %d\n", child->id);
  
@@ -4548,7 +5417,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
                      if (slot.task->params.stream && slot.task->params.return_progress) {
                          send_partial_response(slot, {}, true);
                      }
-@@ -3440,7 +4136,7 @@ private:
+@@ -3440,7 +4162,7 @@ private:
                      continue; // continue loop of slots
                  }
  
@@ -4557,7 +5426,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
                      if (slot.task->type == SERVER_TASK_TYPE_EMBEDDING) {
                          // prompt evaluated for embedding
                          send_embedding(slot, batch_view);
-@@ -3459,12 +4155,12 @@ private:
+@@ -3459,12 +4181,12 @@ private:
                      GGML_ASSERT(slot.task->need_sampling());
  
                      // prompt evaluated for next-token prediction
@@ -4572,7 +5441,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
                      continue; // continue loop of slots
                  }
  
-@@ -3517,7 +4213,8 @@ private:
+@@ -3517,7 +4239,8 @@ private:
  
              // speculative decoding - main model sample and accept
              for (auto & slot : slots) {
@@ -4582,7 +5451,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
                      continue;
                  }
  
-@@ -3593,6 +4290,13 @@ private:
+@@ -3593,6 +4316,13 @@ private:
  
                  // update how many tokens out of those tested were accepted
                  slot.n_draft_accepted += ids.size() - 1;
@@ -4596,7 +5465,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
  
                  // add accepted tokens to the prompt
                  slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - n_draft);
-@@ -3631,11 +4335,51 @@ private:
+@@ -3631,11 +4361,51 @@ private:
  
                  SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) ids.size() - 1, (int) n_draft, slot.prompt.n_tokens());
              }
@@ -4648,7 +5517,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
      int get_slot_n_ctx() {
          return slots.back().n_ctx;
      }
-@@ -4127,6 +4871,151 @@ void server_routes::init_routes() {
+@@ -4127,6 +4897,151 @@ void server_routes::init_routes() {
                      {"name",  "prompt_tokens_total"},
                      {"help",  "Number of prompt tokens processed."},
                      {"value",  (uint64_t) res_task->n_prompt_tokens_processed_total}
@@ -4800,7 +5669,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
              }, {
                      {"name",  "prompt_seconds_total"},
                      {"help",  "Prompt process time"},
-@@ -4149,6 +5038,18 @@ void server_routes::init_routes() {
+@@ -4149,6 +5064,18 @@ void server_routes::init_routes() {
                      {"value",  res_task->n_tokens_max}
              }}},
              {"gauge", {{
@@ -4819,7 +5688,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
                      {"name",  "prompt_tokens_seconds"},
                      {"help",  "Average prompt throughput in tokens/s."},
                      {"value",  res_task->n_prompt_tokens_processed ? 1.e3 / res_task->t_prompt_processing * res_task->n_prompt_tokens_processed : 0.}
-@@ -4156,6 +5057,115 @@ void server_routes::init_routes() {
+@@ -4156,6 +5083,115 @@ void server_routes::init_routes() {
                      {"name",  "predicted_tokens_seconds"},
                      {"help",  "Average generation throughput in tokens/s."},
                      {"value",  res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}
@@ -4935,7 +5804,7 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
              },{
                      {"name",  "requests_processing"},
                      {"help",  "Number of requests processing."},
-@@ -4188,6 +5198,88 @@ void server_routes::init_routes() {
+@@ -4188,6 +5224,108 @@ void server_routes::init_routes() {
              }
          }
  
@@ -4989,6 +5858,26 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
 +        append_benefit("cpu", res_task->benefit_cpu);
 +        append_benefit("cuda", res_task->benefit_cuda);
 +
++        const auto & checkpoint = res_task->benefit_persistence;
++        prometheus << "# HELP llamacpp:benefit_checkpoint_restore_total Benefit checkpoint startup outcomes.\n"
++                   << "# TYPE llamacpp:benefit_checkpoint_restore_total counter\n"
++                   << "llamacpp:benefit_checkpoint_restore_total{result=\"restored\"} " << checkpoint.restored << "\n"
++                   << "llamacpp:benefit_checkpoint_restore_total{result=\"incompatible\"} " << checkpoint.incompatible << "\n"
++                   << "llamacpp:benefit_checkpoint_restore_total{result=\"failed\"} " << checkpoint.restore_failures << "\n"
++                   << "# HELP llamacpp:benefit_checkpoint_save_total Benefit checkpoint asynchronous save outcomes.\n"
++                   << "# TYPE llamacpp:benefit_checkpoint_save_total counter\n"
++                   << "llamacpp:benefit_checkpoint_save_total{result=\"completed\"} " << checkpoint.saves_completed << "\n"
++                   << "llamacpp:benefit_checkpoint_save_total{result=\"failed\"} " << checkpoint.save_failures << "\n"
++                   << "# HELP llamacpp:benefit_checkpoint_enqueued_total Policy snapshots submitted to the bounded writer.\n"
++                   << "# TYPE llamacpp:benefit_checkpoint_enqueued_total counter\n"
++                   << "llamacpp:benefit_checkpoint_enqueued_total " << checkpoint.checkpoints_enqueued << "\n"
++                   << "# HELP llamacpp:benefit_checkpoint_coalesced_total Obsolete pending snapshots replaced by a newer state.\n"
++                   << "# TYPE llamacpp:benefit_checkpoint_coalesced_total counter\n"
++                   << "llamacpp:benefit_checkpoint_coalesced_total " << checkpoint.checkpoints_coalesced << "\n"
++                   << "# HELP llamacpp:benefit_checkpoint_pending Checkpoint currently queued or being written.\n"
++                   << "# TYPE llamacpp:benefit_checkpoint_pending gauge\n"
++                   << "llamacpp:benefit_checkpoint_pending " << checkpoint.pending << "\n";
++
 +        prometheus << "# HELP llamacpp:speculation_disabled_total Adaptive speculation cooldown entries by reason.\n"
 +                   << "# TYPE llamacpp:speculation_disabled_total counter\n"
 +                   << "llamacpp:speculation_disabled_total{reason=\"low_acceptance\"} "
@@ -5026,10 +5915,10 @@ index 986b2f15d59a9581bff93c6ef790f16da46cf0ca..b55d22059f9ee3e7efb76f9fa7f7657b
          res->status = 200;
 diff --git a/tools/server/server-inference-engine.cpp b/tools/server/server-inference-engine.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..0314591633a07035aa7c26817a78b0e8791d7c5a
+index 0000000..038e847
 --- /dev/null
 +++ b/tools/server/server-inference-engine.cpp
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,100 @@
 +#include "server-inference-engine.h"
 +
 +#include <stdexcept>
@@ -5041,6 +5930,7 @@ index 0000000000000000000000000000000000000000..0314591633a07035aa7c26817a78b0e8
 +}
 +
 +server_inference_engine::~server_inference_engine() {
++    try { benefit_policy_.flush_checkpoint(); } catch (...) {}
 +    try { flush_trace(); } catch (...) {}
 +}
 +
@@ -5121,6 +6011,7 @@ index 0000000000000000000000000000000000000000..0314591633a07035aa7c26817a78b0e8
 +        swap_store_ != nullptr,
 +        benefit_policy_.snapshot(server_benefit_backend::cpu),
 +        benefit_policy_.snapshot(server_benefit_backend::cuda),
++        benefit_policy_.checkpoint_snapshot(),
 +    };
 +}
 +
@@ -5130,10 +6021,10 @@ index 0000000000000000000000000000000000000000..0314591633a07035aa7c26817a78b0e8
 +}
 diff --git a/tools/server/server-inference-engine.h b/tools/server/server-inference-engine.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..cbfd7595391d43962aa336bd0733a4d70ab2937b
+index 0000000..f450f5d
 --- /dev/null
 +++ b/tools/server/server-inference-engine.h
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,160 @@
 +#pragma once
 +
 +#include "server-benefit-policy.h"
@@ -5179,6 +6070,7 @@ index 0000000000000000000000000000000000000000..cbfd7595391d43962aa336bd0733a4d7
 +    bool swap_store_enabled = false;
 +    server_benefit_snapshot cpu_benefit;
 +    server_benefit_snapshot cuda_benefit;
++    server_benefit_persistence_snapshot benefit_persistence;
 +};
 +
 +// Owns the inference control plane. server_context remains the protocol and
@@ -5295,7 +6187,7 @@ index 0000000000000000000000000000000000000000..cbfd7595391d43962aa336bd0733a4d7
 +};
 diff --git a/tools/server/server-inference-iteration.cpp b/tools/server/server-inference-iteration.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..28e2b6b258e0a3592da474a289e8e34955a08607
+index 0000000..28e2b6b
 --- /dev/null
 +++ b/tools/server/server-inference-iteration.cpp
 @@ -0,0 +1,56 @@
@@ -5357,7 +6249,7 @@ index 0000000000000000000000000000000000000000..28e2b6b258e0a3592da474a289e8e349
 +}
 diff --git a/tools/server/server-inference-iteration.h b/tools/server/server-inference-iteration.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a07cccb23dc6bce904cb8952e28c5e2c452e87b9
+index 0000000..a07cccb
 --- /dev/null
 +++ b/tools/server/server-inference-iteration.h
 @@ -0,0 +1,47 @@
@@ -5410,7 +6302,7 @@ index 0000000000000000000000000000000000000000..a07cccb23dc6bce904cb8952e28c5e2c
 +};
 diff --git a/tools/server/server-inference-scheduler.cpp b/tools/server/server-inference-scheduler.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..44d995d890b192aa9b3b8de28666e17ef8639ebb
+index 0000000..44d995d
 --- /dev/null
 +++ b/tools/server/server-inference-scheduler.cpp
 @@ -0,0 +1,227 @@
@@ -5643,7 +6535,7 @@ index 0000000000000000000000000000000000000000..44d995d890b192aa9b3b8de28666e17e
 +}
 diff --git a/tools/server/server-inference-scheduler.h b/tools/server/server-inference-scheduler.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ac2298059945df08cf06cdff7847505be9c07723
+index 0000000..ac22980
 --- /dev/null
 +++ b/tools/server/server-inference-scheduler.h
 @@ -0,0 +1,106 @@
@@ -5755,7 +6647,7 @@ index 0000000000000000000000000000000000000000..ac2298059945df08cf06cdff7847505b
 +};
 diff --git a/tools/server/server-kv-block-backend.cpp b/tools/server/server-kv-block-backend.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e82bc2bd2ceb3e27a73a41226ebed7f6249873cf
+index 0000000..e82bc2b
 --- /dev/null
 +++ b/tools/server/server-kv-block-backend.cpp
 @@ -0,0 +1,226 @@
@@ -5987,7 +6879,7 @@ index 0000000000000000000000000000000000000000..e82bc2bd2ceb3e27a73a41226ebed7f6
 +}
 diff --git a/tools/server/server-kv-block-backend.h b/tools/server/server-kv-block-backend.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..239949982c5088c59365e07c6b3ad3c7ad5d87b7
+index 0000000..2399499
 --- /dev/null
 +++ b/tools/server/server-kv-block-backend.h
 @@ -0,0 +1,110 @@
@@ -6103,7 +6995,7 @@ index 0000000000000000000000000000000000000000..239949982c5088c59365e07c6b3ad3c7
 +#endif
 diff --git a/tools/server/server-kv-block-cuda.cu b/tools/server/server-kv-block-cuda.cu
 new file mode 100644
-index 0000000000000000000000000000000000000000..c6d6ce0b75041e2159e6ddac9b1221536b59cfcc
+index 0000000..c6d6ce0
 --- /dev/null
 +++ b/tools/server/server-kv-block-cuda.cu
 @@ -0,0 +1,576 @@
@@ -6685,7 +7577,7 @@ index 0000000000000000000000000000000000000000..c6d6ce0b75041e2159e6ddac9b122153
 +}
 diff --git a/tools/server/server-kv-block-manager.cpp b/tools/server/server-kv-block-manager.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..00aca39ad3f8e76b82ab190b6c14bcb597eb976d
+index 0000000..00aca39
 --- /dev/null
 +++ b/tools/server/server-kv-block-manager.cpp
 @@ -0,0 +1,405 @@
@@ -7096,7 +7988,7 @@ index 0000000000000000000000000000000000000000..00aca39ad3f8e76b82ab190b6c14bcb5
 +}
 diff --git a/tools/server/server-kv-block-manager.h b/tools/server/server-kv-block-manager.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..262f13310645b20b4b00914e4808d57a1bbb7bde
+index 0000000..262f133
 --- /dev/null
 +++ b/tools/server/server-kv-block-manager.h
 @@ -0,0 +1,127 @@
@@ -7229,7 +8121,7 @@ index 0000000000000000000000000000000000000000..262f13310645b20b4b00914e4808d57a
 +};
 diff --git a/tools/server/server-kv-capacity-planner.cpp b/tools/server/server-kv-capacity-planner.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d65bef67b7b41c935c2e5f204d49a598aae60676
+index 0000000..d65bef6
 --- /dev/null
 +++ b/tools/server/server-kv-capacity-planner.cpp
 @@ -0,0 +1,51 @@
@@ -7286,7 +8178,7 @@ index 0000000000000000000000000000000000000000..d65bef67b7b41c935c2e5f204d49a598
 +}
 diff --git a/tools/server/server-kv-capacity-planner.h b/tools/server/server-kv-capacity-planner.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ad1db6cbf2be5615f2e6830757cd628d3c54d1fa
+index 0000000..ad1db6c
 --- /dev/null
 +++ b/tools/server/server-kv-capacity-planner.h
 @@ -0,0 +1,41 @@
@@ -7333,7 +8225,7 @@ index 0000000000000000000000000000000000000000..ad1db6cbf2be5615f2e6830757cd628d
 +};
 diff --git a/tools/server/server-kv-runtime.cpp b/tools/server/server-kv-runtime.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..79ae1c2f765d8f7723b4ce444e98bc7bb84f49d0
+index 0000000..79ae1c2
 --- /dev/null
 +++ b/tools/server/server-kv-runtime.cpp
 @@ -0,0 +1,179 @@
@@ -7518,7 +8410,7 @@ index 0000000000000000000000000000000000000000..79ae1c2f765d8f7723b4ce444e98bc7b
 +}
 diff --git a/tools/server/server-kv-runtime.h b/tools/server/server-kv-runtime.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ed288a0c43b0842d31c5acc24d89ca39f5e9f8e5
+index 0000000..ed288a0
 --- /dev/null
 +++ b/tools/server/server-kv-runtime.h
 @@ -0,0 +1,73 @@
@@ -7597,7 +8489,7 @@ index 0000000000000000000000000000000000000000..ed288a0c43b0842d31c5acc24d89ca39
 +};
 diff --git a/tools/server/server-kv-swap-store.cpp b/tools/server/server-kv-swap-store.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d36d7f397d338abb93436c5ada1e4b3a64161d41
+index 0000000..d36d7f3
 --- /dev/null
 +++ b/tools/server/server-kv-swap-store.cpp
 @@ -0,0 +1,309 @@
@@ -7912,7 +8804,7 @@ index 0000000000000000000000000000000000000000..d36d7f397d338abb93436c5ada1e4b3a
 +}
 diff --git a/tools/server/server-kv-swap-store.h b/tools/server/server-kv-swap-store.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..b0f88424d6f2c1f316760c8e75c1947c20b25587
+index 0000000..b0f8842
 --- /dev/null
 +++ b/tools/server/server-kv-swap-store.h
 @@ -0,0 +1,64 @@
@@ -7982,7 +8874,7 @@ index 0000000000000000000000000000000000000000..b0f88424d6f2c1f316760c8e75c1947c
 +        const std::filesystem::path & directory, size_t budget_bytes);
 diff --git a/tools/server/server-model-cost-model.cpp b/tools/server/server-model-cost-model.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..f00486583c5e6e255ffcf74b79da9f81d551d7d8
+index 0000000..f004865
 --- /dev/null
 +++ b/tools/server/server-model-cost-model.cpp
 @@ -0,0 +1,92 @@
@@ -8080,7 +8972,7 @@ index 0000000000000000000000000000000000000000..f00486583c5e6e255ffcf74b79da9f81
 +}
 diff --git a/tools/server/server-model-cost-model.h b/tools/server/server-model-cost-model.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a5cc17d0fd874bb4476e38ce6bdb0be9cedf11ef
+index 0000000..a5cc17d
 --- /dev/null
 +++ b/tools/server/server-model-cost-model.h
 @@ -0,0 +1,36 @@
@@ -8122,7 +9014,7 @@ index 0000000000000000000000000000000000000000..a5cc17d0fd874bb4476e38ce6bdb0be9
 +};
 diff --git a/tools/server/server-runtime-adapter.cpp b/tools/server/server-runtime-adapter.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..056ed91501aa407a4962bf164fa40edb77a1627b
+index 0000000..056ed91
 --- /dev/null
 +++ b/tools/server/server-runtime-adapter.cpp
 @@ -0,0 +1,63 @@
@@ -8191,7 +9083,7 @@ index 0000000000000000000000000000000000000000..056ed91501aa407a4962bf164fa40edb
 +}
 diff --git a/tools/server/server-runtime-adapter.h b/tools/server/server-runtime-adapter.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..b99df52667db07bd318535f75f9422d392dafab7
+index 0000000..b99df52
 --- /dev/null
 +++ b/tools/server/server-runtime-adapter.h
 @@ -0,0 +1,39 @@
@@ -8236,7 +9128,7 @@ index 0000000000000000000000000000000000000000..b99df52667db07bd318535f75f9422d3
 +std::unique_ptr<server_runtime_adapter> server_create_llama_runtime();
 diff --git a/tools/server/server-speculation-controller.cpp b/tools/server/server-speculation-controller.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1418d067f349f3e963c3383e6a9633c35a40821a
+index 0000000..1418d06
 --- /dev/null
 +++ b/tools/server/server-speculation-controller.cpp
 @@ -0,0 +1,94 @@
@@ -8336,7 +9228,7 @@ index 0000000000000000000000000000000000000000..1418d067f349f3e963c3383e6a9633c3
 +}
 diff --git a/tools/server/server-speculation-controller.h b/tools/server/server-speculation-controller.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..3b0b46a725d4e8b539d5c334f36de3fa4d90bb12
+index 0000000..3b0b46a
 --- /dev/null
 +++ b/tools/server/server-speculation-controller.h
 @@ -0,0 +1,56 @@
@@ -8397,7 +9289,7 @@ index 0000000000000000000000000000000000000000..3b0b46a725d4e8b539d5c334f36de3fa
 +    server_speculation_state & get_or_create(int sequence_id);
 +};
 diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
-index 72a4bd076ad7d2011521fca6f9472e04bf58a517..53cf7d2d2b7bc4fbc831209e5422fea2f1688424 100644
+index 72a4bd0..53cf7d2 100644
 --- a/tools/server/server-task.cpp
 +++ b/tools/server/server-task.cpp
 @@ -1895,6 +1895,7 @@ json server_task_result_metrics::to_json() {
@@ -8477,7 +9369,7 @@ index 72a4bd076ad7d2011521fca6f9472e04bf58a517..53cf7d2d2b7bc4fbc831209e5422fea2
      };
  }
 diff --git a/tools/server/server-task.h b/tools/server/server-task.h
-index bdadcff765271df832ff93871ee7b42b60077bfd..36974933d5feea18b664bf959027e257e4eef70b 100644
+index bdadcff..615ac36 100644
 --- a/tools/server/server-task.h
 +++ b/tools/server/server-task.h
 @@ -10,6 +10,11 @@
@@ -8548,7 +9440,7 @@ index bdadcff765271df832ff93871ee7b42b60077bfd..36974933d5feea18b664bf959027e257
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -532,6 +558,59 @@ struct server_task_result_metrics : server_task_result {
+@@ -532,6 +558,60 @@ struct server_task_result_metrics : server_task_result {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -8577,6 +9469,7 @@ index bdadcff765271df832ff93871ee7b42b60077bfd..36974933d5feea18b664bf959027e257
 +    double speculation_net_saved_ms = 0.0;
 +    server_benefit_snapshot benefit_cpu;
 +    server_benefit_snapshot benefit_cuda;
++    server_benefit_persistence_snapshot benefit_persistence;
 +
 +    uint64_t kv_cache_tokens          = 0;
 +    uint64_t kv_cache_capacity_tokens = 0;

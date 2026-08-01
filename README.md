@@ -2,7 +2,7 @@
 
 CacheFlow Runtime 是一个直接重构 llama.cpp 推理热路径的单机 LLM Serving / AI Infra 项目。它不是 Python 包装层，也不把 `vendor/` 中的上游源码算作个人工作量：个人实现以固定上游 `acd79d603` 为基线，通过可重放 patch 进入真实 `llama-server -> llama_decode -> KV memory -> CUDA` 调用链。
 
-当前 fork 相对固定上游涉及 56 个文件，新增 7,533 行、删除 99 行 C/C++/CUDA；最终以可重放 patch 的 `git diff --stat` 为准。外层 Python 仅负责固定实验、故障注入和报告。
+当前 fork 相对固定上游涉及 59 个文件，新增 8,401 行、删除 99 行 C/C++/CUDA；最终以可重放 patch 的 `git diff --stat` 为准。外层 Python 仅负责固定实验、故障注入和报告。
 
 ## 实现了什么
 
@@ -47,9 +47,9 @@ flowchart LR
 - Adaptive Prefill：CUDA 在线 cost model 在最终轮避开错误 fixed-64，但略劣于 greedy/fixed-256；CPU 历史在线动作曾劣于所有候选，现按 backend bucket 选择 `chunk=0` greedy 安全动作，并由 2% 回归门槛阻止再次静默退化。
 - Gather/Scatter：完全不重叠时 per-block memcpy 更快，因此生产实现只在重叠/重复映射需要 snapshot 语义时使用 staging kernel。
 - Mixed prefill/decode：CPU 在两轮 3-trial 验收中都改善尾延迟/吞吐；CUDA 两轮的 latency/吞吐结论反号，虽然 TTFT P95 均改善，但样本不足以声称稳定端到端收益，因此当前不应对所有 CUDA workload 默认启用。
-- Conservative Benefit Gating：最终 CPU/CUDA 各 10-trial Latin 验收中，CPU learned objective median 3997.56 ms、paired upstream regression -12.46%、paired-oracle regret 16.34%；CUDA 209.74 ms、paired regression -6.17%、paired-oracle regret 2.44%。两端均通过原 3%/20% 与 harmful wrong-enable 门槛。短生命周期采用 backend-local 风险预算：CPU 19 次有限探索，CUDA 0 次 probe 并 fail closed；positive-lower-bound 均为 0，不把冷启动门禁冒充在线收敛。
-- 长驻在线学习：单一 CUDA server PID 连续 53 waves，生产级 `confidence_beta=1.0`、每动作最少 12 个样本；冷启动 0 次提前启用，稳定阶段 17 次探索后产生 143 次 positive-lower-bound，覆盖 39 个 wave、最长连续 35 waves；终态预测收益 11.24 ms 对不确定性 5.27 ms；切换后 0 次 CacheFlow、3 次安全回退。
-- CUDA profiling 因果链：3 组 paired Latin upstream/always 干预中，强制 CacheFlow 中位使决策 +15、prefill chunk +23、prefill token -145、KV copy -2,519,000 B、CUDA Event -0.260 ms、GPU busy +1.19%，最终 Engine execute +31,230 us、TTFT P95 +44.79 ms。CUDA 搬运指标改善但服务尾延迟恶化，证据指向分块/排队效应不能由单一 kernel 指标代表；范围不冒充完整 Nsight kernel census。
+- Conservative Benefit Gating：最终 CPU/CUDA 各 10-trial Latin 验收中，CPU learned objective median 4177.39 ms、paired upstream regression -18.11%、paired-oracle regret 15.35%；CUDA 190.70 ms、paired regression -2.82%、paired-oracle regret 1.02%。两端均通过原 3%/20% 与 harmful wrong-enable 门槛。短生命周期采用 backend-local 风险预算：CPU 15 次有限探索，CUDA 0 次 probe 并 fail closed；positive-lower-bound 均为 0，不把冷启动门禁冒充在线收敛。
+- 长驻在线学习：单一 CUDA server PID 连续 53 waves，生产级 `confidence_beta=1.0`、每动作最少 12 个样本；冷启动 0 次提前启用，稳定阶段 18 次探索后产生 142 次 positive-lower-bound，覆盖 33 个 wave、最长连续 13 waves；终态预测收益 21.29 ms 对不确定性 8.82 ms；切换后 0 次 CacheFlow、3 次安全回退。
+- CUDA profiling 因果链：3 组 paired Latin upstream/always 干预中，强制 CacheFlow 中位使决策 +13、prefill chunk +23、prefill token -354、自研 KV kernel +2、KV copy +20,066,300 B、CUDA Event +0.808 ms，Engine execute 汇总 -11,446 us，但 TTFT P95 +85.61 ms。说明总 execute 时间下降仍可能因分块、批次顺序和请求等待结构而恶化尾延迟，单个 kernel 或 phase 汇总不能替代请求级结果；范围不冒充完整 Nsight kernel census。
 - Production Engine trace：最终 CPU mixed workload 中 execute 占 99.9145%，plan 仅 0.0148%；`results/engine-flame.svg` 是 phase-duration 图，不是 sampled-stack flame graph。
 
 所有性能 A/B 结论至少 3 次 fresh-process trial；功能 smoke 和 Engine trace 不冒充多 trial 性能结论。汇总位于 `results/`，原始 trial 位于 `results/raw/`。硬件、模型和负结果边界见 [实验限制](docs/experiment-limitations.md)。
@@ -110,6 +110,15 @@ Windows WDDM 首次运行前需要以管理员身份执行 CUDA Toolkit 的 `Ena
 ```
 
 `upstream` 模式关闭行为变化。最终生效配置会导出到 Prometheus，避免实验参数被静默忽略。完整参数和约束见 [架构文档](docs/architecture.md)。
+
+## 生产运行
+
+生产入口不是 benchmark 脚本，而是 `scripts/start_production.ps1`。它强制使用 API key 文件、只绑定 loopback、为每个副本建立独立在线模型 checkpoint，并用模型 SHA-256/主机/后端/批处理形态阻止错误状态恢复。真实跨进程恢复、损坏降级、指标和当前部署边界见 [生产准入与运行手册](docs/production-readiness.md)。
+
+```powershell
+.\scripts\start_production.ps1 -ModelPath .\models\qwen2.5-0.5b-instruct-q4_k_m.gguf `
+  -ApiKeyFile D:\secrets\cacheflow-api-keys.txt -Backend cuda -InstanceId gpu0
+```
 
 ## 代码边界
 
