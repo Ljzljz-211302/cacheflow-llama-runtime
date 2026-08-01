@@ -2,7 +2,7 @@
 <div class="kicker">Lesson 08 · 综合演练 · 90 min</div><h1>把项目讲成“可验证的个人研究工作”</h1><p class="lead">本节目标：形成 30 秒、3 分钟和 15 分钟三种叙事；用追问清单检验自己是否真正掌握，而非背稿。</p>
 <h2>1. 30 秒版本</h2><div class="card"><p>我基于固定版本 llama.cpp，在真实 <code>llama-server → llama_decode → KV → CUDA</code> 热路径上实现了 CacheFlow Runtime。核心工作包括 iteration-level Engine、cache-aware scheduler、Paged Prefix KV/COW、Host/File/CUDA swap、自研 KV kernels，以及用在线 Ridge 置信下界控制 CacheFlow 是否启用。我用真实模型、Compute Sanitizer、故障注入、多 trial A/B 和 CUDA→Engine→TTFT 因果链验证；同时保留负结果，不声称所有 CUDA workload 都提升。</p></div>
 <h2>2. 三分钟结构</h2><ol><li><strong>问题：</strong>LLM serving 的 prefill/decode 干扰、KV 动态内存和固定策略跨 backend 失效。</li><li><strong>架构：</strong>把循环拆成 prepare/plan/execute/commit；Scheduler、KV manager、runtime adapter 通过窄接口协作。</li><li><strong>算法：</strong>block table/refcount/COW；chunk/spec 控制；backend-local online Ridge + confidence gating。</li><li><strong>CUDA：</strong>真实 tensor gather/scatter/COW、direct/staging 分流、stream/event 生命周期和 sanitizer。</li><li><strong>证据：</strong>53-wave 收敛；paired CUDA 因果链；严格 full gate。</li><li><strong>边界：</strong>单机 0.5B/4050、无 Nsight 全 census、mixed CUDA 收益不稳定。</li></ol>
-<h2>3. 个人贡献边界</h2><p>上游提供 GGUF、GGML 图与通用算子、模型实现、sampling、HTTP 基础设施；个人差异以固定上游 patch 为准：59 files、+8401/−99 C/C++/CUDA，外层另有实验与报告。正确说法是“重构并扩展固定上游的 serving 热路径”，不是“重写了 llama.cpp”。</p>
+<h2>3. 个人贡献边界</h2><p>上游提供 GGUF、GGML 图与通用算子、模型实现、sampling、HTTP 基础设施；个人差异以固定上游 patch 为准：59 files、+8445/−99 C/C++/CUDA，外层另有实验与报告。正确说法是“重构并扩展固定上游的 serving 热路径”，不是“重写了 llama.cpp”。</p>
 <h2>4. 高频追问与答题骨架</h2><table><thead><tr><th>追问</th><th>答案必须包含</th></tr></thead><tbody>
 <tr><td>为什么这是 AI Infra？</td><td>真实 serving 热路径、KV/CUDA/调度/性能—正确性权衡，不是 Python API 包装。</td></tr>
 <tr><td>为什么不用 vLLM？</td><td>学习目标是深入 llama.cpp 单机 C++/CUDA；借鉴 paging 思想但自行接入固定上游；不做无意义优劣宣称。</td></tr>

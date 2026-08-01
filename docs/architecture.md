@@ -987,9 +987,9 @@ sequenceDiagram
 
 ### Phase 10：面试交付——已完成
 
-- 一键构建、测试、Sanitizer 和 benchmark 已纳入 `verify.ps1 -Full`，2026-08-01 最终提交版本整链 1224.9 秒通过；
+- 一键构建、测试、Sanitizer 和 benchmark 已纳入 `verify.ps1 -Full`，2026-08-01 最终提交版本整链 1395.4 秒通过；
 - 架构图、生产 Engine trace 火焰图、mixed workload 原始 trial 和自动报告已生成；
-- 当前个人贡献统计为相对固定上游 59 files、+8401/-99；patch 可逆性由全量入口检查；
+- 当前个人贡献统计为相对固定上游 59 files、+8445/-99；patch 可逆性由全量入口检查；
 - 三分钟演示、算法/状态/失败模式/实验限制深挖手册已完成。
 
 ## 16. 当前代码到目标 Module 的映射

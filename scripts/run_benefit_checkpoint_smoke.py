@@ -84,7 +84,11 @@ def start(log: object) -> subprocess.Popen[bytes]:
         stderr=subprocess.STDOUT,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    wait_until_ready(BASE_URL, process=process, log_path=LOG)
+    try:
+        wait_until_ready(BASE_URL, process=process, log_path=LOG)
+    except BaseException:
+        stop(process)
+        raise
     return process
 
 

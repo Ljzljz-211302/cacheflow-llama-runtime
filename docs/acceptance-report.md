@@ -10,7 +10,7 @@
 
 ## 当前结论
 
-本轮严格验收已通过。2026-08-01 最终提交版本通过唯一入口 `scripts/verify.ps1 -Full`，完整运行 1224.9 秒并以 0 退出；覆盖架构/patch 门禁、CPU/upstream/CUDA 构建、全部 C++/Python 测试、Compute Sanitizer、功能/故障/兼容/模型/性能/质量矩阵、CPU/CUDA 各 10-trial Conservative Benefit Gating，以及新增的 53-wave 长驻收敛和 3-pair CUDA 因果 profiling。
+本轮严格验收已通过。2026-08-01 最终提交版本通过唯一入口 `scripts/verify.ps1 -Full`，完整运行 1395.4 秒并以 0 退出；覆盖架构/patch 门禁、CPU/upstream/CUDA 构建、全部 C++/Python 测试、Compute Sanitizer、功能/故障/兼容/模型/性能/质量矩阵、真实三进程 checkpoint 恢复/损坏降级、CPU/CUDA 各 10-trial Conservative Benefit Gating，以及 53-wave 长驻收敛和 3-pair CUDA 因果 profiling。
 
 “存在代码”“单元测试通过”和“生产路径通过”是三个不同层级。本报告只把有生产 smoke 或真实模型证据的条目标为生产接入。
 
@@ -117,7 +117,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 
 ## 个人贡献边界
 
-固定上游提供 GGUF/模型 graph、GGML 通用算子、既有 backend、HTTP 基础设施和 sampling。个人差异是 Engine 拆分、Scheduler、KV 资源/块/事务 Swap、真实 CUDA KV Adapter 与 kernels、自适应/收益门控、在线策略持久化、metrics、fault injection 和复现实验。当前相对固定上游为 59 files、+8401/-99。代码量只统计该 patch；不得把 `vendor/llama.cpp` 原有代码算作个人实现，也不得声称“重写了 llama.cpp”。
+固定上游提供 GGUF/模型 graph、GGML 通用算子、既有 backend、HTTP 基础设施和 sampling。个人差异是 Engine 拆分、Scheduler、KV 资源/块/事务 Swap、真实 CUDA KV Adapter 与 kernels、自适应/收益门控、在线策略持久化、metrics、fault injection 和复现实验。当前相对固定上游为 59 files、+8445/-99。代码量只统计该 patch；不得把 `vendor/llama.cpp` 原有代码算作个人实现，也不得声称“重写了 llama.cpp”。
 
 ### 生产重启与状态损坏
 

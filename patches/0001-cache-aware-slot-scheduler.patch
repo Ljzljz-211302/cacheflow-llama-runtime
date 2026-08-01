@@ -1495,10 +1495,10 @@ index 0000000..3af8e59
 +}
 diff --git a/tests/test-benefit-checkpoint.cpp b/tests/test-benefit-checkpoint.cpp
 new file mode 100644
-index 0000000..b771e4b
+index 0000000..910e019
 --- /dev/null
 +++ b/tests/test-benefit-checkpoint.cpp
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,158 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -1512,6 +1512,7 @@ index 0000000..b771e4b
 +#include <fstream>
 +#include <memory>
 +#include <mutex>
++#include <stdexcept>
 +#include <string>
 +#include <vector>
 +
@@ -1550,6 +1551,16 @@ index 0000000..b771e4b
 +    bool save(const std::string &, std::string & error) override {
 +        error = "injected disk failure";
 +        return false;
++    }
++};
++
++class throwing_store final : public server_benefit_checkpoint_store {
++public:
++    server_benefit_checkpoint_load_result load() override {
++        throw std::runtime_error("injected load exception");
++    }
++    bool save(const std::string &, std::string &) override {
++        throw std::runtime_error("injected save exception");
 +    }
 +};
 +
@@ -1594,10 +1605,21 @@ index 0000000..b771e4b
 +        assert(checkpoint.snapshot().save_failures == 1);
 +    }
 +
++    // Store implementations are an exception boundary: a filesystem/library
++    // exception must degrade to status, wake flush(), and never kill the server.
++    {
++        server_benefit_checkpoint checkpoint(std::make_unique<throwing_store>());
++        assert(checkpoint.load().status ==
++                server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_IO_ERROR);
++        checkpoint.enqueue("state");
++        assert(!checkpoint.flush());
++        assert(checkpoint.snapshot().save_failures == 1);
++    }
++
 +    {
 +        server_benefit_checkpoint checkpoint(server_benefit_create_file_checkpoint_store(path));
 +        const auto missing = checkpoint.load();
-+        assert(missing.status == server_benefit_checkpoint_load_status::missing);
++        assert(missing.status == server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_MISSING);
 +
 +        // The producer never waits for disk I/O. A one-element latest-value
 +        // queue coalesces obsolete snapshots instead of growing without bound.
@@ -1615,7 +1637,7 @@ index 0000000..b771e4b
 +    {
 +        server_benefit_checkpoint checkpoint(server_benefit_create_file_checkpoint_store(path));
 +        const auto restored = checkpoint.load();
-+        assert(restored.status == server_benefit_checkpoint_load_status::restored);
++        assert(restored.status == server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_RESTORED);
 +        assert(restored.payload == "generation-3");
 +    }
 +
@@ -1627,7 +1649,7 @@ index 0000000..b771e4b
 +    {
 +        server_benefit_checkpoint checkpoint(server_benefit_create_file_checkpoint_store(path));
 +        const auto restored = checkpoint.load();
-+        assert(restored.status == server_benefit_checkpoint_load_status::restored);
++        assert(restored.status == server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_RESTORED);
 +        assert(restored.payload == "generation-3");
 +    }
 +
@@ -3103,10 +3125,10 @@ index 7d42743..b0c1d87 100644
  set(TARGET llama-server-impl)
 diff --git a/tools/server/server-benefit-checkpoint.cpp b/tools/server/server-benefit-checkpoint.cpp
 new file mode 100644
-index 0000000..a2e374a
+index 0000000..f8a8bcb
 --- /dev/null
 +++ b/tools/server/server-benefit-checkpoint.cpp
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,215 @@
 +#include "server-benefit-checkpoint.h"
 +
 +#include <cerrno>
@@ -3138,23 +3160,23 @@ index 0000000..a2e374a
 +    server_benefit_checkpoint_load_result load() override {
 +        std::error_code ec;
 +        if (!std::filesystem::exists(path_, ec)) {
-+            if (ec) return {server_benefit_checkpoint_load_status::io_error, {}, ec.message()};
++            if (ec) return {server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_IO_ERROR, {}, ec.message()};
 +            return {};
 +        }
 +        const auto size = std::filesystem::file_size(path_, ec);
-+        if (ec) return {server_benefit_checkpoint_load_status::io_error, {}, ec.message()};
++        if (ec) return {server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_IO_ERROR, {}, ec.message()};
 +        if (size > maximum_checkpoint_bytes) {
-+            return {server_benefit_checkpoint_load_status::io_error, {}, "checkpoint exceeds 4 MiB limit"};
++            return {server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_IO_ERROR, {}, "checkpoint exceeds 4 MiB limit"};
 +        }
 +        std::ifstream input(path_, std::ios::binary);
 +        if (!input) {
-+            return {server_benefit_checkpoint_load_status::io_error, {}, "cannot open checkpoint for reading"};
++            return {server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_IO_ERROR, {}, "cannot open checkpoint for reading"};
 +        }
 +        std::string payload((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
 +        if (!input.good() && !input.eof()) {
-+            return {server_benefit_checkpoint_load_status::io_error, {}, "checkpoint read failed"};
++            return {server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_IO_ERROR, {}, "checkpoint read failed"};
 +        }
-+        return {server_benefit_checkpoint_load_status::restored, std::move(payload), {}};
++        return {server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_RESTORED, std::move(payload), {}};
 +    }
 +
 +    bool save(const std::string & payload, std::string & error) override {
@@ -3252,10 +3274,18 @@ index 0000000..a2e374a
 +server_benefit_checkpoint_load_result server_benefit_checkpoint::load() {
 +    std::lock_guard<std::mutex> lock(mutex_);
 +    if (pending_ || writing_ || enqueued_ != 0) {
-+        return {server_benefit_checkpoint_load_status::io_error, {},
++        return {server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_IO_ERROR, {},
 +                "checkpoint load is only valid before the first enqueue"};
 +    }
-+    return store_->load();
++    try {
++        return store_->load();
++    } catch (const std::exception & exception) {
++        return {server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_IO_ERROR,
++                {}, exception.what()};
++    } catch (...) {
++        return {server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_IO_ERROR,
++                {}, "unknown checkpoint load failure"};
++    }
 +}
 +
 +void server_benefit_checkpoint::enqueue(std::string payload) {
@@ -3296,7 +3326,14 @@ index 0000000..a2e374a
 +            writing_ = true;
 +        }
 +        std::string error;
-+        const bool saved = store_->save(payload, error);
++        bool saved = false;
++        try {
++            saved = store_->save(payload, error);
++        } catch (const std::exception & exception) {
++            error = exception.what();
++        } catch (...) {
++            error = "unknown checkpoint save failure";
++        }
 +        {
 +            std::lock_guard<std::mutex> lock(mutex_);
 +            writing_ = false;
@@ -3309,10 +3346,10 @@ index 0000000..a2e374a
 +}
 diff --git a/tools/server/server-benefit-checkpoint.h b/tools/server/server-benefit-checkpoint.h
 new file mode 100644
-index 0000000..609dc02
+index 0000000..3ef4495
 --- /dev/null
 +++ b/tools/server/server-benefit-checkpoint.h
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,77 @@
 +#pragma once
 +
 +#include <condition_variable>
@@ -3324,13 +3361,14 @@ index 0000000..609dc02
 +#include <thread>
 +
 +enum class server_benefit_checkpoint_load_status {
-+    missing,
-+    restored,
-+    io_error,
++    SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_MISSING,
++    SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_RESTORED,
++    SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_IO_ERROR,
 +};
 +
 +struct server_benefit_checkpoint_load_result {
-+    server_benefit_checkpoint_load_status status = server_benefit_checkpoint_load_status::missing;
++    server_benefit_checkpoint_load_status status =
++            server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_MISSING;
 +    std::string payload;
 +    std::string error;
 +};
@@ -3391,10 +3429,10 @@ index 0000000..609dc02
 +};
 diff --git a/tools/server/server-benefit-policy.cpp b/tools/server/server-benefit-policy.cpp
 new file mode 100644
-index 0000000..436f8b5
+index 0000000..31a907c
 --- /dev/null
 +++ b/tools/server/server-benefit-policy.cpp
-@@ -0,0 +1,576 @@
+@@ -0,0 +1,578 @@
 +#include "server-benefit-policy.h"
 +
 +#include <algorithm>
@@ -3571,12 +3609,12 @@ index 0000000..436f8b5
 +        checkpoint_ = std::make_unique<server_benefit_checkpoint>(
 +                server_benefit_create_file_checkpoint_store(config_.checkpoint_path));
 +        const auto loaded = checkpoint_->load();
-+        if (loaded.status == server_benefit_checkpoint_load_status::restored) {
++        if (loaded.status == server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_RESTORED) {
 +            const auto result = restore_checkpoint(loaded.payload);
-+            if (result == restore_result::restored) checkpoints_restored_++;
-+            else if (result == restore_result::incompatible) checkpoints_incompatible_++;
++            if (result == checkpoint_restore_result::SERVER_BENEFIT_CHECKPOINT_RESTORE_RESULT_RESTORED) checkpoints_restored_++;
++            else if (result == checkpoint_restore_result::SERVER_BENEFIT_CHECKPOINT_RESTORE_RESULT_INCOMPATIBLE) checkpoints_incompatible_++;
 +            else checkpoint_restore_failures_++;
-+        } else if (loaded.status == server_benefit_checkpoint_load_status::io_error) {
++        } else if (loaded.status == server_benefit_checkpoint_load_status::SERVER_BENEFIT_CHECKPOINT_LOAD_STATUS_IO_ERROR) {
 +            checkpoint_restore_failures_++;
 +        }
 +    }
@@ -3833,24 +3871,26 @@ index 0000000..436f8b5
 +    return envelope.dump();
 +}
 +
-+server_benefit_policy::restore_result server_benefit_policy::restore_checkpoint(
++server_benefit_policy::checkpoint_restore_result server_benefit_policy::restore_checkpoint(
 +        const std::string & payload) {
 +    try {
 +        const checkpoint_json envelope = checkpoint_json::parse(payload);
 +        if (envelope.at("schema_version").get<int>() != 1 ||
 +                envelope.at("feature_count").get<size_t>() != feature_count) {
-+            return restore_result::incompatible;
++            return checkpoint_restore_result::SERVER_BENEFIT_CHECKPOINT_RESTORE_RESULT_INCOMPATIBLE;
 +        }
 +        const std::string compatibility = envelope.at("compatibility_key").get<std::string>();
 +        const checkpoint_json configuration = envelope.at("configuration");
 +        if (compatibility != config_.checkpoint_compatibility_key ||
 +                configuration != checkpoint_configuration(config_)) {
-+            return restore_result::incompatible;
++            return checkpoint_restore_result::SERVER_BENEFIT_CHECKPOINT_RESTORE_RESULT_INCOMPATIBLE;
 +        }
 +        const checkpoint_json & state_json = envelope.at("state");
 +        const uint32_t expected_crc = checkpoint_crc32(
 +                checkpoint_checksum_input(compatibility, configuration, state_json));
-+        if (envelope.at("crc32").get<uint32_t>() != expected_crc) return restore_result::invalid;
++        if (envelope.at("crc32").get<uint32_t>() != expected_crc) {
++            return checkpoint_restore_result::SERVER_BENEFIT_CHECKPOINT_RESTORE_RESULT_INVALID;
++        }
 +
 +        auto finite = [](double value) {
 +            return std::isfinite(value) && std::abs(value) <= 1e18;
@@ -3935,9 +3975,9 @@ index 0000000..436f8b5
 +        cpu_ = std::move(restored_cpu);
 +        cuda_ = std::move(restored_cuda);
 +        next_id_ = restored_next_id;
-+        return restore_result::restored;
++        return checkpoint_restore_result::SERVER_BENEFIT_CHECKPOINT_RESTORE_RESULT_RESTORED;
 +    } catch (...) {
-+        return restore_result::invalid;
++        return checkpoint_restore_result::SERVER_BENEFIT_CHECKPOINT_RESTORE_RESULT_INVALID;
 +    }
 +}
 +
@@ -3973,10 +4013,10 @@ index 0000000..436f8b5
 +}
 diff --git a/tools/server/server-benefit-policy.h b/tools/server/server-benefit-policy.h
 new file mode 100644
-index 0000000..ce7efcc
+index 0000000..9e4bc3b
 --- /dev/null
 +++ b/tools/server/server-benefit-policy.h
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,179 @@
 +#pragma once
 +
 +#include "server-benefit-checkpoint.h"
@@ -4149,8 +4189,12 @@ index 0000000..ce7efcc
 +    const backend_state & state(server_benefit_backend backend) const;
 +    std::array<double, feature_count> normalize(const server_benefit_features & features) const;
 +    std::string encode_checkpoint() const;
-+    enum class restore_result { restored, incompatible, invalid };
-+    restore_result restore_checkpoint(const std::string & payload);
++    enum class checkpoint_restore_result {
++        SERVER_BENEFIT_CHECKPOINT_RESTORE_RESULT_RESTORED,
++        SERVER_BENEFIT_CHECKPOINT_RESTORE_RESULT_INCOMPATIBLE,
++        SERVER_BENEFIT_CHECKPOINT_RESTORE_RESULT_INVALID,
++    };
++    checkpoint_restore_result restore_checkpoint(const std::string & payload);
 +};
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
 index 986b2f1..603894f 100644

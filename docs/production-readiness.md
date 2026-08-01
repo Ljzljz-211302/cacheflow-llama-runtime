@@ -19,7 +19,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\start_production.ps1 `
   -Port 8080
 ```
 
-先用 `-PrintCommand` 做无副作用的配置检查。启动器会验证模型、密钥文件和对应后端二进制，创建独立状态目录，并用“模型 SHA-256 + 主机 + 后端 + context + parallel”生成 checkpoint compatibility key。每个并行副本必须使用不同 `InstanceId`，禁止多个进程写同一个状态文件。
+先用 `-PrintCommand` 做无副作用的配置检查。启动器会验证模型、至少一个非空 API key 和对应后端二进制，关闭 WebUI，创建独立状态目录，并用“模型 SHA-256 + 主机 + 后端 + context + parallel”生成 checkpoint compatibility key。运行期间它会独占 `benefit-<InstanceId>.json.lock`；每个并行副本仍应使用不同 `InstanceId`，误用相同 ID 时第二个进程会在启动前失败，禁止多个进程写同一个状态文件。
 
 ## 在线模型持久化
 

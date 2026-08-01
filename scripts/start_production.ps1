@@ -16,8 +16,9 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $resolvedModel = (Resolve-Path -LiteralPath $ModelPath).Path
 $resolvedApiKey = (Resolve-Path -LiteralPath $ApiKeyFile).Path
-if ((Get-Item -LiteralPath $resolvedApiKey).Length -eq 0) {
-    throw "API key file must not be empty"
+if ((Get-Item -LiteralPath $resolvedApiKey).Length -eq 0 -or
+        -not (Get-Content -LiteralPath $resolvedApiKey | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+    throw "API key file must contain at least one non-empty key"
 }
 
 $stateRoot = if ([IO.Path]::IsPathRooted($StateDirectory)) {
@@ -26,6 +27,7 @@ $stateRoot = if ([IO.Path]::IsPathRooted($StateDirectory)) {
     [IO.Path]::GetFullPath((Join-Path $projectRoot $StateDirectory))
 }
 $checkpointPath = Join-Path $stateRoot "benefit-$InstanceId.json"
+$lockPath = "$checkpointPath.lock"
 
 $server = if ($Backend -eq "cuda") {
     Join-Path $projectRoot "build\patched-cuda-ninja3\bin\llama-server.exe"
@@ -53,6 +55,7 @@ $serverArgs = @(
     "-t", "$Threads",
     "-ngl", $(if ($Backend -eq "cuda") { "99" } else { "0" }),
     "--api-key-file", $resolvedApiKey,
+    "--no-webui",
     "--metrics",
     "--scheduler-policy", "cacheflow",
     "--benefit-policy", "learned",
@@ -71,17 +74,35 @@ if ($PrintCommand) {
         model = $resolvedModel
         api_key_file = $resolvedApiKey
         checkpoint = $checkpointPath
+        instance_lock = $lockPath
         checkpoint_key = $CheckpointKey
     } | ConvertTo-Json
     exit 0
 }
 
 New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
-
-if ($Backend -eq "cuda") {
-    $cudaBin = Join-Path $projectRoot "runtime\cuda-dev\Library\bin"
-    $env:PATH = $cudaBin + [IO.Path]::PathSeparator + $env:PATH
+$lockStream = $null
+try {
+    $lockStream = [IO.File]::Open(
+        $lockPath,
+        [IO.FileMode]::OpenOrCreate,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::None
+    )
+} catch {
+    throw "instance '$InstanceId' already owns checkpoint state or lock is unavailable: $lockPath"
 }
 
-& $server @serverArgs
-exit $LASTEXITCODE
+try {
+    if ($Backend -eq "cuda") {
+        $cudaBin = Join-Path $projectRoot "runtime\cuda-dev\Library\bin"
+        $env:PATH = $cudaBin + [IO.Path]::PathSeparator + $env:PATH
+    }
+
+    & $server @serverArgs
+    $serverExitCode = $LASTEXITCODE
+} finally {
+    $lockStream.Dispose()
+}
+
+exit $serverExitCode

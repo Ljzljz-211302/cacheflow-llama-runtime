@@ -193,11 +193,11 @@
 
 ## 六、必须背熟的数据，但不要只背数据
 
-- 固定上游个人差异：59 files、+8401/−99 C/C++/CUDA；外层实验另计。
+- 固定上游个人差异：59 files、+8445/−99 C/C++/CUDA；外层实验另计。
 - 长驻 CUDA：53 waves；18 exploration；142 positive；33 positive waves；最长连续 13；终态 21.29ms > 8.82ms；shift 后 0 错误启用、3 fallback。
 - 短程 gating：CPU regression −18.11%、oracle regret 15.35%；CUDA −2.82%、1.02%，CUDA fresh-process 0 probe。
 - CUDA causal：decision +13、chunk +23、prefill token −354、copy +20.066MB、Event +0.808ms、Engine 汇总 −11.446ms、TTFT P95 +85.61ms。
-- 最终严格入口：`verify.ps1 -Full`，1224.9 秒，退出 0；51 个 Python 测试及原生/CUDA/兼容/故障/模型/性能门禁通过。
+- 最终严格入口：`verify.ps1 -Full`，1395.4 秒，退出 0；51 个 Python 测试及原生/CUDA/兼容/故障/模型/性能/重启恢复门禁通过。
 
 每个数字必须同时说出“它回答什么”和“它不能证明什么”。
 
