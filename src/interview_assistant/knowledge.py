@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import html
+import math
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -88,6 +90,11 @@ class KnowledgeIndex:
                 self.chunks.extend(_split_document(source, path.stem, _plain_text(path), max_chunk_chars))
         if not self.chunks:
             raise ValueError("knowledge roots contain no supported documents")
+        self._document_frequency = Counter(
+            term
+            for chunk in self.chunks
+            for term in chunk.terms
+        )
 
     def _display_path(self, path: Path) -> str:
         for root in self.roots:
@@ -111,7 +118,12 @@ class KnowledgeIndex:
             if not overlap:
                 continue
             title_terms = _terms(chunk.title)
-            score = sum(2.0 if term in title_terms else 1.0 for term in overlap)
+            score = sum(
+                (5.0 if term in title_terms else 1.0)
+                * (10.0 if ASCII_TOKEN_RE.fullmatch(term) else 1.0)
+                * (math.log((len(self.chunks) + 1) / (self._document_frequency[term] + 1)) + 1.0)
+                for term in overlap
+            )
             score /= max(1.0, len(query_terms) ** 0.5)
             ranked.append((score, chunk))
         ranked.sort(key=lambda item: (-item[0], item[1].source, item[1].title))

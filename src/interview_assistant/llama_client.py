@@ -5,6 +5,8 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator
 
+from .domain import ChatMessage
+
 
 class LlamaUnavailable(RuntimeError):
     pass
@@ -25,13 +27,13 @@ class LlamaClient:
         except (OSError, urllib.error.URLError):
             return False
 
-    def stream(self, messages: list[dict[str, str]], max_tokens: int = 512) -> Iterator[str]:
+    def stream(self, messages: list[ChatMessage], max_tokens: int = 512) -> Iterator[str]:
         payload = json.dumps({
             "model": self.model,
             "messages": messages,
             "stream": True,
             "max_tokens": max_tokens,
-            "temperature": 0.25,
+            "temperature": 0.0,
         }, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base_url}/v1/chat/completions",

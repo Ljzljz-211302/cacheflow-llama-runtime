@@ -80,6 +80,7 @@ class ApplicationHandler(BaseHTTPRequestHandler):
         if not self.server.generation_slots.acquire(blocking=False):
             self._error(HTTPStatus.TOO_MANY_REQUESTS, "all model generation slots are busy")
             return
+        stream = None
         try:
             stream = self.server.service.answer(match.group(1), str(body.get("content", "")))
             self.send_response(HTTPStatus.OK)
@@ -98,6 +99,8 @@ class ApplicationHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
         finally:
+            if stream is not None:
+                stream.close()
             self.server.generation_slots.release()
 
     def _read_json(self) -> dict[str, Any]:

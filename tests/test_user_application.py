@@ -21,6 +21,18 @@ class FakeModel:
         yield "方差衡量对数据扰动的敏感性。[资料1]"
 
 
+class ClosingModel(FakeModel):
+    def __init__(self) -> None:
+        self.closed = False
+
+    def stream(self, messages: list[dict[str, str]], max_tokens: int = 512):
+        try:
+            yield "尚未完成的答案"
+            yield "不应保存"
+        finally:
+            self.closed = True
+
+
 class UserApplicationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -30,6 +42,14 @@ class UserApplicationTests(unittest.TestCase):
         (knowledge_root / "machine-learning.md").write_text(
             "# 偏差与方差\n偏差描述模型预测期望与真实目标之间的差异。"
             "方差描述训练集扰动造成的预测变化。\n# 支持向量机\n间隔最大化。",
+            encoding="utf-8",
+        )
+        (knowledge_root / "generic-questions.md").write_text(
+            "# 面试自测题\n为什么通常使用某种结构？请解释并给出一个面试追问。",
+            encoding="utf-8",
+        )
+        (knowledge_root / "database.md").write_text(
+            "# B+ 树索引\nB+ 树高扇出、低高度，叶子节点有序相连，适合点查和范围查询。",
             encoding="utf-8",
         )
         self.index = KnowledgeIndex([knowledge_root], max_chunk_chars=200)
@@ -46,6 +66,10 @@ class UserApplicationTests(unittest.TestCase):
         self.assertTrue(citations)
         self.assertEqual(citations[0].title, "偏差与方差")
         self.assertEqual(citations[0].source, "knowledge/machine-learning.md")
+
+    def test_rare_technical_term_beats_generic_question_wording(self) -> None:
+        citations = self.index.search("为什么数据库通常使用 B+ 树？")
+        self.assertEqual(citations[0].title, "B+ 树索引")
 
     def test_completed_answer_and_citations_survive_store_restart(self) -> None:
         session = self.store.create_session("机器学习模拟面试")
@@ -102,6 +126,41 @@ class UserApplicationTests(unittest.TestCase):
     def test_non_loopback_binding_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             create_server("0.0.0.0", 0, self.service)
+
+    def test_no_retrieval_match_fails_closed_without_calling_model(self) -> None:
+        session = self.store.create_session()
+        stream = self.service.answer(session["id"], "量子色动力学重整化群")
+        with self.assertRaisesRegex(ValueError, "没有找到可引用依据"):
+            next(stream)
+        self.assertEqual(self.store.messages(session["id"]), [])
+
+    def test_cancelled_stream_closes_model_and_leaves_no_partial_assistant(self) -> None:
+        session = self.store.create_session()
+        model = ClosingModel()
+        service = InterviewService(self.store, self.index, model)
+        stream = service.answer(session["id"], "解释偏差与方差")
+        self.assertEqual(next(stream)["type"], "citations")
+        self.assertEqual(next(stream)["type"], "delta")
+        self.assertEqual(next(stream)["type"], "delta")
+        stream.close()
+        self.assertTrue(model.closed)
+        messages = self.store.messages(session["id"])
+        self.assertEqual([message["role"] for message in messages], ["user"])
+
+    def test_message_and_session_timestamp_are_one_transaction(self) -> None:
+        session = self.store.create_session()
+        with self.store._connection() as connection:
+            connection.execute(
+                """CREATE TRIGGER reject_session_update BEFORE UPDATE ON sessions
+                   BEGIN SELECT RAISE(ABORT, 'injected update failure'); END"""
+            )
+        try:
+            with self.assertRaises(KeyError):
+                self.store.add_message(session["id"], "user", "must roll back")
+        finally:
+            with self.store._connection() as connection:
+                connection.execute("DROP TRIGGER reject_session_update")
+        self.assertEqual(self.store.messages(session["id"]), [])
 
 
 if __name__ == "__main__":

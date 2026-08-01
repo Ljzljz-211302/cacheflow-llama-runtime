@@ -135,3 +135,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 - 当前 10-trial fresh-process 短 trace 没有 positive-lower-bound；在线收敛只由新增 53-wave 单进程 CUDA trace 支持，不能外推其他 GPU、模型或负载；
 - 同工具链输出兼容不等于跨编译器逐字节兼容；
 - 换 GPU、驱动、CUDA 或模型后必须重跑 Sanitizer 和矩阵。
+
+## 用户应用验收
+
+推免面试学习助手已通过真实 CUDA 用户旅程，而非单请求 smoke：两个 fresh application subprocess 覆盖应用重启；三个持久化会话覆盖机器学习续聊、408 独立会话和浏览器取消；两个用户请求并发执行，超出应用生成槽时返回 429。断流后数据库只保留 user 消息，不存在半条 assistant 答案。
+
+本轮原生证据为：603 个 cached prompt token、18 个 prefill chunk、8 次 CUDA KV kernel、2 次 CUDA benefit decision、2 次在线策略 checkpoint，平均 busy slot/decode 为 1.19789；llama 日志同时出现 CUDA0、CacheFlow policy 和 shared prefix。Chromium 浏览器实际完成 B+ 树提问、SSE 回答与资料卡片显示，首条引用命中数据库学习文档 `7.1 B+ 树`。这些数据证明用户应用流量进入 CacheFlow/CUDA 链路，不声称已有外部用户或线上采用率。
