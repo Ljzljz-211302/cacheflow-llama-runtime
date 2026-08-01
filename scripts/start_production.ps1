@@ -8,7 +8,7 @@ param(
     [ValidateRange(512, 1048576)][int]$ContextSize = 8192,
     [ValidateRange(1, 128)][int]$Parallel = 4,
     [ValidateRange(1, 256)][int]$Threads = 8,
-    [string]$CheckpointKey,
+    [ValidatePattern("^[A-Za-z0-9._-]{1,64}$")][string]$CheckpointNamespace = "default",
     [switch]$PrintCommand
 )
 
@@ -38,12 +38,19 @@ if (-not (Test-Path -LiteralPath $server)) {
     throw "server binary missing for backend '$Backend': $server"
 }
 
-# Exact model bytes and the serving envelope prevent latency evidence from a
-# different model, host, backend, or batching shape from being restored.
-if ([string]::IsNullOrWhiteSpace($CheckpointKey)) {
-    $modelSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolvedModel).Hash
-    $machine = [Environment]::MachineName
-    $CheckpointKey = "model_sha256=$modelSha256;host=$machine;backend=$Backend;ctx=$ContextSize;parallel=$Parallel"
+# The caller may partition state with a namespace, but cannot replace the
+# compatibility identity. Exact model bytes and the serving envelope are
+# always included, so evidence cannot cross models or deployment shapes.
+$modelSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolvedModel).Hash
+$machine = [Environment]::MachineName
+$checkpointIdentity = "schema=1;namespace=$CheckpointNamespace;model_sha256=$modelSha256;host=$machine;backend=$Backend;ctx=$ContextSize;parallel=$Parallel"
+$sha256 = [Security.Cryptography.SHA256]::Create()
+try {
+    $identityBytes = [Text.Encoding]::UTF8.GetBytes($checkpointIdentity)
+    $identityHash = $sha256.ComputeHash($identityBytes)
+    $CheckpointKey = "cacheflow-benefit-v1:" + ([BitConverter]::ToString($identityHash).Replace("-", "").ToLowerInvariant())
+} finally {
+    $sha256.Dispose()
 }
 
 $serverArgs = @(
@@ -75,6 +82,7 @@ if ($PrintCommand) {
         api_key_file = $resolvedApiKey
         checkpoint = $checkpointPath
         instance_lock = $lockPath
+        checkpoint_namespace = $CheckpointNamespace
         checkpoint_key = $CheckpointKey
     } | ConvertTo-Json
     exit 0
