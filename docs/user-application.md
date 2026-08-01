@@ -25,6 +25,6 @@ Browser -> Interview Assistant -> local retrieval -> llama-server /v1/chat/compl
 
 ## 验收证据
 
-`run_user_application_journey.py` 启动两个 fresh application subprocess，而不是在验收进程里直接调用 Service。当前真实 CUDA 旅程观测到 441 个缓存 prompt token、6 次自研 CUDA KV kernel、2 次 CUDA benefit decision、2 次在线策略 checkpoint、19 个 prefill chunk，`n_busy_slots_per_decode=1.0739`；同时验证 429 背压、应用进程重启续聊，以及浏览器在收到真实模型 token 后断流会触发 llama-server 原生 `cancel task` 且不保存半条答案。
+`run_user_application_journey.py` 启动两个 fresh application subprocess，而不是在验收进程里直接调用 Service。当前真实 CUDA 旅程观测到 456 个缓存 prompt token、6 次自研 CUDA KV kernel、2 次 CUDA benefit decision、2 次在线策略 checkpoint、19 个 prefill chunk，`n_busy_slots_per_decode=1.19837`；同时验证 429 背压、应用进程重启续聊，以及浏览器在收到真实模型 token 后断流会触发 llama-server 原生 `cancel task` 且不保存半条答案。
 
 真实 Chromium 浏览器还完成了输入、发送、SSE 增量显示、资料卡片和回答完成状态检查；B+ 树问题的首条检索结果为数据库文档的 `7.1 B+ 树`，而非通用面试题。浏览器证据位于 `results/user-application-browser-qa.json`。这仍不等于已有外部用户采用。
