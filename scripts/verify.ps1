@@ -54,6 +54,13 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "same-toolchain upstream baseline build failed" }
         powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build_cuda_kv.ps1 -Sanitize
         if ($LASTEXITCODE -ne 0) { throw "CUDA KV backend build or Compute Sanitizer failed" }
+        $env:CACHEFLOW_REQUIRE_PRODUCTION_BINARIES = "1"
+        try {
+            python -m unittest tests.test_production_launcher -v
+            if ($LASTEXITCODE -ne 0) { throw "production launcher contract tests failed after server builds" }
+        } finally {
+            Remove-Item Env:CACHEFLOW_REQUIRE_PRODUCTION_BINARIES -ErrorAction SilentlyContinue
+        }
         python scripts\run_kv_block_smoke.py --mode share
         if ($LASTEXITCODE -ne 0) { throw "resident prefix sharing smoke failed" }
         python scripts\run_kv_block_smoke.py --mode preempt --port 8108

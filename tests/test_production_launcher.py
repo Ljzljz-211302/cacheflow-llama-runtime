@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -9,9 +10,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "start_production.ps1"
 CPU_SERVER = ROOT / "build" / "patched-cpu-noui" / "bin" / "Release" / "llama-server.exe"
 CUDA_SERVER = ROOT / "build" / "patched-cuda-ninja3" / "bin" / "llama-server.exe"
+REQUIRE_BINARIES = os.environ.get("CACHEFLOW_REQUIRE_PRODUCTION_BINARIES") == "1"
 
 
-@unittest.skipUnless(CPU_SERVER.exists(), "production launcher requires the patched CPU server")
+@unittest.skipUnless(
+    CPU_SERVER.exists() or REQUIRE_BINARIES,
+    "production launcher requires the patched CPU server",
+)
 class ProductionLauncherTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -42,7 +47,14 @@ class ProductionLauncherTests(unittest.TestCase):
         if "-Backend" not in extra:
             command.extend(("-Backend", "cpu"))
         command.extend(("-PrintCommand", *extra))
-        return subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=False)
+        return subprocess.run(
+            command,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
 
     def identity(self, model: Path | None = None, *extra: str) -> str:
         result = self.launch(model, *extra)
@@ -63,7 +75,10 @@ class ProductionLauncherTests(unittest.TestCase):
         self.assertEqual(len(variants), 4)
         self.assertNotIn(baseline, variants)
 
-    @unittest.skipUnless(CUDA_SERVER.exists(), "backend binding requires the patched CUDA server")
+    @unittest.skipUnless(
+        CUDA_SERVER.exists() or REQUIRE_BINARIES,
+        "backend binding requires the patched CUDA server",
+    )
     def test_identity_is_backend_bound(self) -> None:
         cpu = self.identity()
         result = self.launch(None, "-Backend", "cuda")
