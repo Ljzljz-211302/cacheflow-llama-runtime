@@ -56,7 +56,7 @@ flowchart LR
 
 ## 一键复现
 
-依赖：PowerShell、Git、Python 3、CMake、Ninja、Visual Studio 2022 C++ workload。仓库已在 `runtime/cuda-dev` 固定 CUDA 12.6 开发环境；模型和预编译基线由 SHA-256 清单固定。
+依赖：PowerShell、Git、Python 3、Node.js 22.14.0（由 `.nvmrc` 固定，仅用于前端语法门禁）、CMake、Ninja、Visual Studio 2022 C++ workload。仓库已在 `runtime/cuda-dev` 固定 CUDA 12.6 开发环境；模型和预编译基线由 SHA-256 清单固定。
 
 ```powershell
 cd D:\llama

@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -6,6 +7,7 @@ import unittest
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 from interview_assistant.knowledge import KnowledgeIndex
 from interview_assistant.llama_client import LlamaClient
@@ -172,6 +174,23 @@ class UserApplicationTests(unittest.TestCase):
         finally:
             redirect_server.shutdown()
             redirect_server.server_close()
+            thread.join(timeout=5)
+
+    def test_model_client_disables_environment_proxies(self) -> None:
+        RedirectHandler.visited = []
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        thread.start()
+        try:
+            proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+            with patch.dict(os.environ, {"HTTP_PROXY": proxy_url, "NO_PROXY": ""}, clear=False):
+                with patch("urllib.request.proxy_bypass", return_value=False):
+                    client = LlamaClient("http://127.0.0.2:9", "secret", timeout=1)
+                    self.assertFalse(client.healthy())
+            self.assertEqual(RedirectHandler.visited, [])
+        finally:
+            proxy.shutdown()
+            proxy.server_close()
             thread.join(timeout=5)
 
     def test_no_retrieval_match_fails_closed_without_calling_model(self) -> None:

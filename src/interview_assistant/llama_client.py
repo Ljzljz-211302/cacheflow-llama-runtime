@@ -34,7 +34,8 @@ class LlamaClient:
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
-        self._opener = urllib.request.build_opener(_RejectRedirects())
+        # Never allow HTTP(S)_PROXY to receive the local Runtime bearer token.
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _RejectRedirects())
 
     @staticmethod
     def _validate_base_url(base_url: str) -> str:

@@ -16,6 +16,14 @@ try {
         throw "compileall failed"
     }
 
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodeCommand) {
+        throw "Node.js 22.14.0 is required; install the version pinned in .nvmrc"
+    }
+    $nodeVersion = (& node --version).Trim()
+    if ($nodeVersion -ne "v22.14.0") {
+        throw "Node.js v22.14.0 is required by .nvmrc; found $nodeVersion"
+    }
     node --check src\interview_assistant\static\app.js
     if ($LASTEXITCODE -ne 0) {
         throw "interview assistant JavaScript syntax check failed"

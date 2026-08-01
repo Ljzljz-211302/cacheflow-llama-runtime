@@ -160,39 +160,44 @@ def ask(session_id: str, question: str) -> dict[str, Any]:
 def cancel_answer(session_id: str, question: str) -> None:
     connection = http.client.HTTPConnection("127.0.0.1", APP_PORT, timeout=30)
     body = json.dumps({"content": question}, ensure_ascii=False).encode("utf-8")
-    connection.request(
-        "POST",
-        f"/api/sessions/{session_id}/messages",
-        body=body,
-        headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
-    )
-    response = connection.getresponse()
-    if response.status != 200:
-        raise AssertionError("cancel journey did not begin an SSE response")
-    saw_citations = False
-    saw_injected_header = False
-    saw_model_delta = False
-    deadline = time.monotonic() + 30
-    while time.monotonic() < deadline:
-        raw_line = response.readline()
-        if not raw_line:
-            break
-        line = raw_line.decode("utf-8").strip()
-        if not line.startswith("data: "):
-            continue
-        event = json.loads(line[6:])
-        if event["type"] == "citations":
-            saw_citations = True
-        elif event["type"] == "delta" and not saw_injected_header:
-            saw_injected_header = True
-        elif event["type"] == "delta":
-            saw_model_delta = True
-            break
-    if not (saw_citations and saw_injected_header and saw_model_delta):
-        raise AssertionError("cancel journey disconnected before a real model token")
-    if connection.sock is not None:
-        connection.sock.shutdown(2)
-    connection.close()
+    try:
+        connection.request(
+            "POST",
+            f"/api/sessions/{session_id}/messages",
+            body=body,
+            headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        )
+        response = connection.getresponse()
+        if response.status != 200:
+            raise AssertionError("cancel journey did not begin an SSE response")
+        saw_citations = False
+        saw_injected_header = False
+        saw_model_delta = False
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            raw_line = response.readline()
+            if not raw_line:
+                break
+            line = raw_line.decode("utf-8").strip()
+            if not line.startswith("data: "):
+                continue
+            event = json.loads(line[6:])
+            if event["type"] == "citations":
+                saw_citations = True
+            elif event["type"] == "delta" and not saw_injected_header:
+                saw_injected_header = True
+            elif event["type"] == "delta":
+                saw_model_delta = True
+                break
+        if not (saw_citations and saw_injected_header and saw_model_delta):
+            raise AssertionError("cancel journey disconnected before a real model token")
+    finally:
+        if connection.sock is not None:
+            try:
+                connection.sock.shutdown(2)
+            except OSError:
+                pass
+        connection.close()
 
 
 def native_cancel_count() -> int:
