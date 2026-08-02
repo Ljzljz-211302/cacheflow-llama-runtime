@@ -1,5 +1,7 @@
 # 简历项目经历：CacheFlow Runtime
 
+> 最终可直接投递版本见 [`final-resume-project-section.md`](final-resume-project-section.md)。本文其余内容保留为不同篇幅版本和面试表述边界。
+
 ## 推荐放置
 
 优先放在“项目经历”或“科研实践”，不建议在没有导师、实验室或论文事实时放入正式“科研经历”。如果简历只有“科研/项目经历”合并栏目，可以标注“个人科研型项目”。
