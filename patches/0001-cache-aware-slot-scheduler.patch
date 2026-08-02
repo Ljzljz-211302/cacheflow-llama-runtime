@@ -485,10 +485,10 @@ index 168dbab..24b25ec 100644
            llama_seq_id seq_id) {
 diff --git a/src/llama-kv-cache-paged.cu b/src/llama-kv-cache-paged.cu
 new file mode 100644
-index 0000000..a672d09
+index 0000000..81ee336
 --- /dev/null
 +++ b/src/llama-kv-cache-paged.cu
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,368 @@
 +#include "llama-kv-cache.h"
 +
 +#include "ggml.h"
@@ -802,6 +802,7 @@ index 0000000..a672d09
 +    cudaEvent_t complete = nullptr;
 +    bool success = false;
 +    cudaEvent_t started = nullptr;
++    llama_kv_remap_accounting remap_accounting = {};
 +    if (!cuda_ok(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "stream create", &cuda_stats_)) goto cleanup;
 +    if (!cuda_ok(cudaEventCreate(&started), "copy start event create", &cuda_stats_) ||
 +            !cuda_ok(cudaEventRecord(started, stream), "copy start event record", &cuda_stats_)) goto cleanup;
@@ -813,20 +814,14 @@ index 0000000..a672d09
 +            copies.size() * sizeof(llama_kv_remap_copy), cudaMemcpyHostToDevice, stream),
 +            "descriptor upload", &cuda_stats_)) goto cleanup;
 +    {
-+        const auto accounting = llama_kv_remap_account(copies, device_staging);
++        remap_accounting = llama_kv_remap_account(copies, device_staging);
 +        if (!cuda_ok(llama_kv_remap_launch_gather(device_copies, device_staging,
 +                copies.size(), max_elements, stream, llama_kv_remap_mode::vectorized),
 +                "vectorized real KV tensor gather", &cuda_stats_)) goto cleanup;
 +        if (!cuda_ok(llama_kv_remap_launch_scatter(device_copies, device_staging,
 +                copies.size(), max_elements, stream, llama_kv_remap_mode::vectorized),
 +                "vectorized real KV tensor scatter", &cuda_stats_)) goto cleanup;
-+        cuda_stats_.remap_vectorized_bytes += accounting.vectorized_bytes;
-+        cuda_stats_.remap_scalar_bytes += accounting.scalar_bytes;
 +    }
-+    cuda_stats_.kernel_launches += 2;
-+    cuda_stats_.copy_on_write += partial_tail_clones;
-+    cuda_stats_.blocks_copied += copies.size();
-+    for (const auto & copy : copies) cuda_stats_.copy_bytes += copy.elements * sizeof(uint16_t);
 +    if (!cuda_ok(cudaFreeAsync(device_copies, stream), "descriptor release", &cuda_stats_)) goto cleanup;
 +    device_copies = nullptr;
 +    if (!cuda_ok(cudaFreeAsync(device_staging, stream), "staging release", &cuda_stats_)) goto cleanup;
@@ -835,6 +830,12 @@ index 0000000..a672d09
 +    if (!cuda_ok(cudaEventRecord(complete, stream), "event record", &cuda_stats_)) goto cleanup;
 +    if (!cuda_ok(cudaEventSynchronize(complete), "event wait", &cuda_stats_)) goto cleanup;
 +    cuda_stats_.events_waited++;
++    cuda_stats_.remap_vectorized_bytes += remap_accounting.vectorized_bytes;
++    cuda_stats_.remap_scalar_bytes += remap_accounting.scalar_bytes;
++    cuda_stats_.kernel_launches += 2;
++    cuda_stats_.copy_on_write += partial_tail_clones;
++    cuda_stats_.blocks_copied += copies.size();
++    for (const auto & copy : copies) cuda_stats_.copy_bytes += copy.elements * sizeof(uint16_t);
 +    {
 +        float copy_ms = 0.0f;
 +        if (cuda_ok(cudaEventElapsedTime(&copy_ms, started, complete),
@@ -1068,10 +1069,10 @@ index 3d68f98..757fa0b 100644
  
 diff --git a/src/llama-kv-remap-cuda.cuh b/src/llama-kv-remap-cuda.cuh
 new file mode 100644
-index 0000000..76069f7
+index 0000000..60efe29
 --- /dev/null
 +++ b/src/llama-kv-remap-cuda.cuh
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,196 @@
 +#pragma once
 +
 +#include <cuda_runtime.h>
@@ -1203,6 +1204,28 @@ index 0000000..76069f7
 +    }
 +}
 +
++inline cudaError_t llama_kv_remap_make_grid(
++        size_t copy_count,
++        size_t max_elements,
++        llama_kv_remap_mode mode,
++        dim3 & grid) {
++    constexpr size_t threads = 256;
++    constexpr size_t maximum_grid_x = 2147483647;
++    constexpr size_t maximum_grid_y = 65535;
++    if (copy_count > maximum_grid_y) return cudaErrorInvalidValue;
++    const size_t elements_per_work = mode == llama_kv_remap_mode::vectorized
++            ? LLAMA_KV_REMAP_VECTOR_ELEMENTS
++            : 1;
++    const size_t work = max_elements / elements_per_work +
++            (max_elements % elements_per_work != 0);
++    const size_t grid_x = work / threads + (work % threads != 0);
++    if (grid_x == 0 || grid_x > maximum_grid_x) {
++        return cudaErrorInvalidValue;
++    }
++    grid = dim3((unsigned) grid_x, (unsigned) copy_count);
++    return cudaSuccess;
++}
++
 +inline cudaError_t llama_kv_remap_launch_gather(
 +        const llama_kv_remap_copy * copies,
 +        uint16_t * staging,
@@ -1211,16 +1234,10 @@ index 0000000..76069f7
 +        cudaStream_t stream,
 +        llama_kv_remap_mode mode) {
 +    if (copy_count == 0 || max_elements == 0) return cudaSuccess;
-+    if (copy_count > 65535) return cudaErrorInvalidValue;
 +    constexpr int threads = 256;
-+    const size_t work = mode == llama_kv_remap_mode::vectorized
-+            ? (max_elements + LLAMA_KV_REMAP_VECTOR_ELEMENTS - 1) / LLAMA_KV_REMAP_VECTOR_ELEMENTS
-+            : max_elements;
-+    const size_t grid_x = work / threads + (work % threads != 0);
-+    if (grid_x > std::numeric_limits<unsigned>::max()) {
-+        return cudaErrorInvalidValue;
-+    }
-+    const dim3 grid((unsigned) grid_x, (unsigned) copy_count);
++    dim3 grid;
++    const cudaError_t grid_status = llama_kv_remap_make_grid(copy_count, max_elements, mode, grid);
++    if (grid_status != cudaSuccess) return grid_status;
 +    if (mode == llama_kv_remap_mode::vectorized) {
 +        llama_kv_remap_gather_vector_kernel<<<grid, threads, 0, stream>>>(
 +                copies, staging, copy_count, max_elements);
@@ -1239,16 +1256,10 @@ index 0000000..76069f7
 +        cudaStream_t stream,
 +        llama_kv_remap_mode mode) {
 +    if (copy_count == 0 || max_elements == 0) return cudaSuccess;
-+    if (copy_count > 65535) return cudaErrorInvalidValue;
 +    constexpr int threads = 256;
-+    const size_t work = mode == llama_kv_remap_mode::vectorized
-+            ? (max_elements + LLAMA_KV_REMAP_VECTOR_ELEMENTS - 1) / LLAMA_KV_REMAP_VECTOR_ELEMENTS
-+            : max_elements;
-+    const size_t grid_x = work / threads + (work % threads != 0);
-+    if (grid_x > std::numeric_limits<unsigned>::max()) {
-+        return cudaErrorInvalidValue;
-+    }
-+    const dim3 grid((unsigned) grid_x, (unsigned) copy_count);
++    dim3 grid;
++    const cudaError_t grid_status = llama_kv_remap_make_grid(copy_count, max_elements, mode, grid);
++    if (grid_status != cudaSuccess) return grid_status;
 +    if (mode == llama_kv_remap_mode::vectorized) {
 +        llama_kv_remap_scatter_vector_kernel<<<grid, threads, 0, stream>>>(
 +                copies, staging, copy_count, max_elements);
@@ -2853,10 +2864,10 @@ index 0000000..b448bf4
 +}
 diff --git a/tests/test-kv-remap-cuda.cu b/tests/test-kv-remap-cuda.cu
 new file mode 100644
-index 0000000..31c4900
+index 0000000..8a4bd5e
 --- /dev/null
 +++ b/tests/test-kv-remap-cuda.cu
-@@ -0,0 +1,125 @@
+@@ -0,0 +1,131 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -2973,6 +2984,12 @@ index 0000000..31c4900
 +    assert(llama_kv_remap_launch_gather(nullptr, nullptr, 65536, 1, nullptr,
 +            llama_kv_remap_mode::vectorized) == cudaErrorInvalidValue);
 +    assert(llama_kv_remap_launch_scatter(nullptr, nullptr, 65536, 1, nullptr,
++            llama_kv_remap_mode::scalar) == cudaErrorInvalidValue);
++    assert(llama_kv_remap_launch_gather(nullptr, nullptr, 1,
++            std::numeric_limits<size_t>::max(), nullptr,
++            llama_kv_remap_mode::vectorized) == cudaErrorInvalidValue);
++    assert(llama_kv_remap_launch_scatter(nullptr, nullptr, 1,
++            std::numeric_limits<size_t>::max(), nullptr,
 +            llama_kv_remap_mode::scalar) == cudaErrorInvalidValue);
 +}
 +

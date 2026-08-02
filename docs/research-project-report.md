@@ -16,7 +16,7 @@
 
 ## 3. 系统设计与个人实现
 
-项目固定 llama.cpp `acd79d603cb2e1c84c0886137b80f1ad649b6857` 为上游基线，以可逆 patch 管理个人修改。当前相对基线包含约 8,691 行新增、99 行删除，覆盖 61 个上游文件；不把未修改的 vendor 代码计为个人工作。
+项目固定 llama.cpp `acd79d603cb2e1c84c0886137b80f1ad649b6857` 为上游基线，以可逆 patch 管理个人修改。当前相对基线包含约 8,708 行新增、99 行删除，覆盖 61 个上游文件；不把未修改的 vendor 代码计为个人工作。
 
 主要模块包括：
 
@@ -47,7 +47,7 @@
 - 非法 grid shape 验证 launch 前拒绝；
 - Compute Sanitizer memcheck：0 error；racecheck：0 hazard；
 - 真实 Qwen2.5-0.5B CUDA 服务共享 21 个 Prefix KV block，partial-tail COW 后输出与 cold deterministic decode 一致；
-- 真实面试应用旅程记录 7,225,340 个向量化 KV remap 字节。
+- 真实面试应用旅程记录 5,603,330 个向量化 KV remap 字节。
 
 ## 5. 实验设计与结果
 
