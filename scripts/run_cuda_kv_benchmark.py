@@ -28,8 +28,8 @@ def main() -> None:
         [str(EXE)], cwd=ROOT, env=env, check=True, text=True, capture_output=True
     )
     rows = list(csv.DictReader(completed.stdout.splitlines()))
-    if len(rows) != 40:
-        raise AssertionError(f"expected 40 benchmark samples, received {len(rows)}")
+    if len(rows) != 160:
+        raise AssertionError(f"expected 160 benchmark samples, received {len(rows)}")
     RAW.parent.mkdir(parents=True, exist_ok=True)
     RAW.write_text(completed.stdout, encoding="utf-8", newline="")
 
@@ -41,8 +41,10 @@ def main() -> None:
     summary: dict[str, object] = {
         "device": "NVIDIA GeForce RTX 4050 Laptop GPU",
         "layout": {"layers": 32, "kv_heads": 8, "head_dim": 128, "block_tokens": 16, "dtype": "fp16"},
-        "trials_per_case": 5,
+        "trials_per_case": 20,
+        "design": "paired trials with alternating scalar/vectorized execution order",
         "cases": [],
+        "paired_comparisons": [],
     }
     cases = summary["cases"]
     assert isinstance(cases, list)
@@ -55,6 +57,42 @@ def main() -> None:
                 "median_end_to_end_ms": statistics.median(v["end_to_end_ms"] for v in values),
             }
         )
+    comparisons = summary["paired_comparisons"]
+    assert isinstance(comparisons, list)
+    material_improvement = False
+    worst_gpu_improvement = float("inf")
+    best_gpu_improvement = float("-inf")
+    for blocks in (1, 4, 16, 32):
+        scalar = samples[("scalar_gather_scatter", blocks)]
+        vectorized = samples[("vectorized_gather_scatter", blocks)]
+        gpu_improvements = [
+            (left["gpu_ms"] - right["gpu_ms"]) / left["gpu_ms"] * 100.0
+            for left, right in zip(scalar, vectorized)
+        ]
+        end_to_end_improvements = [
+            (left["end_to_end_ms"] - right["end_to_end_ms"]) / left["end_to_end_ms"] * 100.0
+            for left, right in zip(scalar, vectorized)
+        ]
+        median_gpu_improvement = statistics.median(gpu_improvements)
+        worst_gpu_improvement = min(worst_gpu_improvement, median_gpu_improvement)
+        best_gpu_improvement = max(best_gpu_improvement, median_gpu_improvement)
+        comparisons.append({
+            "blocks": blocks,
+            "paired_median_gpu_improvement_percent": median_gpu_improvement,
+            "paired_median_end_to_end_improvement_percent": statistics.median(end_to_end_improvements),
+        })
+        if median_gpu_improvement < -3.0:
+            raise AssertionError(f"vectorized remap regressed by more than 3% for {blocks} blocks")
+        material_improvement = material_improvement or median_gpu_improvement >= 10.0
+    if not material_improvement:
+        raise AssertionError("vectorized remap produced no material paired GPU improvement")
+    summary["acceptance"] = {
+        "maximum_allowed_paired_regression_percent": 3.0,
+        "required_material_improvement_percent": 10.0,
+        "worst_observed_paired_gpu_improvement_percent": worst_gpu_improvement,
+        "best_observed_paired_gpu_improvement_percent": best_gpu_improvement,
+        "passed": True,
+    }
     SUMMARY.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"raw": str(RAW), "summary": str(SUMMARY), "samples": len(rows)}))
 

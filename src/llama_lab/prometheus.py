@@ -55,6 +55,8 @@ def require_engine_metrics(samples: dict[str, float]) -> None:
         "llamacpp:memory_context_bytes",
         "llamacpp:memory_compute_bytes",
         "llamacpp:memory_total_bytes",
+        "llamacpp:cuda_kv_remap_vectorized_bytes_total",
+        "llamacpp:cuda_kv_remap_scalar_bytes_total",
     }
     missing = sorted(required - samples.keys())
     if missing:

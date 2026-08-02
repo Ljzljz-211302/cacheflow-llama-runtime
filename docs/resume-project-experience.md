@@ -1,0 +1,34 @@
+# 简历项目经历：CacheFlow Runtime
+
+## 推荐放置
+
+优先放在“项目经历”或“科研实践”，不建议在没有导师、实验室或论文事实时放入正式“科研经历”。如果简历只有“科研/项目经历”合并栏目，可以标注“个人科研型项目”。
+
+## 一页简历版本
+
+### CacheFlow Runtime：单机大模型推理调度与 CUDA KV 优化｜个人科研型项目｜2026.07–至今
+
+技术栈：C++17、CUDA、llama.cpp、GGML/GGUF、Python、CMake、Prometheus、SQLite
+
+- 基于固定 llama.cpp 上游提交重构真实 `llama-server → llama_decode → KV Cache → CUDA` 路径，实现 Prefill/Decode 分离的缓存感知调度、Aging 防饥饿、背压、取消、Deadline 及多请求 Continuous Batching。
+- 设计 KV Block Manager 与 Prefix 索引，实现引用计数、partial-tail Copy-on-Write、Pinned Memory 异步 Swap、检查点恢复和故障回退，并以真实 Qwen CUDA 请求验证共享 21 个 Prefix KV Block 后输出与 cold decode 一致。
+- 实现 descriptor-driven CUDA KV Remap 算子：使用 `uint4` 进行 128-bit Gather/Scatter，支持重叠映射 snapshot 语义、非对齐/尾部标量回退和非法 grid 拒绝；Compute Sanitizer memcheck/racecheck 均为 0 error。
+- 在 RTX 4050 Laptop GPU 上完成 20 组配对、交替顺序微基准；相对标量实现在 1/4/16/32 Block 上的 GPU 中位耗时分别改善 53.33%/48.89%/3.13%/1.87%，所有规模无回归；通过原生 Prometheus 指标确认真实应用累计执行 7.23M 向量化 KV Remap 字节。
+- 开发推免面试学习助手作为真实用户负载，覆盖本地资料检索、带引用 SSE 回答、SQLite 会话恢复、并发限流与客户端中断，并以独立应用进程和真实 CUDA 模型完成端到端验收。
+
+## 三条精简版本
+
+- 深度修改 llama.cpp 推理热路径，实现缓存感知调度、KV Block/COW/Swap、在线收益门控及真实 CUDA Serving 观测链路。
+- 编写 128-bit 向量化 CUDA KV Remap 算子，支持重叠 snapshot、非对齐尾部回退；Compute Sanitizer memcheck/racecheck 0 error。
+- 20 组配对微基准中，1/4/16/32 Block 的 GPU 中位耗时相对标量改善 53.33%/48.89%/3.13%/1.87%；真实 Qwen 应用路径累计命中 7.23M 向量化字节。
+
+## 面试口述版本
+
+“这个项目不是在 llama.cpp 外面套一层 Python。我的主要工作进入了真实 llama-server 的调度和 KV 热路径：上层用缓存命中、等待时间和显存压力决定请求顺序；中层维护 KV Block、引用计数、COW 和 Swap；底层实现了 descriptor-driven CUDA KV Remap。新算子对齐时使用 uint4 做 128-bit Gather/Scatter，不对齐和尾部自动回退标量。它通过 CPU oracle、Compute Sanitizer、真实 Qwen Prefix 共享和应用原生指标验证。微基准说明小批 remap 提升约 52%–55%，大批量收益收敛到约 2%–4%，所以我不会把它包装成端到端推理提速。”
+
+## 禁止使用的夸大表述
+
+- “实现了 FlashAttention/PagedAttention”——当前没有；
+- “端到端推理加速 53.33%”——该数字仅属于 KV Remap 微基准；
+- “支持生产级公网多租户”——当前定位为单机可信环境；
+- “科研成果/论文成果”——除非后续确有导师、立项、论文或投稿事实。

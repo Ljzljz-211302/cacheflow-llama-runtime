@@ -7,55 +7,85 @@
     "block_tokens": 16,
     "dtype": "fp16"
   },
-  "trials_per_case": 5,
+  "trials_per_case": 20,
+  "design": "paired trials with alternating scalar/vectorized execution order",
   "cases": [
     {
-      "method": "batched_gather_scatter",
+      "method": "scalar_gather_scatter",
       "blocks": 1,
-      "median_gpu_ms": 0.04096,
-      "median_end_to_end_ms": 0.0745
+      "median_gpu_ms": 0.029696,
+      "median_end_to_end_ms": 0.0432
     },
     {
-      "method": "per_block_memcpy",
+      "method": "vectorized_gather_scatter",
       "blocks": 1,
-      "median_gpu_ms": 0.02656,
-      "median_end_to_end_ms": 0.0465
+      "median_gpu_ms": 0.013312,
+      "median_end_to_end_ms": 0.03155
     },
     {
-      "method": "batched_gather_scatter",
+      "method": "scalar_gather_scatter",
       "blocks": 4,
-      "median_gpu_ms": 0.091136,
-      "median_end_to_end_ms": 0.1147
+      "median_gpu_ms": 0.11771200000000001,
+      "median_end_to_end_ms": 0.12735000000000002
     },
     {
-      "method": "per_block_memcpy",
+      "method": "vectorized_gather_scatter",
       "blocks": 4,
-      "median_gpu_ms": 0.111616,
-      "median_end_to_end_ms": 0.1179
+      "median_gpu_ms": 0.059775999999999996,
+      "median_end_to_end_ms": 0.07125000000000001
     },
     {
-      "method": "batched_gather_scatter",
+      "method": "scalar_gather_scatter",
       "blocks": 16,
-      "median_gpu_ms": 0.791552,
-      "median_end_to_end_ms": 0.8121
+      "median_gpu_ms": 0.8125439999999999,
+      "median_end_to_end_ms": 0.82775
     },
     {
-      "method": "per_block_memcpy",
+      "method": "vectorized_gather_scatter",
       "blocks": 16,
-      "median_gpu_ms": 0.443392,
-      "median_end_to_end_ms": 0.4547
+      "median_gpu_ms": 0.78792,
+      "median_end_to_end_ms": 0.8027
     },
     {
-      "method": "batched_gather_scatter",
+      "method": "scalar_gather_scatter",
       "blocks": 32,
-      "median_gpu_ms": 1.552384,
-      "median_end_to_end_ms": 1.5677
+      "median_gpu_ms": 1.600864,
+      "median_end_to_end_ms": 1.6138
     },
     {
-      "method": "per_block_memcpy",
+      "method": "vectorized_gather_scatter",
       "blocks": 32,
-      "median_gpu_ms": 0.925696,
-      "median_end_to_end_ms": 0.9398
+      "median_gpu_ms": 1.5713439999999999,
+      "median_end_to_end_ms": 1.5850499999999998
     }
-  ]
+  ],
+  "paired_comparisons": [
+    {
+      "blocks": 1,
+      "paired_median_gpu_improvement_percent": 53.330216903515336,
+      "paired_median_end_to_end_improvement_percent": 32.9105637247849
+    },
+    {
+      "blocks": 4,
+      "paired_median_gpu_improvement_percent": 48.88720319116758,
+      "paired_median_end_to_end_improvement_percent": 42.43455680184404
+    },
+    {
+      "blocks": 16,
+      "paired_median_gpu_improvement_percent": 3.127442954439224,
+      "paired_median_end_to_end_improvement_percent": 2.903229460900566
+    },
+    {
+      "blocks": 32,
+      "paired_median_gpu_improvement_percent": 1.8745542129157204,
+      "paired_median_end_to_end_improvement_percent": 1.8207450673177787
+    }
+  ],
+  "acceptance": {
+    "maximum_allowed_paired_regression_percent": 3.0,
+    "required_material_improvement_percent": 10.0,
+    "worst_observed_paired_gpu_improvement_percent": 1.8745542129157204,
+    "best_observed_paired_gpu_improvement_percent": 53.330216903515336,
+    "passed": true
+  }
 }

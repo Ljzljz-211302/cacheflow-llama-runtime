@@ -110,12 +110,17 @@ def main() -> None:
                    if line.startswith("llamacpp:cuda_kv_copy_on_write_total ")]
     if not cow_metrics or float(cow_metrics[-1].split()[-1]) <= 0:
         raise AssertionError("production CUDA COW metric did not advance")
+    vector_metrics = [line for line in prometheus.splitlines()
+                      if line.startswith("llamacpp:cuda_kv_remap_vectorized_bytes_total ")]
+    if not vector_metrics or float(vector_metrics[-1].split()[-1]) <= 0:
+        raise AssertionError("production CUDA vectorized KV remap metric did not advance")
     if not results[-1].get("content"):
         raise AssertionError("destination response is empty")
     if results[-1].get("content") != cold_result.get("content"):
         raise AssertionError("shared-prefix CUDA output differs from cold deterministic decode")
     print(json.dumps({"evidence_log": evidence[-1], "prefix_log": prefix_evidence[-1],
         "cow_log": cow_evidence[-1],
+        "vectorized_remap_bytes": float(vector_metrics[-1].split()[-1]),
         "log": str(log_path)}, ensure_ascii=False))
 
 

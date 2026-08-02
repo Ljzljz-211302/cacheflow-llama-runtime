@@ -353,6 +353,9 @@ def main() -> None:
                 "prefill_chunks": metric_sum(metrics, "llamacpp:prefill_chunks_scheduled_total"),
                 "cached_prompt_tokens": metric_sum(metrics, "llamacpp:prompt_tokens_cached_total"),
                 "cuda_kv_kernel_launches": metric_sum(metrics, "llamacpp:cuda_kv_kernel_launches_total"),
+                "cuda_kv_remap_vectorized_bytes": metric_sum(
+                    metrics, "llamacpp:cuda_kv_remap_vectorized_bytes_total"
+                ),
                 "cuda_benefit_decisions": sum(
                     float(match.group(1))
                     for line in metrics.splitlines()

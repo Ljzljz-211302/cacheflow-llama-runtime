@@ -10,7 +10,7 @@
 
 ## 当前结论
 
-本轮严格验收已通过。2026-08-01 最终提交版本通过唯一入口 `scripts/verify.ps1 -Full`，完整运行 1395.4 秒并以 0 退出；覆盖架构/patch 门禁、CPU/upstream/CUDA 构建、全部 C++/Python 测试、Compute Sanitizer、功能/故障/兼容/模型/性能/质量矩阵、真实三进程 checkpoint 恢复/损坏降级、CPU/CUDA 各 10-trial Conservative Benefit Gating，以及 53-wave 长驻收敛和 3-pair CUDA 因果 profiling。
+2026-08-01 基线版本曾通过唯一入口 `scripts/verify.ps1 -Full`，完整运行 1395.4 秒并以 0 退出。本次向量化 KV Remap 增量已通过架构/patch 门禁、CPU/CUDA 构建、全部单元测试、Compute Sanitizer、真实 Qwen tensor/COW、模型矩阵、用户应用旅程和 20-trial 配对微基准；但两次重新执行 Full 均被既有统计型性能门禁拦截：第一次为长驻实验末态收益 7.86 ms 小于不确定性 9.00 ms，第二次为 CPU learned oracle regret 26.1% 和 CUDA paired regression 3.7% 越过 20%/3% 门槛。相同长驻场景随后单独复现通过（17.82 ms > 8.49 ms）。因此本增量的功能/内存安全/算子性能门禁通过，但不能声称当前全量统计套件稳定绿灯。
 
 “存在代码”“单元测试通过”和“生产路径通过”是三个不同层级。本报告只把有生产 smoke 或真实模型证据的条目标为生产接入。
 
@@ -117,7 +117,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 
 ## 个人贡献边界
 
-固定上游提供 GGUF/模型 graph、GGML 通用算子、既有 backend、HTTP 基础设施和 sampling。个人差异是 Engine 拆分、Scheduler、KV 资源/块/事务 Swap、真实 CUDA KV Adapter 与 kernels、自适应/收益门控、在线策略持久化、metrics、fault injection 和复现实验。当前相对固定上游为 59 files、+8445/-99。代码量只统计该 patch；不得把 `vendor/llama.cpp` 原有代码算作个人实现，也不得声称“重写了 llama.cpp”。
+固定上游提供 GGUF/模型 graph、GGML 通用算子、既有 backend、HTTP 基础设施和 sampling。个人差异是 Engine 拆分、Scheduler、KV 资源/块/事务 Swap、真实 CUDA KV Adapter 与 kernels、自适应/收益门控、在线策略持久化、metrics、fault injection 和复现实验。当前相对固定上游为 61 files、+8691/-99。代码量只统计该 patch；不得把 `vendor/llama.cpp` 原有代码算作个人实现，也不得声称“重写了 llama.cpp”。
 
 ### 生产重启与状态损坏
 
@@ -140,4 +140,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 
 推免面试学习助手已通过真实 CUDA 用户旅程，而非单请求 smoke：两个 fresh application subprocess 覆盖应用重启；三个持久化会话覆盖机器学习续聊、408 独立会话和浏览器取消；两个用户请求并发执行，超出应用生成槽时返回 429。断流后数据库只保留 user 消息，不存在半条 assistant 答案。
 
-本轮原生证据为：456 个 cached prompt token、19 个 prefill chunk、6 次 CUDA KV kernel、2 次 CUDA benefit decision、2 次在线策略 checkpoint，平均 busy slot/decode 为 1.19837；llama 日志同时出现 CUDA0、CacheFlow policy、shared prefix 和真实模型 token 后的原生 cancel task。Chromium 浏览器实际完成 B+ 树提问、SSE 回答与资料卡片显示，首条引用命中数据库学习文档 `7.1 B+ 树`。这些数据证明用户应用流量进入 CacheFlow/CUDA 链路，不声称已有外部用户或线上采用率。
+本轮原生证据为：588 个 cached prompt token、18 个 prefill chunk、8 次 CUDA KV kernel、7,225,340 个向量化 Remap byte、1 次 CUDA benefit decision、1 次在线策略 checkpoint，平均 busy slot/decode 为 1.07282；llama 日志同时出现 CUDA0、CacheFlow policy、shared prefix 和真实模型 token 后的原生 cancel task。Chromium 浏览器实际完成 B+ 树提问、SSE 回答与资料卡片显示，首条引用命中数据库学习文档 `7.1 B+ 树`。这些数据证明用户应用流量进入 CacheFlow/CUDA 链路，不声称已有外部用户或线上采用率。
+
+## 向量化 KV Remap 验收
+
+- CUDA public seam：对齐重叠交换、非对齐 19 元素尾部与非法 grid 均通过；
+- Compute Sanitizer：新算子 memcheck 0 error，racecheck 0 hazard；
+- 真实 Qwen：共享 21 个 Prefix KV Block，partial-tail COW 后与 cold deterministic decode 输出一致；
+- 真实用户应用：原生指标累计 7,225,340 个 vectorized remap byte；
+- 20 组配对交替顺序微基准：1/4/16/32 Block 的 GPU 中位改善为 53.33%/48.89%/3.13%/1.87%，最差规模仍为正向，不宣称等比例端到端收益。

@@ -1173,3 +1173,9 @@ CLI 支持 `--benefit-policy upstream|always|rule|learned` 及样本、探索、
 应用保存的原子边界是单条完整消息和对应 session `updated_at`；SQLite 连接按操作创建并关闭，避免线程式 HTTP 服务长期积累连接。无资料命中 fail closed；客户端断流会依次关闭 application generator 和上游模型流，assistant 仅在完整模型流结束后持久化。
 
 应用验收必须使用 fresh subprocess 重启，不允许直接调用 Service 冒充进程恢复；必须从原生 metrics 同时观测 scheduler iteration、prefill chunk、prompt cache、CUDA KV kernel、CUDA benefit decision、checkpoint 和 `n_busy_slots_per_decode > 1`。自动验收还必须执行前端 JavaScript 语法检查；发布证据必须包含真实浏览器完成的一次输入、发送、引用显示与完整回答旅程。
+
+## 24. 向量化 KV Remap 算子
+
+`llama-kv-remap-cuda.cuh` 定义 descriptor-driven Gather/Scatter seam。算子以 staging 建立 snapshot 边界，保证源/目的重叠时仍先完整读取源数据，再写回目的数据。对齐路径由每个 CUDA thread 处理一个 `uint4`，即 128 bit / 8 个 FP16 元素；非对齐地址和尾部由同一 kernel 的标量分支处理。Host launch 在进入 CUDA 前拒绝超出 `grid.y` 或 `grid.x` 表示范围的 workload。
+
+真实 `llama_kv_cache::copy_streams_paged_cuda` 直接调用该 seam；`cuda_kv_remap_vectorized_bytes_total` 与 `cuda_kv_remap_scalar_bytes_total` 分别记录完整向量路径和安全回退字节。正确性由独立 CPU oracle、守卫区、非法 grid、Compute Sanitizer 和真实 Qwen cold-output 对照共同验证。性能报告只比较 scalar/vectorized remap，不推导端到端 Serving 加速。

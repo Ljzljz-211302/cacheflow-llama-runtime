@@ -132,7 +132,11 @@ Windows WDDM 首次运行前需要以管理员身份执行 CUDA Toolkit 的 `Ena
   -KnowledgeRoot D:\exam\tuimian-monitor\docs\study
 ```
 
-访问 `http://127.0.0.1:8766`。真实 CUDA 用户旅程不是单请求 smoke：它启动并重启两个独立应用进程，完成三轮带引用回答、真实模型 token 后取消、429 背压和两个用户并发，并从原生指标验证 456 个缓存 prompt token、6 次 CUDA KV kernel、2 次 CUDA 收益决策与 2 次 checkpoint。真实 Chromium 浏览器交互也已通过；证据见 `results/user-application-journey.json` 与 `results/user-application-browser-qa.json`，详细边界见 [用户应用说明](docs/user-application.md)。
+访问 `http://127.0.0.1:8766`。真实 CUDA 用户旅程不是单请求 smoke：它启动并重启两个独立应用进程，完成三轮带引用回答、真实模型 token 后取消、429 背压和两个用户并发，并从原生指标验证 588 个缓存 prompt token、8 次 CUDA KV kernel、7,225,340 个向量化 Remap byte、1 次 CUDA 收益决策与 1 次 checkpoint。真实 Chromium 浏览器交互也已通过；证据见 `results/user-application-journey.json` 与 `results/user-application-browser-qa.json`，详细边界见 [用户应用说明](docs/user-application.md)。
+
+## 向量化 CUDA KV Remap
+
+真实模型 KV tensor 的跨 stream Gather/Scatter 现使用 descriptor-driven 128-bit `uint4` 算子；源、目的或 staging 不满足 16-byte 对齐时自动走标量路径，尾部不足 8 个 FP16 元素时安全回退。20 组配对、交替顺序微基准中，1/4/16/32 Block 的 GPU 中位耗时相对标量分别改善 53.33%/48.89%/3.13%/1.87%，不将微基准结果冒充端到端加速。研究边界见 [科研型项目报告](docs/research-project-report.md)，可直接使用的中文简历版本见 [简历项目经历](docs/resume-project-experience.md)。
 
 ## 代码边界
 

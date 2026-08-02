@@ -388,10 +388,10 @@ index 0b284cb..618baf5 100644
      // batched-bench params
      bool is_pp_shared   = false;
 diff --git a/include/llama.h b/include/llama.h
-index 27e4806..49eae1f 100644
+index 27e4806..224cea0 100644
 --- a/include/llama.h
 +++ b/include/llama.h
-@@ -730,6 +730,35 @@ extern "C" {
+@@ -730,6 +730,37 @@ extern "C" {
                   llama_pos p0,
                   llama_pos p1);
  
@@ -417,6 +417,8 @@ index 27e4806..49eae1f 100644
 +        uint64_t pinned_bytes_peak;
 +        uint64_t backend_errors;
 +        uint64_t copy_on_write;
++        uint64_t remap_vectorized_bytes;
++        uint64_t remap_scalar_bytes;
 +    };
 +
 +    // Returns false for memory implementations without the CacheFlow CUDA
@@ -483,14 +485,15 @@ index 168dbab..24b25ec 100644
            llama_seq_id seq_id) {
 diff --git a/src/llama-kv-cache-paged.cu b/src/llama-kv-cache-paged.cu
 new file mode 100644
-index 0000000..20111ef
+index 0000000..a672d09
 --- /dev/null
 +++ b/src/llama-kv-cache-paged.cu
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,367 @@
 +#include "llama-kv-cache.h"
 +
 +#include "ggml.h"
 +#include "llama-impl.h"
++#include "llama-kv-remap-cuda.cuh"
 +
 +#include <cuda_runtime.h>
 +
@@ -502,13 +505,6 @@ index 0000000..20111ef
 +#include <vector>
 +
 +namespace {
-+
-+struct cacheflow_tensor_copy {
-+    const uint16_t * source;
-+    uint16_t * destination;
-+    size_t staging_offset;
-+    size_t elements;
-+};
 +
 +struct cacheflow_swap_piece {
 +    void * device = nullptr;
@@ -545,30 +541,6 @@ index 0000000..20111ef
 +    }
 +    if (inside) result.emplace_back(begin, cells.size());
 +    return result;
-+}
-+
-+__global__ void cacheflow_gather_real_kv_tensors(
-+        const cacheflow_tensor_copy * copies,
-+        uint16_t * staging,
-+        size_t copy_count,
-+        size_t max_elements) {
-+    const size_t element = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
-+    const size_t copy_index = blockIdx.y;
-+    if (copy_index >= copy_count || element >= max_elements) return;
-+    const auto copy = copies[copy_index];
-+    if (element < copy.elements) staging[copy.staging_offset + element] = copy.source[element];
-+}
-+
-+__global__ void cacheflow_scatter_real_kv_tensors(
-+        const cacheflow_tensor_copy * copies,
-+        const uint16_t * staging,
-+        size_t copy_count,
-+        size_t max_elements) {
-+    const size_t element = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
-+    const size_t copy_index = blockIdx.y;
-+    if (copy_index >= copy_count || element >= max_elements) return;
-+    const auto copy = copies[copy_index];
-+    if (element < copy.elements) copy.destination[element] = staging[copy.staging_offset + element];
 +}
 +
 +bool cuda_ok(cudaError_t status, const char * operation, llama_cacheflow_cuda_stats * stats = nullptr) {
@@ -754,7 +726,7 @@ index 0000000..20111ef
 +
 +bool llama_kv_cache::copy_streams_paged_cuda(const stream_copy_info & info) const {
 +    if (info.empty()) return true;
-+    std::vector<cacheflow_tensor_copy> copies;
++    std::vector<llama_kv_remap_copy> copies;
 +    size_t max_elements = 0;
 +    size_t total_elements = 0;
 +    int device = -1;
@@ -825,7 +797,7 @@ index 0000000..20111ef
 +    if (!cuda_ok(cudaSetDevice(device), "cudaSetDevice", &cuda_stats_)) return false;
 +
 +    cudaStream_t stream = nullptr;
-+    cacheflow_tensor_copy * device_copies = nullptr;
++    llama_kv_remap_copy * device_copies = nullptr;
 +    uint16_t * device_staging = nullptr;
 +    cudaEvent_t complete = nullptr;
 +    bool success = false;
@@ -834,22 +806,23 @@ index 0000000..20111ef
 +    if (!cuda_ok(cudaEventCreate(&started), "copy start event create", &cuda_stats_) ||
 +            !cuda_ok(cudaEventRecord(started, stream), "copy start event record", &cuda_stats_)) goto cleanup;
 +    if (!cuda_ok(cudaMallocAsync((void **) &device_copies,
-+            copies.size() * sizeof(cacheflow_tensor_copy), stream), "descriptor allocation", &cuda_stats_)) goto cleanup;
++            copies.size() * sizeof(llama_kv_remap_copy), stream), "descriptor allocation", &cuda_stats_)) goto cleanup;
 +    if (!cuda_ok(cudaMallocAsync((void **) &device_staging,
 +            total_elements * sizeof(uint16_t), stream), "staging allocation", &cuda_stats_)) goto cleanup;
 +    if (!cuda_ok(cudaMemcpyAsync(device_copies, copies.data(),
-+            copies.size() * sizeof(cacheflow_tensor_copy), cudaMemcpyHostToDevice, stream),
++            copies.size() * sizeof(llama_kv_remap_copy), cudaMemcpyHostToDevice, stream),
 +            "descriptor upload", &cuda_stats_)) goto cleanup;
 +    {
-+        constexpr int threads = 256;
-+        const dim3 grid((unsigned) ((max_elements + threads - 1) / threads),
-+                (unsigned) copies.size());
-+        cacheflow_gather_real_kv_tensors<<<grid, threads, 0, stream>>>(
-+                device_copies, device_staging, copies.size(), max_elements);
-+        cacheflow_scatter_real_kv_tensors<<<grid, threads, 0, stream>>>(
-+                device_copies, device_staging, copies.size(), max_elements);
++        const auto accounting = llama_kv_remap_account(copies, device_staging);
++        if (!cuda_ok(llama_kv_remap_launch_gather(device_copies, device_staging,
++                copies.size(), max_elements, stream, llama_kv_remap_mode::vectorized),
++                "vectorized real KV tensor gather", &cuda_stats_)) goto cleanup;
++        if (!cuda_ok(llama_kv_remap_launch_scatter(device_copies, device_staging,
++                copies.size(), max_elements, stream, llama_kv_remap_mode::vectorized),
++                "vectorized real KV tensor scatter", &cuda_stats_)) goto cleanup;
++        cuda_stats_.remap_vectorized_bytes += accounting.vectorized_bytes;
++        cuda_stats_.remap_scalar_bytes += accounting.scalar_bytes;
 +    }
-+    if (!cuda_ok(cudaGetLastError(), "real KV tensor kernel launch", &cuda_stats_)) goto cleanup;
 +    cuda_stats_.kernel_launches += 2;
 +    cuda_stats_.copy_on_write += partial_tail_clones;
 +    cuda_stats_.blocks_copied += copies.size();
@@ -1093,6 +1066,198 @@ index 3d68f98..757fa0b 100644
      const llama_model & model;
      const llama_hparams & hparams;
  
+diff --git a/src/llama-kv-remap-cuda.cuh b/src/llama-kv-remap-cuda.cuh
+new file mode 100644
+index 0000000..76069f7
+--- /dev/null
++++ b/src/llama-kv-remap-cuda.cuh
+@@ -0,0 +1,186 @@
++#pragma once
++
++#include <cuda_runtime.h>
++
++#include <algorithm>
++#include <cstddef>
++#include <cstdint>
++#include <limits>
++#include <vector>
++
++// One logical snapshot copy. `staging_offset` is measured in FP16 elements.
++// The same descriptor is consumed by gather and scatter, so overlapping
++// source/destination ranges retain deterministic snapshot semantics.
++struct llama_kv_remap_copy {
++    const uint16_t * source;
++    uint16_t * destination;
++    size_t staging_offset;
++    size_t elements;
++};
++
++enum class llama_kv_remap_mode : uint8_t {
++    scalar,
++    vectorized,
++};
++
++struct llama_kv_remap_accounting {
++    uint64_t vectorized_bytes = 0;
++    uint64_t scalar_bytes = 0;
++};
++
++constexpr size_t LLAMA_KV_REMAP_VECTOR_ELEMENTS = sizeof(uint4) / sizeof(uint16_t);
++
++inline bool llama_kv_remap_aligned(const void * pointer) {
++    return (reinterpret_cast<uintptr_t>(pointer) & (alignof(uint4) - 1)) == 0;
++}
++
++inline llama_kv_remap_accounting llama_kv_remap_account(
++        const std::vector<llama_kv_remap_copy> & copies,
++        const uint16_t * staging) {
++    llama_kv_remap_accounting result;
++    for (const auto & copy : copies) {
++        const bool aligned = llama_kv_remap_aligned(copy.source) &&
++                llama_kv_remap_aligned(copy.destination) &&
++                llama_kv_remap_aligned(staging + copy.staging_offset);
++        const size_t vector_elements = aligned
++                ? copy.elements / LLAMA_KV_REMAP_VECTOR_ELEMENTS * LLAMA_KV_REMAP_VECTOR_ELEMENTS
++                : 0;
++        result.vectorized_bytes += vector_elements * sizeof(uint16_t);
++        result.scalar_bytes += (copy.elements - vector_elements) * sizeof(uint16_t);
++    }
++    return result;
++}
++
++static __global__ void llama_kv_remap_gather_scalar_kernel(
++        const llama_kv_remap_copy * copies,
++        uint16_t * staging,
++        size_t copy_count,
++        size_t max_elements) {
++    const size_t element = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
++    const size_t copy_index = blockIdx.y;
++    if (copy_index >= copy_count || element >= max_elements) return;
++    const auto copy = copies[copy_index];
++    if (element < copy.elements) staging[copy.staging_offset + element] = copy.source[element];
++}
++
++static __global__ void llama_kv_remap_scatter_scalar_kernel(
++        const llama_kv_remap_copy * copies,
++        const uint16_t * staging,
++        size_t copy_count,
++        size_t max_elements) {
++    const size_t element = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
++    const size_t copy_index = blockIdx.y;
++    if (copy_index >= copy_count || element >= max_elements) return;
++    const auto copy = copies[copy_index];
++    if (element < copy.elements) copy.destination[element] = staging[copy.staging_offset + element];
++}
++
++static __device__ bool llama_kv_remap_device_aligned(const void * pointer) {
++    return (reinterpret_cast<uintptr_t>(pointer) & (alignof(uint4) - 1)) == 0;
++}
++
++static __global__ void llama_kv_remap_gather_vector_kernel(
++        const llama_kv_remap_copy * copies,
++        uint16_t * staging,
++        size_t copy_count,
++        size_t max_elements) {
++    const size_t unit = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
++    const size_t copy_index = blockIdx.y;
++    const size_t first = unit * LLAMA_KV_REMAP_VECTOR_ELEMENTS;
++    if (copy_index >= copy_count || first >= max_elements) return;
++    const auto copy = copies[copy_index];
++    if (first >= copy.elements) return;
++    auto * staged = staging + copy.staging_offset;
++    const bool aligned = llama_kv_remap_device_aligned(copy.source) &&
++            llama_kv_remap_device_aligned(staged);
++    if (aligned && first + LLAMA_KV_REMAP_VECTOR_ELEMENTS <= copy.elements) {
++        reinterpret_cast<uint4 *>(staged)[unit] = reinterpret_cast<const uint4 *>(copy.source)[unit];
++        return;
++    }
++    #pragma unroll
++    for (size_t lane = 0; lane < LLAMA_KV_REMAP_VECTOR_ELEMENTS; ++lane) {
++        const size_t element = first + lane;
++        if (element < copy.elements) staged[element] = copy.source[element];
++    }
++}
++
++static __global__ void llama_kv_remap_scatter_vector_kernel(
++        const llama_kv_remap_copy * copies,
++        const uint16_t * staging,
++        size_t copy_count,
++        size_t max_elements) {
++    const size_t unit = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
++    const size_t copy_index = blockIdx.y;
++    const size_t first = unit * LLAMA_KV_REMAP_VECTOR_ELEMENTS;
++    if (copy_index >= copy_count || first >= max_elements) return;
++    const auto copy = copies[copy_index];
++    if (first >= copy.elements) return;
++    const auto * staged = staging + copy.staging_offset;
++    const bool aligned = llama_kv_remap_device_aligned(copy.destination) &&
++            llama_kv_remap_device_aligned(staged);
++    if (aligned && first + LLAMA_KV_REMAP_VECTOR_ELEMENTS <= copy.elements) {
++        reinterpret_cast<uint4 *>(copy.destination)[unit] = reinterpret_cast<const uint4 *>(staged)[unit];
++        return;
++    }
++    #pragma unroll
++    for (size_t lane = 0; lane < LLAMA_KV_REMAP_VECTOR_ELEMENTS; ++lane) {
++        const size_t element = first + lane;
++        if (element < copy.elements) copy.destination[element] = staged[element];
++    }
++}
++
++inline cudaError_t llama_kv_remap_launch_gather(
++        const llama_kv_remap_copy * copies,
++        uint16_t * staging,
++        size_t copy_count,
++        size_t max_elements,
++        cudaStream_t stream,
++        llama_kv_remap_mode mode) {
++    if (copy_count == 0 || max_elements == 0) return cudaSuccess;
++    if (copy_count > 65535) return cudaErrorInvalidValue;
++    constexpr int threads = 256;
++    const size_t work = mode == llama_kv_remap_mode::vectorized
++            ? (max_elements + LLAMA_KV_REMAP_VECTOR_ELEMENTS - 1) / LLAMA_KV_REMAP_VECTOR_ELEMENTS
++            : max_elements;
++    const size_t grid_x = work / threads + (work % threads != 0);
++    if (grid_x > std::numeric_limits<unsigned>::max()) {
++        return cudaErrorInvalidValue;
++    }
++    const dim3 grid((unsigned) grid_x, (unsigned) copy_count);
++    if (mode == llama_kv_remap_mode::vectorized) {
++        llama_kv_remap_gather_vector_kernel<<<grid, threads, 0, stream>>>(
++                copies, staging, copy_count, max_elements);
++    } else {
++        llama_kv_remap_gather_scalar_kernel<<<grid, threads, 0, stream>>>(
++                copies, staging, copy_count, max_elements);
++    }
++    return cudaGetLastError();
++}
++
++inline cudaError_t llama_kv_remap_launch_scatter(
++        const llama_kv_remap_copy * copies,
++        const uint16_t * staging,
++        size_t copy_count,
++        size_t max_elements,
++        cudaStream_t stream,
++        llama_kv_remap_mode mode) {
++    if (copy_count == 0 || max_elements == 0) return cudaSuccess;
++    if (copy_count > 65535) return cudaErrorInvalidValue;
++    constexpr int threads = 256;
++    const size_t work = mode == llama_kv_remap_mode::vectorized
++            ? (max_elements + LLAMA_KV_REMAP_VECTOR_ELEMENTS - 1) / LLAMA_KV_REMAP_VECTOR_ELEMENTS
++            : max_elements;
++    const size_t grid_x = work / threads + (work % threads != 0);
++    if (grid_x > std::numeric_limits<unsigned>::max()) {
++        return cudaErrorInvalidValue;
++    }
++    const dim3 grid((unsigned) grid_x, (unsigned) copy_count);
++    if (mode == llama_kv_remap_mode::vectorized) {
++        llama_kv_remap_scatter_vector_kernel<<<grid, threads, 0, stream>>>(
++                copies, staging, copy_count, max_elements);
++    } else {
++        llama_kv_remap_scatter_scalar_kernel<<<grid, threads, 0, stream>>>(
++                copies, staging, copy_count, max_elements);
++    }
++    return cudaGetLastError();
++}
 diff --git a/src/llama-memory.h b/src/llama-memory.h
 index db82539..e749164 100644
 --- a/src/llama-memory.h
@@ -1114,10 +1279,10 @@ index db82539..e749164 100644
  
      //
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index e284a58..d6f3cc1 100644
+index e284a58..17d7748 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -116,6 +116,123 @@ function(llama_build_and_test source)
+@@ -116,6 +116,131 @@ function(llama_build_and_test source)
      set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})
  endfunction()
  
@@ -1214,6 +1379,12 @@ index e284a58..d6f3cc1 100644
 +    target_link_libraries(test-kv-block-cuda PRIVATE CUDA::cudart)
 +    llama_test(test-kv-block-cuda)
 +
++    add_executable(test-kv-remap-cuda test-kv-remap-cuda.cu)
++    target_include_directories(test-kv-remap-cuda PRIVATE ${PROJECT_SOURCE_DIR}/src)
++    target_link_libraries(test-kv-remap-cuda PRIVATE CUDA::cudart)
++    set_property(TARGET test-kv-remap-cuda PROPERTY CUDA_STANDARD 17)
++    llama_test(test-kv-remap-cuda)
++
 +    add_library(test-kv-real-adapter-compile OBJECT
 +        ${PROJECT_SOURCE_DIR}/src/llama-kv-cache-paged.cu)
 +    target_include_directories(test-kv-real-adapter-compile PRIVATE
@@ -1226,7 +1397,9 @@ index e284a58..d6f3cc1 100644
 +    set_property(TARGET test-kv-real-adapter-compile PROPERTY CUDA_STANDARD 17)
 +
 +    add_executable(bench-kv-block-cuda bench-kv-block-cuda.cu)
-+    target_include_directories(bench-kv-block-cuda PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++    target_include_directories(bench-kv-block-cuda PRIVATE
++        ${PROJECT_SOURCE_DIR}/tools/server
++        ${PROJECT_SOURCE_DIR}/src)
 +    target_link_libraries(bench-kv-block-cuda PRIVATE server-context CUDA::cudart)
 +    set_property(TARGET bench-kv-block-cuda PROPERTY CUDA_STANDARD 17)
 +
@@ -1243,11 +1416,12 @@ index e284a58..d6f3cc1 100644
  
 diff --git a/tests/bench-kv-block-cuda.cu b/tests/bench-kv-block-cuda.cu
 new file mode 100644
-index 0000000..8c25a56
+index 0000000..0c44d5b
 --- /dev/null
 +++ b/tests/bench-kv-block-cuda.cu
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,122 @@
 +#include "server-kv-block-backend.h"
++#include "llama-kv-remap-cuda.cuh"
 +
 +#include <cuda_runtime.h>
 +
@@ -1266,103 +1440,31 @@ index 0000000..8c25a56
 +    }
 +}
 +
-+__global__ void gather(
-+        const uint16_t * source_k,
-+        const uint16_t * source_v,
-+        uint16_t * staging_k,
-+        uint16_t * staging_v,
-+        const server_kv_block_copy * mapping,
-+        size_t count,
-+        size_t elements_per_block) {
-+    const size_t linear = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
-+    if (linear >= count * elements_per_block) return;
-+    const size_t item = linear / elements_per_block;
-+    const size_t element = linear % elements_per_block;
-+    const size_t source = (size_t) mapping[item].source * elements_per_block + element;
-+    staging_k[linear] = source_k[source];
-+    staging_v[linear] = source_v[source];
-+}
-+
-+__global__ void scatter(
-+        const uint16_t * staging_k,
-+        const uint16_t * staging_v,
-+        uint16_t * destination_k,
-+        uint16_t * destination_v,
-+        const server_kv_block_copy * mapping,
-+        size_t count,
-+        size_t elements_per_block) {
-+    const size_t linear = (size_t) blockIdx.x * blockDim.x + threadIdx.x;
-+    if (linear >= count * elements_per_block) return;
-+    const size_t item = linear / elements_per_block;
-+    const size_t element = linear % elements_per_block;
-+    const size_t destination = (size_t) mapping[item].destination * elements_per_block + element;
-+    destination_k[destination] = staging_k[linear];
-+    destination_v[destination] = staging_v[linear];
-+}
-+
 +struct timings {
 +    float gpu_ms;
 +    double end_to_end_ms;
 +};
 +
-+timings measure_memcpy(
-+        uint16_t * k,
-+        uint16_t * v,
-+        const std::vector<server_kv_block_copy> & mapping,
-+        size_t elements_per_block,
-+        cudaStream_t stream) {
-+    cudaEvent_t start = nullptr;
-+    cudaEvent_t stop = nullptr;
-+    check(cudaEventCreate(&start), "create memcpy start event");
-+    check(cudaEventCreate(&stop), "create memcpy stop event");
-+    const auto wall_start = std::chrono::steady_clock::now();
-+    check(cudaEventRecord(start, stream), "record memcpy start");
-+    const size_t bytes = elements_per_block * sizeof(uint16_t);
-+    for (const auto & copy : mapping) {
-+        check(cudaMemcpyAsync(k + (size_t) copy.destination * elements_per_block,
-+                k + (size_t) copy.source * elements_per_block, bytes,
-+                cudaMemcpyDeviceToDevice, stream), "memcpy K block");
-+        check(cudaMemcpyAsync(v + (size_t) copy.destination * elements_per_block,
-+                v + (size_t) copy.source * elements_per_block, bytes,
-+                cudaMemcpyDeviceToDevice, stream), "memcpy V block");
-+    }
-+    check(cudaEventRecord(stop, stream), "record memcpy stop");
-+    check(cudaEventSynchronize(stop), "wait memcpy stop");
-+    const auto wall_stop = std::chrono::steady_clock::now();
-+    float gpu_ms = 0.0f;
-+    check(cudaEventElapsedTime(&gpu_ms, start, stop), "measure memcpy events");
-+    cudaEventDestroy(start);
-+    cudaEventDestroy(stop);
-+    return { gpu_ms,
-+        std::chrono::duration<double, std::milli>(wall_stop - wall_start).count() };
-+}
-+
 +timings measure_batch(
-+        uint16_t * k,
-+        uint16_t * v,
-+        uint16_t * staged_k,
-+        uint16_t * staged_v,
-+        server_kv_block_copy * device_mapping,
-+        const std::vector<server_kv_block_copy> & mapping,
-+        size_t elements_per_block,
-+        cudaStream_t stream) {
++        uint16_t * staging,
++        llama_kv_remap_copy * device_copies,
++        const std::vector<llama_kv_remap_copy> & copies,
++        size_t max_elements,
++        cudaStream_t stream,
++        llama_kv_remap_mode mode) {
 +    cudaEvent_t start = nullptr;
 +    cudaEvent_t stop = nullptr;
 +    check(cudaEventCreate(&start), "create batch start event");
 +    check(cudaEventCreate(&stop), "create batch stop event");
 +    const auto wall_start = std::chrono::steady_clock::now();
-+    check(cudaMemcpyAsync(device_mapping, mapping.data(),
-+            mapping.size() * sizeof(server_kv_block_copy), cudaMemcpyHostToDevice, stream),
-+            "upload mapping");
++    check(cudaMemcpyAsync(device_copies, copies.data(),
++            copies.size() * sizeof(llama_kv_remap_copy), cudaMemcpyHostToDevice, stream),
++            "upload descriptors");
 +    check(cudaEventRecord(start, stream), "record batch start");
-+    const size_t total = mapping.size() * elements_per_block;
-+    constexpr int threads = 256;
-+    const unsigned blocks = (unsigned) ((total + threads - 1) / threads);
-+    gather<<<blocks, threads, 0, stream>>>(
-+            k, v, staged_k, staged_v, device_mapping, mapping.size(), elements_per_block);
-+    scatter<<<blocks, threads, 0, stream>>>(
-+            staged_k, staged_v, k, v, device_mapping, mapping.size(), elements_per_block);
-+    check(cudaGetLastError(), "launch batched KV kernels");
++    check(llama_kv_remap_launch_gather(device_copies, staging, copies.size(), max_elements,
++            stream, mode), "launch KV gather");
++    check(llama_kv_remap_launch_scatter(device_copies, staging, copies.size(), max_elements,
++            stream, mode), "launch KV scatter");
 +    check(cudaEventRecord(stop, stream), "record batch stop");
 +    check(cudaEventSynchronize(stop), "wait batch stop");
 +    const auto wall_stop = std::chrono::steady_clock::now();
@@ -1386,16 +1488,14 @@ index 0000000..8c25a56
 +    const size_t plane_elements = capacity * elements;
 +    uint16_t * k = nullptr;
 +    uint16_t * v = nullptr;
-+    uint16_t * staged_k = nullptr;
-+    uint16_t * staged_v = nullptr;
-+    server_kv_block_copy * device_mapping = nullptr;
++    uint16_t * staging = nullptr;
++    llama_kv_remap_copy * device_copies = nullptr;
 +    cudaStream_t stream = nullptr;
 +    check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "create benchmark stream");
 +    check(cudaMalloc((void **) &k, plane_elements * sizeof(uint16_t)), "allocate K");
 +    check(cudaMalloc((void **) &v, plane_elements * sizeof(uint16_t)), "allocate V");
-+    check(cudaMalloc((void **) &staged_k, 32 * elements * sizeof(uint16_t)), "allocate staged K");
-+    check(cudaMalloc((void **) &staged_v, 32 * elements * sizeof(uint16_t)), "allocate staged V");
-+    check(cudaMalloc((void **) &device_mapping, 32 * sizeof(server_kv_block_copy)), "allocate mapping");
++    check(cudaMalloc((void **) &staging, 64 * elements * sizeof(uint16_t)), "allocate staging");
++    check(cudaMalloc((void **) &device_copies, 64 * sizeof(llama_kv_remap_copy)), "allocate descriptors");
 +    check(cudaMemset(k, 0x2a, plane_elements * sizeof(uint16_t)), "initialize K");
 +    check(cudaMemset(v, 0x5c, plane_elements * sizeof(uint16_t)), "initialize V");
 +
@@ -1403,21 +1503,40 @@ index 0000000..8c25a56
 +    for (const size_t count : { 1u, 4u, 16u, 32u }) {
 +        std::vector<server_kv_block_copy> mapping;
 +        for (size_t i = 0; i < count; ++i) mapping.push_back({ (uint32_t) i, (uint32_t) (48 + i) });
-+        (void) measure_memcpy(k, v, mapping, elements, stream);
-+        (void) measure_batch(k, v, staged_k, staged_v, device_mapping, mapping, elements, stream);
-+        for (int trial = 0; trial < 5; ++trial) {
-+            const auto baseline = measure_memcpy(k, v, mapping, elements, stream);
-+            std::printf("per_block_memcpy,%zu,%d,%.6f,%.6f,%zu\n", count, trial,
-+                    baseline.gpu_ms, baseline.end_to_end_ms, count * layout.bytes_per_block());
-+            const auto batched = measure_batch(
-+                    k, v, staged_k, staged_v, device_mapping, mapping, elements, stream);
-+            std::printf("batched_gather_scatter,%zu,%d,%.6f,%.6f,%zu\n", count, trial,
-+                    batched.gpu_ms, batched.end_to_end_ms, count * layout.bytes_per_block());
++        std::vector<llama_kv_remap_copy> copies;
++        for (size_t i = 0; i < mapping.size(); ++i) {
++            const auto & copy = mapping[i];
++            copies.push_back({ k + (size_t) copy.source * elements,
++                    k + (size_t) copy.destination * elements, 2 * i * elements, elements });
++            copies.push_back({ v + (size_t) copy.source * elements,
++                    v + (size_t) copy.destination * elements, (2 * i + 1) * elements, elements });
++        }
++        (void) measure_batch(staging, device_copies, copies, elements, stream,
++                llama_kv_remap_mode::scalar);
++        (void) measure_batch(staging, device_copies, copies, elements, stream,
++                llama_kv_remap_mode::vectorized);
++        for (int trial = 0; trial < 20; ++trial) {
++            timings scalar{};
++            timings vectorized{};
++            if (trial % 2 == 0) {
++                scalar = measure_batch(staging, device_copies, copies, elements, stream,
++                        llama_kv_remap_mode::scalar);
++                vectorized = measure_batch(staging, device_copies, copies, elements, stream,
++                        llama_kv_remap_mode::vectorized);
++            } else {
++                vectorized = measure_batch(staging, device_copies, copies, elements, stream,
++                        llama_kv_remap_mode::vectorized);
++                scalar = measure_batch(staging, device_copies, copies, elements, stream,
++                        llama_kv_remap_mode::scalar);
++            }
++            std::printf("scalar_gather_scatter,%zu,%d,%.6f,%.6f,%zu\n", count, trial,
++                    scalar.gpu_ms, scalar.end_to_end_ms, count * layout.bytes_per_block());
++            std::printf("vectorized_gather_scatter,%zu,%d,%.6f,%.6f,%zu\n", count, trial,
++                    vectorized.gpu_ms, vectorized.end_to_end_ms, count * layout.bytes_per_block());
 +        }
 +    }
-+    cudaFree(device_mapping);
-+    cudaFree(staged_v);
-+    cudaFree(staged_k);
++    cudaFree(device_copies);
++    cudaFree(staging);
 +    cudaFree(v);
 +    cudaFree(k);
 +    cudaStreamDestroy(stream);
@@ -2730,6 +2849,137 @@ index 0000000..b448bf4
 +            (unsigned long long) stats.pinned_bytes_peak);
 +    llama_free(context);
 +    llama_model_free(model);
++    return 0;
++}
+diff --git a/tests/test-kv-remap-cuda.cu b/tests/test-kv-remap-cuda.cu
+new file mode 100644
+index 0000000..31c4900
+--- /dev/null
++++ b/tests/test-kv-remap-cuda.cu
+@@ -0,0 +1,125 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
++#include "llama-kv-remap-cuda.cuh"
++
++#include <cuda_runtime.h>
++
++#include <cassert>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
++
++static void check(cudaError_t status, const char * operation) {
++    if (status != cudaSuccess) {
++        std::fprintf(stderr, "%s: %s\n", operation, cudaGetErrorString(status));
++        std::exit(1);
++    }
++}
++
++static void require_equal(const std::vector<uint16_t> & expected, const uint16_t * device, size_t size) {
++    std::vector<uint16_t> observed(size);
++    check(cudaMemcpy(observed.data(), device, size * sizeof(uint16_t), cudaMemcpyDeviceToHost),
++            "read remap result");
++    assert(observed == expected);
++}
++
++static void test_aligned_overlap_uses_snapshot_and_vector_path() {
++    constexpr size_t elements_per_block = 64;
++    constexpr size_t blocks = 4;
++    std::vector<uint16_t> initial(blocks * elements_per_block);
++    for (size_t i = 0; i < initial.size(); ++i) initial[i] = (uint16_t) (17 + i * 13);
++    auto expected = initial;
++    std::copy_n(initial.begin(), elements_per_block,
++            expected.begin() + elements_per_block);
++    std::copy_n(initial.begin() + elements_per_block, elements_per_block,
++            expected.begin());
++
++    uint16_t * data = nullptr;
++    uint16_t * staging = nullptr;
++    llama_kv_remap_copy * device_copies = nullptr;
++    check(cudaMalloc((void **) &data, initial.size() * sizeof(uint16_t)), "allocate remap data");
++    check(cudaMalloc((void **) &staging, 2 * elements_per_block * sizeof(uint16_t)), "allocate staging");
++    check(cudaMalloc((void **) &device_copies, 2 * sizeof(llama_kv_remap_copy)), "allocate descriptors");
++    check(cudaMemcpy(data, initial.data(), initial.size() * sizeof(uint16_t), cudaMemcpyHostToDevice),
++            "initialize remap data");
++    const std::vector<llama_kv_remap_copy> copies = {
++        { data, data + elements_per_block, 0, elements_per_block },
++        { data + elements_per_block, data, elements_per_block, elements_per_block },
++    };
++    check(cudaMemcpy(device_copies, copies.data(), copies.size() * sizeof(llama_kv_remap_copy),
++            cudaMemcpyHostToDevice), "upload descriptors");
++    const auto accounting = llama_kv_remap_account(copies, staging);
++    assert(accounting.vectorized_bytes == 2 * elements_per_block * sizeof(uint16_t));
++    assert(accounting.scalar_bytes == 0);
++    check(llama_kv_remap_launch_gather(device_copies, staging, copies.size(), elements_per_block,
++            nullptr, llama_kv_remap_mode::vectorized), "launch vector gather");
++    check(llama_kv_remap_launch_scatter(device_copies, staging, copies.size(), elements_per_block,
++            nullptr, llama_kv_remap_mode::vectorized), "launch vector scatter");
++    check(cudaDeviceSynchronize(), "wait vector remap");
++    require_equal(expected, data, initial.size());
++
++    // The benchmark compares the vectorized path with this scalar reference
++    // implementation, so validate both modes against the same independent
++    // snapshot oracle before using either result in a performance claim.
++    check(cudaMemcpy(data, initial.data(), initial.size() * sizeof(uint16_t), cudaMemcpyHostToDevice),
++            "reset scalar remap data");
++    check(llama_kv_remap_launch_gather(device_copies, staging, copies.size(), elements_per_block,
++            nullptr, llama_kv_remap_mode::scalar), "launch scalar gather");
++    check(llama_kv_remap_launch_scatter(device_copies, staging, copies.size(), elements_per_block,
++            nullptr, llama_kv_remap_mode::scalar), "launch scalar scatter");
++    check(cudaDeviceSynchronize(), "wait scalar remap");
++    require_equal(expected, data, initial.size());
++    cudaFree(device_copies);
++    cudaFree(staging);
++    cudaFree(data);
++}
++
++static void test_unaligned_tail_falls_back_without_touching_guards() {
++    constexpr size_t allocation_elements = 128;
++    constexpr size_t elements = 19;
++    std::vector<uint16_t> initial(allocation_elements, 0xa5a5);
++    for (size_t i = 0; i < elements; ++i) initial[1 + i] = (uint16_t) (1000 + i);
++    auto expected = initial;
++    std::copy_n(initial.begin() + 1, elements, expected.begin() + 65);
++
++    uint16_t * data = nullptr;
++    uint16_t * staging = nullptr;
++    llama_kv_remap_copy * device_copy = nullptr;
++    check(cudaMalloc((void **) &data, initial.size() * sizeof(uint16_t)), "allocate tail data");
++    check(cudaMalloc((void **) &staging, elements * sizeof(uint16_t)), "allocate tail staging");
++    check(cudaMalloc((void **) &device_copy, sizeof(llama_kv_remap_copy)), "allocate tail descriptor");
++    check(cudaMemcpy(data, initial.data(), initial.size() * sizeof(uint16_t), cudaMemcpyHostToDevice),
++            "initialize tail data");
++    const std::vector<llama_kv_remap_copy> copies = {{ data + 1, data + 65, 0, elements }};
++    check(cudaMemcpy(device_copy, copies.data(), sizeof(llama_kv_remap_copy), cudaMemcpyHostToDevice),
++            "upload tail descriptor");
++    const auto accounting = llama_kv_remap_account(copies, staging);
++    assert(accounting.vectorized_bytes == 0);
++    assert(accounting.scalar_bytes == elements * sizeof(uint16_t));
++    check(llama_kv_remap_launch_gather(device_copy, staging, 1, elements, nullptr,
++            llama_kv_remap_mode::vectorized), "launch tail gather");
++    check(llama_kv_remap_launch_scatter(device_copy, staging, 1, elements, nullptr,
++            llama_kv_remap_mode::vectorized), "launch tail scatter");
++    check(cudaDeviceSynchronize(), "wait tail remap");
++    require_equal(expected, data, initial.size());
++    cudaFree(device_copy);
++    cudaFree(staging);
++    cudaFree(data);
++}
++
++static void test_invalid_grid_shape_is_rejected_before_launch() {
++    assert(llama_kv_remap_launch_gather(nullptr, nullptr, 65536, 1, nullptr,
++            llama_kv_remap_mode::vectorized) == cudaErrorInvalidValue);
++    assert(llama_kv_remap_launch_scatter(nullptr, nullptr, 65536, 1, nullptr,
++            llama_kv_remap_mode::scalar) == cudaErrorInvalidValue);
++}
++
++int main() {
++    test_aligned_overlap_uses_snapshot_and_vector_path();
++    test_unaligned_tail_falls_back_without_touching_guards();
++    test_invalid_grid_shape_is_rejected_before_launch();
 +    return 0;
 +}
 diff --git a/tests/test-kv-runtime.cpp b/tests/test-kv-runtime.cpp
@@ -4197,7 +4447,7 @@ index 0000000..9e4bc3b
 +    checkpoint_restore_result restore_checkpoint(const std::string & payload);
 +};
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..603894f 100644
+index 986b2f1..0ec1d2b 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -4,6 +4,14 @@
@@ -5561,7 +5811,7 @@ index 986b2f1..603894f 100644
      int get_slot_n_ctx() {
          return slots.back().n_ctx;
      }
-@@ -4127,6 +4897,151 @@ void server_routes::init_routes() {
+@@ -4127,6 +4897,159 @@ void server_routes::init_routes() {
                      {"name",  "prompt_tokens_total"},
                      {"help",  "Number of prompt tokens processed."},
                      {"value",  (uint64_t) res_task->n_prompt_tokens_processed_total}
@@ -5691,6 +5941,14 @@ index 986b2f1..603894f 100644
 +                    {"help",  "Real KV bytes transported by CUDA copy and swap operations."},
 +                    {"value",  res_task->cuda_kv.copy_bytes}
 +            }, {
++                    {"name",  "cuda_kv_remap_vectorized_bytes_total"},
++                    {"help",  "Real KV remap bytes handled with aligned 128-bit CUDA loads and stores."},
++                    {"value",  res_task->cuda_kv.remap_vectorized_bytes}
++            }, {
++                    {"name",  "cuda_kv_remap_scalar_bytes_total"},
++                    {"help",  "Real KV remap bytes handled by the safe scalar alignment/tail fallback."},
++                    {"value",  res_task->cuda_kv.remap_scalar_bytes}
++            }, {
 +                    {"name",  "cuda_kv_events_waited_total"},
 +                    {"help",  "CUDA KV dependency events explicitly waited by the runtime."},
 +                    {"value",  res_task->cuda_kv.events_waited}
@@ -5713,7 +5971,7 @@ index 986b2f1..603894f 100644
              }, {
                      {"name",  "prompt_seconds_total"},
                      {"help",  "Prompt process time"},
-@@ -4149,6 +5064,18 @@ void server_routes::init_routes() {
+@@ -4149,6 +5072,18 @@ void server_routes::init_routes() {
                      {"value",  res_task->n_tokens_max}
              }}},
              {"gauge", {{
@@ -5732,7 +5990,7 @@ index 986b2f1..603894f 100644
                      {"name",  "prompt_tokens_seconds"},
                      {"help",  "Average prompt throughput in tokens/s."},
                      {"value",  res_task->n_prompt_tokens_processed ? 1.e3 / res_task->t_prompt_processing * res_task->n_prompt_tokens_processed : 0.}
-@@ -4156,6 +5083,115 @@ void server_routes::init_routes() {
+@@ -4156,6 +5091,115 @@ void server_routes::init_routes() {
                      {"name",  "predicted_tokens_seconds"},
                      {"help",  "Average generation throughput in tokens/s."},
                      {"value",  res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}
@@ -5848,7 +6106,7 @@ index 986b2f1..603894f 100644
              },{
                      {"name",  "requests_processing"},
                      {"help",  "Number of requests processing."},
-@@ -4188,6 +5224,108 @@ void server_routes::init_routes() {
+@@ -4188,6 +5232,108 @@ void server_routes::init_routes() {
              }
          }
  
