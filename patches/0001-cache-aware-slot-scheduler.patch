@@ -1427,10 +1427,10 @@ index e284a58..17d7748 100644
  
 diff --git a/tests/bench-kv-block-cuda.cu b/tests/bench-kv-block-cuda.cu
 new file mode 100644
-index 0000000..0c44d5b
+index 0000000..22f7983
 --- /dev/null
 +++ b/tests/bench-kv-block-cuda.cu
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,140 @@
 +#include "server-kv-block-backend.h"
 +#include "llama-kv-remap-cuda.cuh"
 +
@@ -1440,6 +1440,7 @@ index 0000000..0c44d5b
 +#include <cstdint>
 +#include <cstdio>
 +#include <cstdlib>
++#include <random>
 +#include <vector>
 +
 +namespace {
@@ -1452,6 +1453,7 @@ index 0000000..0c44d5b
 +}
 +
 +struct timings {
++    double host_enqueue_ms;
 +    float gpu_ms;
 +    double end_to_end_ms;
 +};
@@ -1477,13 +1479,16 @@ index 0000000..0c44d5b
 +    check(llama_kv_remap_launch_scatter(device_copies, staging, copies.size(), max_elements,
 +            stream, mode), "launch KV scatter");
 +    check(cudaEventRecord(stop, stream), "record batch stop");
++    const auto enqueue_stop = std::chrono::steady_clock::now();
 +    check(cudaEventSynchronize(stop), "wait batch stop");
 +    const auto wall_stop = std::chrono::steady_clock::now();
 +    float gpu_ms = 0.0f;
 +    check(cudaEventElapsedTime(&gpu_ms, start, stop), "measure batch events");
 +    cudaEventDestroy(start);
 +    cudaEventDestroy(stop);
-+    return { gpu_ms,
++    return {
++        std::chrono::duration<double, std::milli>(enqueue_stop - wall_start).count(),
++        gpu_ms,
 +        std::chrono::duration<double, std::milli>(wall_stop - wall_start).count() };
 +}
 +
@@ -1510,7 +1515,9 @@ index 0000000..0c44d5b
 +    check(cudaMemset(k, 0x2a, plane_elements * sizeof(uint16_t)), "initialize K");
 +    check(cudaMemset(v, 0x5c, plane_elements * sizeof(uint16_t)), "initialize V");
 +
-+    std::puts("method,blocks,trial,gpu_ms,end_to_end_ms,bytes");
++    std::mt19937 order_rng(20260806);
++    std::bernoulli_distribution scalar_first_distribution(0.5);
++    std::puts("phase,method,blocks,trial,order_in_pair,host_enqueue_ms,gpu_ms,end_to_end_ms,bytes");
 +    for (const size_t count : { 1u, 4u, 16u, 32u }) {
 +        std::vector<server_kv_block_copy> mapping;
 +        for (size_t i = 0; i < count; ++i) mapping.push_back({ (uint32_t) i, (uint32_t) (48 + i) });
@@ -1522,14 +1529,21 @@ index 0000000..0c44d5b
 +            copies.push_back({ v + (size_t) copy.source * elements,
 +                    v + (size_t) copy.destination * elements, (2 * i + 1) * elements, elements });
 +        }
-+        (void) measure_batch(staging, device_copies, copies, elements, stream,
-+                llama_kv_remap_mode::scalar);
-+        (void) measure_batch(staging, device_copies, copies, elements, stream,
-+                llama_kv_remap_mode::vectorized);
++        const timings warmup_scalar = measure_batch(staging, device_copies, copies, elements,
++                stream, llama_kv_remap_mode::scalar);
++        const timings warmup_vectorized = measure_batch(staging, device_copies, copies, elements,
++                stream, llama_kv_remap_mode::vectorized);
++        std::printf("warmup,scalar_gather_scatter,%zu,-1,0,%.6f,%.6f,%.6f,%zu\n", count,
++                warmup_scalar.host_enqueue_ms, warmup_scalar.gpu_ms, warmup_scalar.end_to_end_ms,
++                count * layout.bytes_per_block());
++        std::printf("warmup,vectorized_gather_scatter,%zu,-1,1,%.6f,%.6f,%.6f,%zu\n", count,
++                warmup_vectorized.host_enqueue_ms, warmup_vectorized.gpu_ms,
++                warmup_vectorized.end_to_end_ms, count * layout.bytes_per_block());
 +        for (int trial = 0; trial < 20; ++trial) {
 +            timings scalar{};
 +            timings vectorized{};
-+            if (trial % 2 == 0) {
++            const bool scalar_first = scalar_first_distribution(order_rng);
++            if (scalar_first) {
 +                scalar = measure_batch(staging, device_copies, copies, elements, stream,
 +                        llama_kv_remap_mode::scalar);
 +                vectorized = measure_batch(staging, device_copies, copies, elements, stream,
@@ -1540,10 +1554,14 @@ index 0000000..0c44d5b
 +                scalar = measure_batch(staging, device_copies, copies, elements, stream,
 +                        llama_kv_remap_mode::scalar);
 +            }
-+            std::printf("scalar_gather_scatter,%zu,%d,%.6f,%.6f,%zu\n", count, trial,
-+                    scalar.gpu_ms, scalar.end_to_end_ms, count * layout.bytes_per_block());
-+            std::printf("vectorized_gather_scatter,%zu,%d,%.6f,%.6f,%zu\n", count, trial,
-+                    vectorized.gpu_ms, vectorized.end_to_end_ms, count * layout.bytes_per_block());
++            std::printf("confirmatory,scalar_gather_scatter,%zu,%d,%d,%.6f,%.6f,%.6f,%zu\n",
++                    count, trial, scalar_first ? 0 : 1,
++                    scalar.host_enqueue_ms, scalar.gpu_ms, scalar.end_to_end_ms,
++                    count * layout.bytes_per_block());
++            std::printf("confirmatory,vectorized_gather_scatter,%zu,%d,%d,%.6f,%.6f,%.6f,%zu\n",
++                    count, trial, scalar_first ? 1 : 0,
++                    vectorized.host_enqueue_ms, vectorized.gpu_ms, vectorized.end_to_end_ms,
++                    count * layout.bytes_per_block());
 +        }
 +    }
 +    cudaFree(device_copies);

@@ -142,6 +142,8 @@ Windows WDDM 首次运行前需要以管理员身份执行 CUDA Toolkit 的 `Ena
 
 后续研究不把当前 Remap 冒充 PagedAttention。[研究方向 ADR](docs/adr/0001-copy-aware-paged-kv-research-direction.md)将首个切片限定为 Qwen2.5、FP16 KV、GQA、单 token decode 和消费级单 GPU；[一手资料与基线审计](docs/research/primary-source-foundations.md)区分本机可复现的 upstream/Direct/Scalar Remap/Vector Remap/固定规则基线与只能作为相关工作的外部系统，[可证伪研究章程](docs/research/research-charter.md)则锁定变量、机制、证伪条件与负结果规则。机器可校验的基线和主张分别位于 [`config/research_baselines.json`](config/research_baselines.json) 与 [`config/research_claims.json`](config/research_claims.json)，科研路线按 [GitHub Issue #1](https://github.com/Ljzljz-211302/cacheflow-llama-runtime/issues/1) 的依赖图执行。
 
+[确认性实验协议](docs/research/experiment-protocol.md)进一步冻结 warm-up、种子化随机 Trial Pair、host enqueue/CUDA Event/end-to-end 三种计时、paired bootstrap CI、无事后删异常和 CPU-only correctness fallback。`scripts/run_research_experiment.py` 用一个命令生成带 provenance 的 `manifest.json` 与逐行 `trials.jsonl`；方法学依据见 [实验协议一手资料](docs/research/experiment-protocol-foundations.md)。
+
 ## 代码边界
 
 ```text

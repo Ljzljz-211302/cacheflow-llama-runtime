@@ -81,3 +81,15 @@ _Avoid_: objective（只表达目标而不要求可证伪）；把 prospective h
 按版本冻结的一组 Research Claim 及其统一范围、证据状态和负结果规则。机器可读注册表负责拒绝无证伪条件、伪造 observed result 或引用未知 Research Baseline 的主张；人类可读文档解释研究问题之间的关系。
 
 _Avoid_: roadmap（只描述工作顺序）；experiment protocol（后者负责冻结采样、统计与门槛，而不是研究主张本身）。
+
+## Experiment Protocol
+
+在观察确认性结果前按版本冻结的实验执行与分析契约，包含 workload、warm-up、Trial Pair、随机种子、计时边界、固定样本量、失效规则、效应量、置信区间、验收门槛和制品字段。
+
+_Avoid_: benchmark script（只执行代码但不冻结分析决策）；根据已观察结果修改同一版本的门槛。
+
+## Trial Pair
+
+同一 configuration 和 nuisance block 内，各执行一次 baseline 与 candidate 的最小配对分析单位。两侧共享输入、layout、bytes、进程热状态和测量边界，执行顺序由预注册 seed 随机化并记录。
+
+_Avoid_: 把两个独立运行集合的中位数事后相除；只删除 pair 中较慢的一侧。

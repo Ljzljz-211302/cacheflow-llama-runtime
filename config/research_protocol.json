@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "protocol_version": "1.0.0",
+  "preregistered_at_utc": "2026-08-06T14:40:00Z",
+  "random_seed": 20260806,
+  "claims": [
+    "H1-vector-remap",
+    "H2-copy-bottleneck",
+    "H3-paged-decode-frontier",
+    "H4-adaptive-action-policy",
+    "H5-policy-causal-chain"
+  ],
+  "supported_environment": {
+    "os": "Windows 11 23H2",
+    "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+    "compute_capability": "8.9",
+    "cuda_toolkit": "12.6",
+    "driver": "561.19",
+    "toolchain": "MSVC 19.37 + CMake/Ninja Release",
+    "environment_evidence": "results/environment.json"
+  },
+  "workloads": {
+    "h1_vector_remap": {
+      "claim": "H1-vector-remap",
+      "runner": ["python", "scripts/run_cuda_kv_benchmark.py"],
+      "source": "results/raw/cuda-kv-transport.csv",
+      "methods": ["scalar_gather_scatter", "vectorized_gather_scatter"],
+      "block_counts": [1, 4, 16, 32],
+      "pairs_per_block_count": 20,
+      "warmup_pairs_per_block_count": 1,
+      "order": "seeded pseudorandom order within each pair; actual order_in_pair is recorded",
+      "fixed_layout": {
+        "layers": 32,
+        "kv_heads": 8,
+        "head_dim": 128,
+        "block_tokens": 16,
+        "dtype": "fp16"
+      }
+    }
+  },
+  "timing": {
+    "host_enqueue_ms": {
+      "clock": "std::chrono::steady_clock",
+      "start": "immediately before descriptor upload and kernel enqueue",
+      "stop": "immediately after stop-event enqueue and before host synchronization",
+      "includes": ["descriptor upload API call", "event records", "gather/scatter launch API calls"],
+      "excludes": ["waiting for GPU completion"]
+    },
+    "synchronized_kernel_ms": {
+      "clock": "CUDA events on the benchmark stream",
+      "start": "event after descriptor upload",
+      "stop": "event after gather and scatter",
+      "synchronization": "cudaEventSynchronize(stop) before elapsed-time query",
+      "excludes": ["host descriptor upload", "host-side queue delay before start event"]
+    },
+    "end_to_end_ms": {
+      "clock": "std::chrono::steady_clock",
+      "start": "immediately before descriptor upload",
+      "stop": "after stop-event synchronization",
+      "includes": ["descriptor upload", "host enqueue", "GPU execution", "synchronization wait"]
+    }
+  },
+  "statistics": {
+    "unit": "within-trial paired baseline/variant observation",
+    "primary_effect": "100 * (baseline_ms - variant_ms) / baseline_ms",
+    "primary_estimator": "median paired improvement percent",
+    "confidence_interval": "deterministic paired percentile bootstrap of the median",
+    "confidence_level": 0.95,
+    "bootstrap_resamples": 10000,
+    "minimum_pairs_per_case": 20,
+    "gates": {
+      "correctness": "all valid observations pass the oracle and sanitizer gate",
+      "non_regression": "lower 95% CI of paired kernel improvement is at least -3% for every block count",
+      "material_effect": "lower 95% CI reaches at least 10% for one or more block counts",
+      "trend": "point-estimate improvement is non-increasing for 1, 4, 16, and 32 blocks"
+    }
+  },
+  "outliers": {
+    "outcome_based_deletion": "forbidden",
+    "invalid_before_outcome_inspection": [
+      "process or device error",
+      "correctness-oracle failure",
+      "missing timing field",
+      "external interruption recorded by the harness"
+    ],
+    "handling": "retain every record with valid=false and invalid_reason; exclude the entire pair, never one arm; reruns receive a new pair_id",
+    "environmental_excursions": "retain and report; thresholds may be added only by a new protocol version before observing outcomes"
+  },
+  "correctness": {
+    "cuda": [
+      "CPU element-wise oracle for snapshot mappings",
+      "guard regions and randomized overlap/cycle mappings",
+      "Compute Sanitizer memcheck and racecheck",
+      "real Qwen tensor deterministic-output comparison"
+    ],
+    "performance_is_secondary_to_correctness": true
+  },
+  "cpu_correctness_fallback": {
+    "purpose": "validate scheduling, block-table, refcount, COW, swap, protocol schema, and CPU reference semantics when CUDA is unavailable",
+    "command": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build_patched_server.ps1"],
+    "performance_claims_allowed": false,
+    "cuda_claims_allowed": false
+  },
+  "artifacts": {
+    "manifest": "manifest.json",
+    "raw_trials": "trials.jsonl",
+    "required_provenance": [
+      "protocol and claims SHA-256",
+      "outer and vendor code revisions",
+      "outer and vendor dirty flags",
+      "benchmark binary SHA-256",
+      "runner command",
+      "source-data SHA-256",
+      "environment snapshot",
+      "UTC capture time"
+    ]
+  }
+}

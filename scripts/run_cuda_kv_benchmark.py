@@ -28,21 +28,29 @@ def main() -> None:
         [str(EXE)], cwd=ROOT, env=env, check=True, text=True, capture_output=True
     )
     rows = list(csv.DictReader(completed.stdout.splitlines()))
-    if len(rows) != 160:
-        raise AssertionError(f"expected 160 benchmark samples, received {len(rows)}")
+    if len(rows) != 168:
+        raise AssertionError(f"expected 168 benchmark rows, received {len(rows)}")
     RAW.parent.mkdir(parents=True, exist_ok=True)
     RAW.write_text(completed.stdout, encoding="utf-8", newline="")
 
     samples: dict[tuple[str, int], list[dict[str, float]]] = defaultdict(list)
     for row in rows:
+        if row["phase"] != "confirmatory":
+            continue
         samples[(row["method"], int(row["blocks"]))].append(
-            {"gpu_ms": float(row["gpu_ms"]), "end_to_end_ms": float(row["end_to_end_ms"])}
+            {
+                "host_enqueue_ms": float(row["host_enqueue_ms"]),
+                "gpu_ms": float(row["gpu_ms"]),
+                "end_to_end_ms": float(row["end_to_end_ms"]),
+            }
         )
     summary: dict[str, object] = {
         "device": "NVIDIA GeForce RTX 4050 Laptop GPU",
         "layout": {"layers": 32, "kv_heads": 8, "head_dim": 128, "block_tokens": 16, "dtype": "fp16"},
+        "warmup_pairs_per_case": 1,
         "trials_per_case": 20,
-        "design": "paired trials with alternating scalar/vectorized execution order",
+        "random_seed": 20260806,
+        "design": "paired trials with seeded randomized scalar/vectorized execution order",
         "cases": [],
         "paired_comparisons": [],
     }
@@ -53,6 +61,9 @@ def main() -> None:
             {
                 "method": method,
                 "blocks": blocks,
+                "median_host_enqueue_ms": statistics.median(
+                    v["host_enqueue_ms"] for v in values
+                ),
                 "median_gpu_ms": statistics.median(v["gpu_ms"] for v in values),
                 "median_end_to_end_ms": statistics.median(v["end_to_end_ms"] for v in values),
             }
@@ -94,7 +105,8 @@ def main() -> None:
         "passed": True,
     }
     SUMMARY.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"raw": str(RAW), "summary": str(SUMMARY), "samples": len(rows)}))
+    print(json.dumps({"raw": str(RAW), "summary": str(SUMMARY),
+                      "raw_rows": len(rows), "confirmatory_samples": 160}))
 
 
 if __name__ == "__main__":
