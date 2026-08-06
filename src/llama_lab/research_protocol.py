@@ -201,12 +201,18 @@ def package_cuda_remap_trials(
         }
         if any(value < 0 for value in timing.values()):
             raise ProtocolError("timing values must be non-negative")
+        pair_id = (
+            f"blocks-{blocks}-warmup-0"
+            if phase == "warmup"
+            else f"blocks-{blocks}-trial-{trial}"
+        )
         record = {
                 "claim_id": "H1-vector-remap",
                 "experiment_id": "h1-vector-remap",
-                "pair_id": f"blocks-{blocks}-trial-{trial}",
+                "pair_id": pair_id,
                 "phase": phase,
                 "order_in_pair": order_in_pair,
+                "random_seed": int(row["random_seed"]),
                 "method": method,
                 "blocks": blocks,
                 "bytes": int(row["bytes"]),

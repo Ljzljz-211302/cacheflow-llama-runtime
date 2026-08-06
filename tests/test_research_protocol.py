@@ -129,6 +129,7 @@ class ResearchProtocolTests(unittest.TestCase):
             )
             self.assertEqual(records[0]["order_in_pair"], 0)
             self.assertEqual(records[1]["order_in_pair"], 1)
+            self.assertEqual(records[0]["random_seed"], 20260806)
             self.assertFalse(manifest["protocol_compliant"])
             self.assertTrue(manifest["acceptance"]["correctness"])
 
