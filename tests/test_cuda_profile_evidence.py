@@ -11,6 +11,7 @@ from llama_lab.cuda_profile_evidence import (
     characterize_regimes,
     parse_ncu_csv,
     parse_nsys_sqlite,
+    validate_profile_artifact,
 )
 
 
@@ -152,6 +153,14 @@ class CudaProfileEvidenceTests(unittest.TestCase):
         self.assertTrue(protocol["claim_rules"]["memory_bound_requires_ncu_dram_metric"])
         self.assertTrue(protocol["claim_rules"]["occupancy_claim_requires_ncu_occupancy_metric"])
         self.assertTrue(protocol["claim_rules"]["negative_and_neutral_results_are_retained"])
+
+    def test_repository_profile_artifact_is_self_consistent(self) -> None:
+        artifact = Path("results/research/h2-kv-profile-v1.0.0")
+        validated = validate_profile_artifact(
+            artifact, Path("config/cuda_profile_protocol.json")
+        )
+        self.assertEqual(len(validated["report"]["regimes"]), 4)
+        self.assertEqual(len(validated["records"]), 160)
 
     def test_builds_reproducible_profiler_commands_with_separate_reports(self) -> None:
         executable = Path("bench-kv-block-cuda.exe")

@@ -437,3 +437,79 @@ def characterize_regimes(
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def validate_profile_artifact(artifact_dir: Path, protocol_path: Path) -> dict[str, Any]:
+    """Fail closed when a committed H2 artifact loses provenance or pair completeness."""
+    manifest = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))
+    report = json.loads((artifact_dir / "report.json").read_text(encoding="utf-8"))
+    protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+    trials_path = artifact_dir / "trials.jsonl"
+    records = load_jsonl(trials_path)
+    from llama_lab.research_protocol import file_sha256
+
+    if manifest.get("protocol_sha256") != file_sha256(protocol_path):
+        raise ValueError("profile artifact protocol hash does not match")
+    expected_hashes = {
+        "trials": trials_path,
+        "report": artifact_dir / "report.json",
+        "report_markdown": artifact_dir / "report.md",
+    }
+    for name, path in expected_hashes.items():
+        if manifest.get("artifact_hashes", {}).get(name) != file_sha256(path):
+            raise ValueError(f"profile artifact {name} hash does not match")
+    if manifest.get("raw_trial_count") != len(records):
+        raise ValueError("profile artifact raw trial count does not match")
+    regimes = {str(regime["id"]): regime for regime in protocol["regimes"]}
+    expected_pairs = int(protocol["no_profiler"]["paired_trials_per_regime"])
+    methods = set(protocol["no_profiler"]["methods"])
+    for regime_id in regimes:
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for record in records:
+            if record.get("regime_id") == regime_id:
+                grouped[str(record["pair_id"])].append(record)
+        if len(grouped) != expected_pairs:
+            raise ValueError(f"{regime_id} pair count does not match protocol")
+        for pair_id, pair in grouped.items():
+            if {str(row["method"]) for row in pair} != methods:
+                raise ValueError(f"{pair_id} methods are incomplete")
+            if {int(row["order_in_pair"]) for row in pair} != {0, 1}:
+                raise ValueError(f"{pair_id} order is not complementary")
+            if len({int(row["random_seed"]) for row in pair}) != 1:
+                raise ValueError(f"{pair_id} random seed differs within pair")
+    commands = {str(item["regime_id"]): item for item in manifest["commands"]}
+    if set(commands) != set(regimes):
+        raise ValueError("profile artifact command coverage is incomplete")
+    for regime_id, status in commands.items():
+        profile_dir = artifact_dir / "profiles" / regime_id
+        report_path = profile_dir / "nsys.nsys-rep"
+        sqlite_path = profile_dir / "nsys.sqlite"
+        if status["nsys"].get("report_sha256") != file_sha256(report_path):
+            raise ValueError(f"{regime_id} NSYS report hash does not match")
+        if status["nsys"].get("sqlite_sha256") != file_sha256(sqlite_path):
+            raise ValueError(f"{regime_id} NSYS SQLite hash does not match")
+        raw_path = artifact_dir / "raw" / f"{regime_id}-no-profiler.csv"
+        if status["no_profiler"].get("stdout_sha256") != file_sha256(raw_path):
+            raise ValueError(f"{regime_id} no-profiler raw hash does not match")
+    if not report.get("contains_neutral_or_loss"):
+        raise ValueError("profile artifact omitted required neutral/loss regime")
+    if not report.get("all_claims_link_raw_to_end_to_end"):
+        raise ValueError("profile claims are not linked to end-to-end effects")
+    if not manifest.get("ncu_complete"):
+        required = {
+            "memory-bound or roofline classification",
+            "achieved occupancy explanation",
+            "hardware DRAM byte attribution",
+        }
+        if not required.issubset(set(report.get("prohibited_claims", []))):
+            raise ValueError("incomplete NCU artifact does not prohibit counter claims")
+        if not all(
+            command["ncu"].get("exit_code") != 0
+            and (
+                command["ncu"].get("permission_denied")
+                or command["ncu"].get("driver_incompatible")
+            )
+            for command in commands.values()
+        ):
+            raise ValueError("incomplete NCU artifact lacks an auditable failure")
+    return {"manifest": manifest, "report": report, "records": records}
