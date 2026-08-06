@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "upstream_revision": "acd79d603cb2e1c84c0886137b80f1ad649b6857",
+  "scope": {
+    "host_os": "Windows 11 23H2",
+    "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+    "gpu_memory_mib": 6141,
+    "compute_capability": "8.9",
+    "model": "Qwen2.5-0.5B-Instruct GGUF",
+    "quantization": "Q4_K_M for serving; FP16 K/V",
+    "kv_layout": "32 layers, 8 KV heads, head dimension 128, 16-token blocks",
+    "toolchain": "MSVC 19.37, CMake, CUDA backend",
+    "evidence": "results/environment.json"
+  },
+  "baselines": [
+    {
+      "id": "upstream",
+      "name": "Pinned llama.cpp upstream scheduler and contiguous KV path",
+      "kind": "local",
+      "comparison_class": "quantitative",
+      "runnable": true,
+      "source": "https://github.com/ggml-org/llama.cpp/commit/acd79d603cb2e1c84c0886137b80f1ad649b6857",
+      "source_revision": "acd79d603cb2e1c84c0886137b80f1ad649b6857",
+      "license": "MIT",
+      "commands": [
+        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_upstream_baseline.ps1",
+        "python scripts/run_upstream_compat.py",
+        "python scripts/run_mixed_workload.py --backend cuda --policy upstream --trials 3"
+      ],
+      "controlled_mode": "--scheduler-policy upstream",
+      "comparability_limits": [
+        "Only same model, prompts, seed, build type, and MSVC toolchain are comparable.",
+        "The pinned CPU upstream build is a semantic baseline; CUDA system comparisons use the fork's upstream policy mode.",
+        "Cross-compiler byte-identical output is not claimed."
+      ]
+    },
+    {
+      "id": "direct-copy",
+      "name": "Per-block cudaMemcpyAsync for mappings without snapshot requirements",
+      "kind": "local",
+      "comparison_class": "quantitative",
+      "runnable": true,
+      "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
+      "source_revision": "vendor/llama.cpp@4545514952ec2f2c0d0998d4623ac51a2aea050b",
+      "license": "MIT",
+      "commands": [
+        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_patched_server.ps1",
+        "python scripts/run_cuda_kv_benchmark.py"
+      ],
+      "controlled_mode": "non-overlapping mapping; production direct-copy path",
+      "comparability_limits": [
+        "Direct copy is valid only when source and destination ranges do not require snapshot semantics.",
+        "It cannot be compared against Remap using a different mapping distribution.",
+        "Per-block copy launch count is part of the measured mechanism."
+      ]
+    },
+    {
+      "id": "scalar-remap",
+      "name": "Scalar descriptor-driven Gather and Scatter",
+      "kind": "local",
+      "comparison_class": "quantitative",
+      "runnable": true,
+      "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
+      "source_revision": "vendor/llama.cpp@4545514952ec2f2c0d0998d4623ac51a2aea050b",
+      "license": "MIT",
+      "commands": [
+        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_patched_server.ps1",
+        "python scripts/run_cuda_kv_benchmark.py"
+      ],
+      "controlled_mode": "snapshot-required mapping; scalar Gather+Scatter",
+      "comparability_limits": [
+        "Descriptors, staging, stream, and mapping must match Vector Remap exactly.",
+        "The two-kernel staging path is required for overlap semantics and is not comparable to a different Direct workload.",
+        "Current evidence covers one RTX 4050 Laptop GPU and the locked FP16 KV layout."
+      ]
+    },
+    {
+      "id": "vector-remap",
+      "name": "uint4 128-bit descriptor-driven Gather and Scatter",
+      "kind": "local",
+      "comparison_class": "quantitative",
+      "runnable": true,
+      "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
+      "source_revision": "vendor/llama.cpp@4545514952ec2f2c0d0998d4623ac51a2aea050b",
+      "license": "MIT",
+      "commands": [
+        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_patched_server.ps1",
+        "python scripts/run_cuda_kv_benchmark.py",
+        "python scripts/run_user_application_journey.py"
+      ],
+      "controlled_mode": "snapshot-required mapping; uint4 Gather+Scatter with scalar fallback",
+      "comparability_limits": [
+        "The 53.33% headline is a one-block Remap microbenchmark result, not end-to-end acceleration.",
+        "Aligned vector bytes and scalar fallback bytes must be reported separately.",
+        "This path materializes remapped KV and is not PagedAttention."
+      ]
+    },
+    {
+      "id": "fixed-rule",
+      "name": "Deterministic rule-based benefit gate",
+      "kind": "local",
+      "comparison_class": "quantitative",
+      "runnable": true,
+      "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
+      "source_revision": "vendor/llama.cpp@4545514952ec2f2c0d0998d4623ac51a2aea050b",
+      "license": "MIT",
+      "commands": [
+        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_patched_server.ps1",
+        "python scripts/run_benefit_gating_ab.py --backend cuda --trials 10"
+      ],
+      "controlled_mode": "--scheduler-policy cacheflow --benefit-policy rule",
+      "comparability_limits": [
+        "This is the mandatory simple heuristic, not an oracle and not a learned policy.",
+        "Fresh-process trials do not demonstrate long-lived adaptation.",
+        "Its current action is upstream versus CacheFlow scheduling, before the future five-action KV policy exists."
+      ]
+    },
+    {
+      "id": "flashinfer-paged-decode",
+      "name": "FlashInfer paged-KV batch decode kernel oracle",
+      "kind": "external",
+      "comparison_class": "conditional-kernel",
+      "runnable": false,
+      "source": "https://github.com/flashinfer-ai/flashinfer",
+      "audit_revision": "3e96dfa35ee3f3b69f8f7ea04c4f44e1ca49703e",
+      "paper": "https://arxiv.org/abs/2501.01005",
+      "license": "Apache-2.0",
+      "commands": [],
+      "comparability_limits": [
+        "It becomes a kernel comparator only after a pinned Linux or WSL environment and layout adapter pass correctness checks.",
+        "Only identical FP16 Q/K/V, GQA shape, page table, page size, context, and CUDA-event timing are comparable.",
+        "Kernel comparison cannot support an end-to-end server claim."
+      ]
+    },
+    {
+      "id": "vllm-pagedattention",
+      "name": "vLLM PagedAttention",
+      "kind": "external",
+      "comparison_class": "related-work",
+      "runnable": false,
+      "source": "https://github.com/vllm-project/vllm",
+      "audit_revision": "62a86318de3655f970baf7c2ff89c81a72c1a1b3",
+      "paper": "https://arxiv.org/abs/2309.06180",
+      "license": "Apache-2.0",
+      "commands": [],
+      "comparability_limits": [
+        "Different serving runtime, model format, allocator, scheduler, and kernel stack confound direct attribution.",
+        "The current Windows GGUF experiment matrix is not a supported like-for-like vLLM environment.",
+        "It is the conceptual and algorithmic reference until a pinned Linux environment and matched workload are available."
+      ]
+    },
+    {
+      "id": "tensorrt-llm-paged-kv",
+      "name": "NVIDIA TensorRT-LLM paged KV cache",
+      "kind": "external",
+      "comparison_class": "related-work",
+      "runnable": false,
+      "source": "https://github.com/NVIDIA/TensorRT-LLM",
+      "license": "Apache-2.0 with component-specific notices",
+      "commands": [],
+      "comparability_limits": [
+        "TensorRT engines and supported deployment stacks differ from GGUF and llama.cpp.",
+        "End-to-end comparison would combine compiler, kernels, scheduler, and model-conversion effects.",
+        "Use as an implementation reference, not evidence for this project's quantitative claims."
+      ]
+    },
+    {
+      "id": "flexgen-offload",
+      "name": "FlexGen single-GPU offloading",
+      "kind": "external",
+      "comparison_class": "related-work",
+      "runnable": false,
+      "source": "https://github.com/FMInference/FlexGen",
+      "paper": "https://arxiv.org/abs/2303.06865",
+      "license": "Apache-2.0",
+      "commands": [],
+      "comparability_limits": [
+        "FlexGen targets latency-insensitive high-throughput offloading and OPT-family workloads.",
+        "Its weight, activation, and KV placement problem is broader than this project's decode-time KV action choice.",
+        "Retain as Swap and Recompute related work, not a matched performance baseline."
+      ]
+    }
+  ]
+}

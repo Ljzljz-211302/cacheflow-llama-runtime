@@ -138,6 +138,10 @@ Windows WDDM 首次运行前需要以管理员身份执行 CUDA Toolkit 的 `Ena
 
 真实模型 KV tensor 的跨 stream Gather/Scatter 现使用 descriptor-driven 128-bit `uint4` 算子；源、目的或 staging 不满足 16-byte 对齐时自动走标量路径，尾部不足 8 个 FP16 元素时安全回退。20 组配对、交替顺序微基准中，1/4/16/32 Block 的 GPU 中位耗时相对标量分别改善 53.33%/48.89%/3.13%/1.87%，不将微基准结果冒充端到端加速。研究边界见 [科研型项目报告](docs/research-project-report.md)，可直接使用的中文简历版本见 [简历项目经历](docs/resume-project-experience.md)。
 
+## Copy-aware Paged KV 研究计划
+
+后续研究不把当前 Remap 冒充 PagedAttention。[研究方向 ADR](docs/adr/0001-copy-aware-paged-kv-research-direction.md)将首个切片限定为 Qwen2.5、FP16 KV、GQA、单 token decode 和消费级单 GPU；[一手资料与基线审计](docs/research/primary-source-foundations.md)区分本机可复现的 upstream/Direct/Scalar Remap/Vector Remap/固定规则基线与只能作为相关工作的外部系统。机器可校验的固定版本、命令、许可和可比边界位于 [`config/research_baselines.json`](config/research_baselines.json)，科研路线按 [GitHub Issue #1](https://github.com/Ljzljz-211302/cacheflow-llama-runtime/issues/1) 的依赖图执行。
+
 ## 代码边界
 
 ```text
