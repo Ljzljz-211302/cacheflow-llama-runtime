@@ -1150,6 +1150,8 @@ Issue #4 在这条服务因果链下新增 H2 算子机制切片。`bench-kv-blo
 
 证据所有权分为三层：无 profiler trial 拥有效应量与 paired bootstrap CI；NSYS timeline 拥有 launch/copy/synchronization 因果顺序；NCU 只有在 DRAM/L2/occupancy metrics 全部实际采集后才拥有 hardware-counter 解释。本机 NSYS trace 可运行；当前 NCU 因 driver compatibility 与 `ERR_NVGPUCTRPERM` 不能取硬件计数器，因此正式 limited report 必须自动禁止 memory-bound、roofline、achieved occupancy 和 hardware DRAM byte 主张，而不是用逻辑 payload throughput 代替。完整边界与复现命令见 `docs/research/cuda-profiling-causal-chain.md`。
 
+算子 completion time 不拥有用户 SLO 语义。`run_service_nsight_causal_experiment.py` 因此把原有 upstream/always 服务干预升级为双运行证据：3 个无 profiler pairs 拥有主要 TTFT/Engine effect；相同 seed/config 的 NSYS 重放按 `trial_id + server_pid + request_id` 关联 scheduler decision、prefill shape、KV action、PID-filtered CUDA timeline 与逐请求 TTFT。运行时 `cuda_kv_kernel_launches_total` 必须与该 PID 在 NSYS SQLite 中的自研 kernel 数完全相等，否则实验失败。
+
 ## 22. 生产生命周期切片：在线策略跨重启恢复
 
 长期在线收益门控原先有一个明确的进程边界缺口：ridge normal matrix、右端项、残差方差、漂移 cooldown 和探索进度全部只在内存中。进程重启会重新探索，滚动发布与故障恢复因此改变线上行为。

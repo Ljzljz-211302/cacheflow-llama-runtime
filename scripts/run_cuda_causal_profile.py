@@ -104,7 +104,7 @@ def workload(base_url: str, trial: int) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for wave in range(2):
         with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = [
+            futures = {
                 pool.submit(
                     stream_chat,
                     base_url,
@@ -113,23 +113,26 @@ def workload(base_url: str, trial: int) -> list[dict[str, Any]]:
                     predict,
                     300,
                     20260820 + trial * 100 + wave * len(requests) + index,
-                )
+                ): f"trial-{trial}-wave-{wave}-request-{index}"
                 for index, (prompt, predict) in enumerate(requests)
-            ]
+            }
             for future in as_completed(futures):
                 result = future.result()
                 if not result["text"]:
                     raise AssertionError("CUDA profiling request returned no output")
+                result["request_id"] = futures[future]
                 rows.append(result)
     return rows
 
 
-def run_trial(mode: str, trial: int) -> tuple[CudaProfileTrial, dict[str, Any]]:
+def run_trial(
+    mode: str, trial: int, output_dir: Path
+) -> tuple[CudaProfileTrial, dict[str, Any]]:
     server = ROOT / "build/patched-cuda-ninja3/bin/llama-server.exe"
     model = ROOT / "models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
     port = 19800 + MODES.index(mode) * 20 + trial
     base_url = f"http://127.0.0.1:{port}"
-    raw = ROOT / "results/raw"
+    raw = output_dir / "raw"
     log_path = raw / f"cuda-causal-{mode}-{trial}.log"
     trace_path = raw / f"cuda-causal-{mode}-{trial}.json"
     gpu_path = raw / f"cuda-causal-gpu-{mode}-{trial}.csv"
@@ -230,6 +233,16 @@ def run_trial(mode: str, trial: int) -> tuple[CudaProfileTrial, dict[str, Any]]:
     evidence = {
         "mode": mode,
         "trial": trial,
+        "trial_id": f"service-trial-{trial}-{mode}",
+        "server_pid": process.pid,
+        "requests": [
+            {
+                "request_id": row["request_id"],
+                "ttft_ms": row["ttft_ms"],
+                "total_ms": row.get("total_ms"),
+            }
+            for row in request_rows
+        ],
         "gpu_utilization_samples_percent": gpu_samples,
         "engine_trace_events": events,
         "prometheus_snapshot": evidence_metrics,
@@ -240,6 +253,7 @@ def run_trial(mode: str, trial: int) -> tuple[CudaProfileTrial, dict[str, Any]]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trials", type=int, default=3)
+    parser.add_argument("--output-dir", type=Path, default=ROOT / "results")
     args = parser.parse_args()
     if args.trials < 1:
         raise ValueError("trials must be positive")
@@ -249,13 +263,14 @@ def main() -> None:
         shift = (trial - 1) % len(MODES)
         order = MODES[shift:] + MODES[:shift]
         for mode in order:
-            row, evidence = run_trial(mode, trial)
+            row, evidence = run_trial(mode, trial, args.output_dir)
             rows.append(row)
             evidence_rows.append(evidence)
             print(f"trial={trial} mode={mode} ttft_p95={row.ttft_p95_ms:.2f} ms")
 
     result = analyze_cuda_causality(rows, minimum_trials=args.trials)
-    trials_path = ROOT / "results/cuda_causal_profile_trials.csv"
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    trials_path = args.output_dir / "cuda_causal_profile_trials.csv"
     with trials_path.open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(asdict(rows[0])))
         writer.writeheader()
@@ -271,9 +286,9 @@ def main() -> None:
         ],
         "result": asdict(result),
     }
-    summary_path = ROOT / "results/cuda_causal_profile_summary.json"
+    summary_path = args.output_dir / "cuda_causal_profile_summary.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    evidence_path = ROOT / "results/cuda_causal_profile_evidence.json"
+    evidence_path = args.output_dir / "cuda_causal_profile_evidence.json"
     evidence_path.write_text(
         json.dumps({"sampling_interval_ms": 100, "trials": evidence_rows}, ensure_ascii=False),
         encoding="utf-8",

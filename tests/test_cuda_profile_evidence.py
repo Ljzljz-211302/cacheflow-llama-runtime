@@ -1,5 +1,6 @@
 import csv
 import json
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -11,8 +12,11 @@ from llama_lab.cuda_profile_evidence import (
     characterize_regimes,
     parse_ncu_csv,
     parse_nsys_sqlite,
+    require_complete_ncu_capture,
+    require_complete_nsys_capture,
     validate_profile_artifact,
 )
+from llama_lab.research_protocol import file_sha256
 
 
 class CudaProfileEvidenceTests(unittest.TestCase):
@@ -27,24 +31,28 @@ class CudaProfileEvidenceTests(unittest.TestCase):
                 INSERT INTO StringIds VALUES (2, 'unrelated_kernel');
                 INSERT INTO StringIds VALUES (3, 'cudaEventSynchronize');
                 CREATE TABLE CUPTI_ACTIVITY_KIND_KERNEL (
-                    start INTEGER, end INTEGER, demangledName INTEGER
+                    start INTEGER, end INTEGER, demangledName INTEGER, globalPid INTEGER
                 );
-                INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1000, 51000, 1);
-                INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (60000, 90000, 2);
+                INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (1000, 51000, 1, 281899775819776);
+                INSERT INTO CUPTI_ACTIVITY_KIND_KERNEL VALUES (60000, 90000, 2, 281899792596992);
                 CREATE TABLE CUPTI_ACTIVITY_KIND_MEMCPY (
-                    start INTEGER, end INTEGER, bytes INTEGER
+                    start INTEGER, end INTEGER, bytes INTEGER, globalPid INTEGER
                 );
-                INSERT INTO CUPTI_ACTIVITY_KIND_MEMCPY VALUES (100, 1100, 4096);
+                INSERT INTO CUPTI_ACTIVITY_KIND_MEMCPY VALUES (100, 1100, 4096, 281899775819776);
                 CREATE TABLE CUPTI_ACTIVITY_KIND_RUNTIME (
-                    start INTEGER, end INTEGER, nameId INTEGER
+                    start INTEGER, end INTEGER, nameId INTEGER, globalPid INTEGER
                 );
-                INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (900, 1900, 3);
+                INSERT INTO CUPTI_ACTIVITY_KIND_RUNTIME VALUES (900, 1900, 3, 281899775819776);
                 """
             )
             connection.commit()
             connection.close()
 
-            parsed = parse_nsys_sqlite(database, kernel_patterns=("llama_kv_remap",))
+            parsed = parse_nsys_sqlite(
+                database,
+                kernel_patterns=("llama_kv_remap",),
+                process_ids={25320},
+            )
 
         self.assertEqual(parsed["kernel_launches"], 1)
         self.assertAlmostEqual(parsed["kernel_duration_ms"], 0.05)
@@ -154,6 +162,26 @@ class CudaProfileEvidenceTests(unittest.TestCase):
         self.assertTrue(protocol["claim_rules"]["occupancy_claim_requires_ncu_occupancy_metric"])
         self.assertTrue(protocol["claim_rules"]["negative_and_neutral_results_are_retained"])
 
+    def test_profiler_completeness_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "NSYS scalar"):
+            require_complete_nsys_capture(
+                {
+                    "scalar": {"kernel_launches": 0, "kernel_names": []},
+                    "vectorized": {"kernel_launches": 10, "kernel_names": ["kernel"]},
+                },
+                expected_launches_per_method=10,
+            )
+        with self.assertRaisesRegex(ValueError, "missing metrics"):
+            require_complete_ncu_capture(
+                {
+                    "scalar": {"profiled_launches": 1, "missing_metrics": []},
+                    "vectorized": {
+                        "profiled_launches": 1,
+                        "missing_metrics": ["dram__bytes_read.sum"],
+                    },
+                }
+            )
+
     def test_repository_profile_artifact_is_self_consistent(self) -> None:
         artifact = Path("results/research/h2-kv-profile-v1.0.0")
         validated = validate_profile_artifact(
@@ -161,6 +189,26 @@ class CudaProfileEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(len(validated["report"]["regimes"]), 4)
         self.assertEqual(len(validated["records"]), 160)
+
+    def test_artifact_validator_rejects_wrong_layout_even_with_updated_hash(self) -> None:
+        source = Path("results/research/h2-kv-profile-v1.0.0")
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact"
+            shutil.copytree(source, artifact)
+            trials = artifact / "trials.jsonl"
+            records = [json.loads(line) for line in trials.read_text(encoding="utf-8").splitlines()]
+            records[0]["layout"] = "misaligned"
+            trials.write_text(
+                "".join(json.dumps(row) + "\n" for row in records), encoding="utf-8"
+            )
+            manifest_path = artifact / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["artifact_hashes"]["trials"] = file_sha256(trials)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "layout"):
+                validate_profile_artifact(
+                    artifact, Path("config/cuda_profile_protocol.json")
+                )
 
     def test_builds_reproducible_profiler_commands_with_separate_reports(self) -> None:
         executable = Path("bench-kv-block-cuda.exe")

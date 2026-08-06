@@ -22,6 +22,30 @@ NCU_METRICS = (
 )
 
 
+def require_complete_nsys_capture(
+    parsed: dict[str, dict[str, Any]], *, expected_launches_per_method: int
+) -> None:
+    for method in ("scalar", "vectorized"):
+        evidence = parsed.get(method)
+        if not evidence or evidence.get("kernel_launches") != expected_launches_per_method:
+            raise ValueError(
+                f"NSYS {method} capture must contain exactly "
+                f"{expected_launches_per_method} matching kernel launches"
+            )
+        if not evidence.get("kernel_names"):
+            raise ValueError(f"NSYS {method} capture contains no matching kernel names")
+
+
+def require_complete_ncu_capture(parsed: dict[str, dict[str, Any]]) -> None:
+    for method in ("scalar", "vectorized"):
+        evidence = parsed.get(method)
+        if not evidence or int(evidence.get("profiled_launches", 0)) <= 0:
+            raise ValueError(f"NCU {method} capture contains no matching launches")
+        missing = evidence.get("missing_metrics", [])
+        if missing:
+            raise ValueError(f"NCU {method} capture is missing metrics: {', '.join(missing)}")
+
+
 def build_nsys_command(
     executable: Path,
     output_prefix: Path,
@@ -117,8 +141,15 @@ def _duration_rows(
     return list(connection.execute(f"SELECT {query} FROM {_quoted(table)}"))
 
 
+def _windows_global_pid(value: object) -> int:
+    return (int(value) >> 24) & 0xFFFFFF
+
+
 def parse_nsys_sqlite(
-    path: Path, *, kernel_patterns: tuple[str, ...]
+    path: Path,
+    *,
+    kernel_patterns: tuple[str, ...],
+    process_ids: set[int] | None = None,
 ) -> dict[str, int | float | list[str]]:
     """Extract only causal timeline facts from an exported Nsight Systems SQLite DB."""
     connection = sqlite3.connect(path)
@@ -143,9 +174,16 @@ def parse_nsys_sqlite(
             )
             if not name_column or not {"start", "end"}.issubset(columns):
                 continue
-            for start, end, raw_name in _duration_rows(
-                connection, table, ["start", "end", name_column]
-            ):
+            selected = ["start", "end", name_column]
+            has_pid = "globalPid" in columns
+            if has_pid:
+                selected.append("globalPid")
+            for row in _duration_rows(connection, table, selected):
+                start, end, raw_name = row[:3]
+                if process_ids is not None and (
+                    not has_pid or _windows_global_pid(row[3]) not in process_ids
+                ):
+                    continue
                 name = _resolve_name(raw_name, strings)
                 if not any(pattern in name for pattern in kernel_patterns):
                     continue
@@ -167,7 +205,14 @@ def parse_nsys_sqlite(
                 None,
             )
             selected = ["start", "end"] + ([byte_column] if byte_column else [])
+            has_pid = "globalPid" in columns
+            if has_pid:
+                selected.append("globalPid")
             for row in _duration_rows(connection, table, selected):
+                if process_ids is not None:
+                    pid_index = 3 if byte_column else 2
+                    if not has_pid or _windows_global_pid(row[pid_index]) not in process_ids:
+                        continue
                 memcpy_calls += 1
                 memcpy_ns += max(0, int(row[1]) - int(row[0]))
                 if byte_column:
@@ -185,9 +230,16 @@ def parse_nsys_sqlite(
             )
             if not name_column or not {"start", "end"}.issubset(columns):
                 continue
-            for start, end, raw_name in _duration_rows(
-                connection, table, ["start", "end", name_column]
-            ):
+            selected = ["start", "end", name_column]
+            has_pid = "globalPid" in columns
+            if has_pid:
+                selected.append("globalPid")
+            for row in _duration_rows(connection, table, selected):
+                start, end, raw_name = row[:3]
+                if process_ids is not None and (
+                    not has_pid or _windows_global_pid(row[3]) not in process_ids
+                ):
+                    continue
                 name = _resolve_name(raw_name, strings).lower()
                 if "synchroniz" not in name or not name.startswith("cuda"):
                     continue
@@ -471,12 +523,23 @@ def validate_profile_artifact(artifact_dir: Path, protocol_path: Path) -> dict[s
         if len(grouped) != expected_pairs:
             raise ValueError(f"{regime_id} pair count does not match protocol")
         for pair_id, pair in grouped.items():
+            if len(pair) != 2:
+                raise ValueError(f"{pair_id} must contain exactly two rows")
             if {str(row["method"]) for row in pair} != methods:
                 raise ValueError(f"{pair_id} methods are incomplete")
             if {int(row["order_in_pair"]) for row in pair} != {0, 1}:
                 raise ValueError(f"{pair_id} order is not complementary")
             if len({int(row["random_seed"]) for row in pair}) != 1:
                 raise ValueError(f"{pair_id} random seed differs within pair")
+            expected_seed = int(protocol["random_seed_base"]) + int(
+                regimes[regime_id]["blocks"]
+            ) + (1000 if regimes[regime_id]["layout"] == "misaligned" else 0)
+            if any(int(row["random_seed"]) != expected_seed for row in pair):
+                raise ValueError(f"{pair_id} random seed does not match protocol")
+            if any(int(row["blocks"]) != int(regimes[regime_id]["blocks"]) for row in pair):
+                raise ValueError(f"{pair_id} block count does not match protocol")
+            if any(str(row["layout"]) != regimes[regime_id]["layout"] for row in pair):
+                raise ValueError(f"{pair_id} layout does not match protocol")
     commands = {str(item["regime_id"]): item for item in manifest["commands"]}
     if set(commands) != set(regimes):
         raise ValueError("profile artifact command coverage is incomplete")

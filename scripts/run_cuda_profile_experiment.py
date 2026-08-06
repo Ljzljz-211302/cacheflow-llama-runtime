@@ -24,6 +24,8 @@ from llama_lab.cuda_profile_evidence import (  # noqa: E402
     characterize_regimes,
     parse_ncu_csv,
     parse_nsys_sqlite,
+    require_complete_ncu_capture,
+    require_complete_nsys_capture,
 )
 from llama_lab.research_protocol import file_sha256  # noqa: E402
 
@@ -198,6 +200,9 @@ def nsys_capture(
         method: parse_nsys_sqlite(database, kernel_patterns=tuple(method_patterns))
         for method, method_patterns in patterns.items()
     }
+    require_complete_nsys_capture(
+        parsed, expected_launches_per_method=repetitions * 2
+    )
     return parsed, {
         "capture_command": command,
         "capture_exit_code": completed.returncode,
@@ -245,6 +250,7 @@ def ncu_capture(
             method: parse_ncu_csv(csv_path, kernel_patterns=tuple(method_patterns))
             for method, method_patterns in patterns.items()
         }
+        require_complete_ncu_capture(parsed)
     except ValueError as error:
         status["parse_error"] = str(error)
         return None, status

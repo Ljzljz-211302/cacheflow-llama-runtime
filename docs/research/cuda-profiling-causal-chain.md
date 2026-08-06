@@ -118,7 +118,29 @@ results/research/h2-kv-profile-v1.0.0/
 输出目录必须为空；正式运行前 outer/vendor worktree 必须 clean。`limited_claims_protocol_compliant`
 只表示“在不声称硬件计数器结论的限定范围内合规”，绝不等价于 `ncu_complete=true`。
 
-## 7. NVIDIA 一手资料
+## 7. 服务级关联实验
+
+算子 `end_to_end_ms` 只表示 descriptor upload、kernel 与同步完成，不能替代 TTFT/TPOT。服务级链路由另一条确认性命令补齐：
+
+```powershell
+python scripts/run_service_nsight_causal_experiment.py `
+  --trials 3 `
+  --output-dir results/research/h2-service-nsight-causal-v1.0.0
+```
+
+该命令先运行 3 组无 profiler upstream/always paired service trials，得到主要的 Engine/TTFT 效应；再用相同模型、请求 seed、trial/mode 配置在 NSYS 下重放。每个请求带确定性 `request_id`，每个 server 记录 PID；SQLite parser 按 NSYS `globalPid` 过滤，要求自研 KV launch 数与同一 server 的 Prometheus counter 完全相等。`causal-links.json` 因而逐 trial/mode 连接：
+
+```text
+trial_id + server_pid + request_ids
+  -> benefit decision / prefill chunks / prefill tokens
+  -> KV kernel launches / copied bytes / CUDA-event time
+  -> PID-filtered NSYS kernel/memcpy timeline
+  -> request TTFT samples / TTFT P95 / Engine execute duration
+```
+
+无 profiler run 仍拥有性能主张，NSYS replay 只拥有机制归因；两者通过冻结的 workload configuration 与 request seeds 关联，不把 profiler 扰动后的请求延迟冒充自然执行结果。
+
+## 8. NVIDIA 一手资料
 
 - [Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)：CLI capture、
   `cudaProfilerApi` range 与 SQLite export。
@@ -127,4 +149,3 @@ results/research/h2-kv-profile-v1.0.0/
 - [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html)：replay、
   cache/clock control、采集开销与可复现性边界。
 - [NVIDIA ERR_NVGPUCTRPERM](https://developer.nvidia.com/ERR_NVGPUCTRPERM)：硬件性能计数器权限配置。
-
