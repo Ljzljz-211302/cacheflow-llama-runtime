@@ -270,6 +270,26 @@ class CudaProfileEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "copied primary result differs"):
                 validate_service_profile_artifact(artifact)
 
+    def test_service_validator_rejects_intervention_diverging_from_raw_evidence(self) -> None:
+        source = Path("results/research/h2-service-nsight-causal-v1.0.0")
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact"
+            shutil.copytree(source, artifact)
+            evidence_path = artifact / "no-profiler/cuda_causal_profile_evidence.json"
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            metric = 'llamacpp:benefit_decisions_total{backend="cuda",action="cacheflow"}'
+            evidence["trials"][0]["prometheus_snapshot"][metric] += 1
+            evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+            manifest_path = artifact / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["artifacts"]["no_profiler_evidence_sha256"] = file_sha256(
+                evidence_path
+            )
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "metrics differ"):
+                validate_service_profile_artifact(artifact)
+
     def test_builds_reproducible_profiler_commands_with_separate_reports(self) -> None:
         executable = Path("bench-kv-block-cuda.exe")
         output = Path("profiles") / "small-vector"

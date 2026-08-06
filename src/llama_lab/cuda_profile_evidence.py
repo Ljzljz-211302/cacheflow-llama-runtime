@@ -750,6 +750,11 @@ def validate_service_profile_artifact(artifact_dir: Path) -> dict[str, Any]:
             raise ValueError("service profile no-profiler Engine trace differs from trials")
         snapshot = evidence["prometheus_snapshot"]
         snapshot_values = {
+            "cacheflow_decisions": int(
+                snapshot[
+                    'llamacpp:benefit_decisions_total{backend="cuda",action="cacheflow"}'
+                ]
+            ),
             "prefill_chunks": int(snapshot["llamacpp:prefill_chunks_scheduled_total"]),
             "prefill_tokens": int(snapshot["llamacpp:prefill_tokens_scheduled_total"]),
             "kernel_launches": int(snapshot["llamacpp:cuda_kv_kernel_launches_total"]),

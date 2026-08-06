@@ -200,14 +200,15 @@ def run_trial(
             "llamacpp:cuda_kv_swap_in_seconds",
         )
     )
+    cacheflow_decisions = int(labeled_metric(
+        prometheus,
+        "llamacpp:benefit_decisions_total",
+        {"backend": "cuda", "action": "cacheflow"},
+    ))
     profile = CudaProfileTrial(
         mode=mode,
         trial=trial,
-        cacheflow_decisions=int(labeled_metric(
-            prometheus,
-            "llamacpp:benefit_decisions_total",
-            {"backend": "cuda", "action": "cacheflow"},
-        )),
+        cacheflow_decisions=cacheflow_decisions,
         prefill_chunks=int(samples["llamacpp:prefill_chunks_scheduled_total"]),
         prefill_tokens=int(samples["llamacpp:prefill_tokens_scheduled_total"]),
         kernel_launches=int(samples["llamacpp:cuda_kv_kernel_launches_total"]),
@@ -230,6 +231,9 @@ def run_trial(
             "llamacpp:cuda_kv_swap_in_seconds",
         )
     }
+    evidence_metrics[
+        'llamacpp:benefit_decisions_total{backend="cuda",action="cacheflow"}'
+    ] = cacheflow_decisions
     evidence = {
         "mode": mode,
         "trial": trial,
