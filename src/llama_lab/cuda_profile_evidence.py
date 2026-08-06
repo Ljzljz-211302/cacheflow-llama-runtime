@@ -592,23 +592,142 @@ def validate_service_profile_artifact(artifact_dir: Path) -> dict[str, Any]:
         "no_profiler_summary_sha256": (
             artifact_dir / "no-profiler/cuda_causal_profile_summary.json"
         ),
+        "no_profiler_trials_sha256": (
+            artifact_dir / "no-profiler/cuda_causal_profile_trials.csv"
+        ),
+        "no_profiler_evidence_sha256": (
+            artifact_dir / "no-profiler/cuda_causal_profile_evidence.json"
+        ),
+        "profiled_trials_sha256": (
+            artifact_dir / "nsys-profiled/cuda_causal_profile_trials.csv"
+        ),
+        "profiled_evidence_sha256": (
+            artifact_dir / "nsys-profiled/cuda_causal_profile_evidence.json"
+        ),
         "nsys_report_sha256": artifact_dir / "service-causal.nsys-rep",
         "nsys_sqlite_sha256": artifact_dir / "service-causal.sqlite",
     }
     for name, path in expected.items():
         if artifacts.get(name) != file_sha256(path):
             raise ValueError(f"service profile artifact {name} does not match")
+    for manifest_name, relative_root in (
+        ("no_profiler_raw_sha256", Path("no-profiler/raw")),
+        ("profiled_raw_sha256", Path("nsys-profiled/raw")),
+    ):
+        raw_root = artifact_dir / relative_root
+        actual = {
+            path.relative_to(raw_root).as_posix(): file_sha256(path)
+            for path in sorted(raw_root.rglob("*"))
+            if path.is_file()
+        }
+        if artifacts.get(manifest_name) != actual:
+            raise ValueError(f"service profile artifact {manifest_name} does not match")
     links = links_payload.get("profiled_links", [])
     trials = int(manifest.get("trials", 0))
     if trials < 3 or len(links) != trials * 2:
         raise ValueError("service profile trial/mode linkage is incomplete")
     if manifest.get("linked_trial_modes") != len(links):
         raise ValueError("service profile linked trial count does not match")
+    with (artifact_dir / "nsys-profiled/cuda_causal_profile_trials.csv").open(
+        newline="", encoding="utf-8-sig"
+    ) as handle:
+        profiled_row_list = list(csv.DictReader(handle))
+    profiled_rows = {
+        (int(row["trial"]), row["mode"]): row for row in profiled_row_list
+    }
+    profiled_evidence_payload = json.loads(
+        (artifact_dir / "nsys-profiled/cuda_causal_profile_evidence.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    profiled_evidence_items = profiled_evidence_payload["trials"]
+    profiled_evidence = {
+        (int(item["trial"]), str(item["mode"])): item
+        for item in profiled_evidence_items
+    }
+    expected_keys = {
+        (trial, mode)
+        for trial in range(1, trials + 1)
+        for mode in ("upstream", "always")
+    }
+    with (artifact_dir / "no-profiler/cuda_causal_profile_trials.csv").open(
+        newline="", encoding="utf-8-sig"
+    ) as handle:
+        baseline_row_list = list(csv.DictReader(handle))
+    baseline_keys = {
+        (int(row["trial"]), row["mode"]) for row in baseline_row_list
+    }
+    baseline_evidence_payload = json.loads(
+        (artifact_dir / "no-profiler/cuda_causal_profile_evidence.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    baseline_evidence_items = baseline_evidence_payload["trials"]
+    baseline_evidence_keys = {
+        (int(item["trial"]), str(item["mode"]))
+        for item in baseline_evidence_items
+    }
+    if (
+        baseline_keys != expected_keys
+        or baseline_evidence_keys != expected_keys
+        or len(baseline_row_list) != len(expected_keys)
+        or len(baseline_evidence_items) != len(expected_keys)
+    ):
+        raise ValueError("service profile no-profiler trial/mode coverage is incomplete")
+    link_keys = {(int(link["trial"]), str(link["mode"])) for link in links}
+    if (
+        set(profiled_rows) != expected_keys
+        or set(profiled_evidence) != expected_keys
+        or len(profiled_row_list) != len(expected_keys)
+        or len(profiled_evidence_items) != len(expected_keys)
+    ):
+        raise ValueError("service profile raw trial/mode coverage is incomplete")
+    if link_keys != expected_keys or len(link_keys) != len(links):
+        raise ValueError("service profile links contain duplicate or missing trial/mode")
+    sqlite_path = artifact_dir / "service-causal.sqlite"
     for link in links:
+        key = (int(link["trial"]), str(link["mode"]))
+        row = profiled_rows[key]
+        evidence = profiled_evidence[key]
         if len(link.get("request_ids", [])) != 12:
             raise ValueError("service profile request linkage is incomplete")
         if len(set(link["request_ids"])) != 12:
             raise ValueError("service profile request IDs are not unique within process")
+        if int(link["server_pid"]) != int(evidence["server_pid"]):
+            raise ValueError("service profile PID differs from raw evidence")
+        if link["trial_id"] != evidence["trial_id"]:
+            raise ValueError("service profile trial ID differs from raw evidence")
+        raw_request_ids = [request["request_id"] for request in evidence["requests"]]
+        if link["request_ids"] != raw_request_ids:
+            raise ValueError("service profile request IDs differ from raw evidence")
+        raw_ttft = [request["ttft_ms"] for request in evidence["requests"]]
+        if link["request_ttft_ms"] != raw_ttft:
+            raise ValueError("service profile request timings differ from raw evidence")
+        expected_scheduler = {
+            "cacheflow_decisions": int(row["cacheflow_decisions"]),
+            "prefill_chunks": int(row["prefill_chunks"]),
+            "prefill_tokens": int(row["prefill_tokens"]),
+        }
+        expected_kv = {
+            "kernel_launches": int(row["kernel_launches"]),
+            "copy_bytes": int(row["copy_bytes"]),
+            "cuda_event_ms": float(row["cuda_event_ms"]),
+        }
+        if link["scheduler_action"] != expected_scheduler or link["kv_action"] != expected_kv:
+            raise ValueError("service profile counters differ from raw trials")
+        expected_outcome = {
+            "ttft_p95_ms": float(row["ttft_p95_ms"]),
+            "execute_duration_us": float(row["execute_duration_us"]),
+        }
+        if link["request_outcome"] != expected_outcome:
+            raise ValueError("service profile outcome differs from raw trials")
+        reparsed_nsys = parse_nsys_sqlite(
+            sqlite_path,
+            kernel_patterns=("llama_kv_remap",),
+            process_ids={int(evidence["server_pid"])},
+        )
+        if link["nsys"] != reparsed_nsys:
+            raise ValueError("service profile NSYS link differs from raw SQLite")
         if link["kv_action"]["kernel_launches"] != link["nsys"]["kernel_launches"]:
             raise ValueError("service profile runtime and NSYS kernel counts differ")
         if link["mode"] == "upstream" and link["scheduler_action"]["cacheflow_decisions"] != 0:

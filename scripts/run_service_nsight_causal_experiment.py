@@ -39,6 +39,14 @@ def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def tree_hashes(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): file_sha256(path)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
 def render_report(
     baseline_rows: dict[tuple[int, str], dict[str, str]],
     baseline_result: dict[str, Any],
@@ -290,8 +298,22 @@ def main() -> None:
             "no_profiler_summary_sha256": file_sha256(
                 baseline / "cuda_causal_profile_summary.json"
             ),
+            "no_profiler_trials_sha256": file_sha256(
+                baseline / "cuda_causal_profile_trials.csv"
+            ),
+            "no_profiler_evidence_sha256": file_sha256(
+                baseline / "cuda_causal_profile_evidence.json"
+            ),
+            "profiled_trials_sha256": file_sha256(
+                profiled / "cuda_causal_profile_trials.csv"
+            ),
+            "profiled_evidence_sha256": file_sha256(
+                profiled / "cuda_causal_profile_evidence.json"
+            ),
             "nsys_report_sha256": file_sha256(report_path),
             "nsys_sqlite_sha256": file_sha256(sqlite_path),
+            "no_profiler_raw_sha256": tree_hashes(baseline / "raw"),
+            "profiled_raw_sha256": tree_hashes(profiled / "raw"),
         },
         "linked_trial_modes": len(links),
         "linked_request_count": sum(len(link["request_ids"]) for link in links),
