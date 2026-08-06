@@ -86,6 +86,8 @@
         "docs/research/primary-source-foundations.md",
         "results/research/h2-kv-profile-v1.0.0/report.md",
         "results/research/h2-kv-profile-v1.0.0/manifest.json",
+        "results/research/h2-service-nsight-causal-v1.0.0/report.md",
+        "results/research/h2-service-nsight-causal-v1.0.0/causal-links.json",
         "results/cuda_causal_profile_evidence.json",
         "https://docs.nvidia.com/nsight-compute/NsightCompute/index.html"
       ],
@@ -94,6 +96,8 @@
         "Aligned 1-block vectorization improved CUDA-event time by a paired median 57.10% (95% CI 38.51% to 57.14%), while aligned 16/32-block cases were neutral under the 10% materiality gate.",
         "The misaligned 1-block layout was a retained counterexample: vectorization regressed CUDA-event time by 137.94% (95% CI 137.84% to 140.55% regression) and end-to-end time by 113.02%.",
         "Scalar and vectorized paths each launched 10 profiled kernels per regime, ruling out reduced launch count as the cause of the aligned-small gain.",
+        "A separate three-pair real-service experiment linked 72 deterministic requests across six trial/mode server processes to scheduler counters, KV actions, PID-filtered Nsight Systems kernels, and TTFT; every runtime KV launch count exactly matched NSYS.",
+        "In that service run, forced CacheFlow changed decisions by +26 and prefill chunks by +39; paired median TTFT P95 worsened by 346.82 ms while Engine execute also increased by 258,596 us. This run closed the causal linkage but did not reproduce the earlier execute/TTFT sign reversal.",
         "Nsight Compute counters remain unavailable because the installed profiler reported driver incompatibility and ERR_NVGPUCTRPERM; memory-bound, roofline, occupancy, and hardware-DRAM-byte claims remain prohibited."
       ],
       "scope_limits": [
