@@ -15,6 +15,7 @@ from llama_lab.cuda_profile_evidence import (
     require_complete_ncu_capture,
     require_complete_nsys_capture,
     validate_profile_artifact,
+    validate_service_profile_artifact,
 )
 from llama_lab.research_protocol import file_sha256
 
@@ -209,6 +210,14 @@ class CudaProfileEvidenceTests(unittest.TestCase):
                 validate_profile_artifact(
                     artifact, Path("config/cuda_profile_protocol.json")
                 )
+
+    def test_repository_service_profile_links_requests_to_nsys(self) -> None:
+        artifact = Path("results/research/h2-service-nsight-causal-v1.0.0")
+        validated = validate_service_profile_artifact(artifact)
+        self.assertEqual(len(validated["links"]), 6)
+        self.assertEqual(
+            sum(len(link["request_ids"]) for link in validated["links"]), 72
+        )
 
     def test_builds_reproducible_profiler_commands_with_separate_reports(self) -> None:
         executable = Path("bench-kv-block-cuda.exe")

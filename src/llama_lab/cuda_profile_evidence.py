@@ -576,3 +576,48 @@ def validate_profile_artifact(artifact_dir: Path, protocol_path: Path) -> dict[s
         ):
             raise ValueError("incomplete NCU artifact lacks an auditable failure")
     return {"manifest": manifest, "report": report, "records": records}
+
+
+def validate_service_profile_artifact(artifact_dir: Path) -> dict[str, Any]:
+    manifest = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))
+    links_payload = json.loads(
+        (artifact_dir / "causal-links.json").read_text(encoding="utf-8")
+    )
+    from llama_lab.research_protocol import file_sha256
+
+    artifacts = manifest.get("artifacts", {})
+    expected = {
+        "causal_links_sha256": artifact_dir / "causal-links.json",
+        "report_markdown_sha256": artifact_dir / "report.md",
+        "no_profiler_summary_sha256": (
+            artifact_dir / "no-profiler/cuda_causal_profile_summary.json"
+        ),
+        "nsys_report_sha256": artifact_dir / "service-causal.nsys-rep",
+        "nsys_sqlite_sha256": artifact_dir / "service-causal.sqlite",
+    }
+    for name, path in expected.items():
+        if artifacts.get(name) != file_sha256(path):
+            raise ValueError(f"service profile artifact {name} does not match")
+    links = links_payload.get("profiled_links", [])
+    trials = int(manifest.get("trials", 0))
+    if trials < 3 or len(links) != trials * 2:
+        raise ValueError("service profile trial/mode linkage is incomplete")
+    if manifest.get("linked_trial_modes") != len(links):
+        raise ValueError("service profile linked trial count does not match")
+    for link in links:
+        if len(link.get("request_ids", [])) != 12:
+            raise ValueError("service profile request linkage is incomplete")
+        if len(set(link["request_ids"])) != 12:
+            raise ValueError("service profile request IDs are not unique within process")
+        if link["kv_action"]["kernel_launches"] != link["nsys"]["kernel_launches"]:
+            raise ValueError("service profile runtime and NSYS kernel counts differ")
+        if link["mode"] == "upstream" and link["scheduler_action"]["cacheflow_decisions"] != 0:
+            raise ValueError("upstream service profile contains CacheFlow decisions")
+        if link["mode"] == "always" and link["scheduler_action"]["cacheflow_decisions"] <= 0:
+            raise ValueError("always service profile contains no CacheFlow decisions")
+    primary = links_payload.get("no_profiler_primary_result", {})
+    if not primary.get("passed"):
+        raise ValueError("service profile no-profiler causal gate did not pass")
+    if not manifest.get("protocol_compliant"):
+        raise ValueError("service profile artifact is not protocol compliant")
+    return {"manifest": manifest, "links": links, "primary": primary}

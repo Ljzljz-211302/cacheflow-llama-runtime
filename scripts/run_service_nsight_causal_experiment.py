@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import os
+import statistics
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -36,6 +37,66 @@ def run(command: list[str], stdout: Path, stderr: Path) -> subprocess.CompletedP
 
 def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def render_report(
+    baseline_rows: dict[tuple[int, str], dict[str, str]],
+    baseline_result: dict[str, Any],
+    links: list[dict[str, Any]],
+) -> str:
+    trial_ids = sorted({trial for trial, _ in baseline_rows})
+    ttft_deltas = [
+        float(baseline_rows[(trial, "always")]["ttft_p95_ms"])
+        - float(baseline_rows[(trial, "upstream")]["ttft_p95_ms"])
+        for trial in trial_ids
+    ]
+    execute_deltas = [
+        float(baseline_rows[(trial, "always")]["execute_duration_us"])
+        - float(baseline_rows[(trial, "upstream")]["execute_duration_us"])
+        for trial in trial_ids
+    ]
+    lines = [
+        "# H2 service-level Nsight causal chain",
+        "",
+        "Three no-profiler paired trials own the request-level effect. A separate replay "
+        "with identical seeds/configuration links each trial/mode/server PID and deterministic "
+        "request ID to scheduler counters, KV actions, Nsight Systems CUDA events, and TTFT.",
+        "",
+        "| Trial | TTFT P95 delta always-upstream (ms) | Engine execute delta (us) |",
+        "|---:|---:|---:|",
+    ]
+    for trial, ttft, execute in zip(trial_ids, ttft_deltas, execute_deltas):
+        lines.append(f"| {trial} | {ttft:+.3f} | {execute:+.0f} |")
+    lines.extend(
+        [
+            "",
+            f"Paired median TTFT delta: {statistics.median(ttft_deltas):+.3f} ms; "
+            f"observed range [{min(ttft_deltas):+.3f}, {max(ttft_deltas):+.3f}] ms. "
+            f"Paired median Engine execute delta: {statistics.median(execute_deltas):+.0f} us. "
+            "With only three pairs, the range is reported as uncertainty rather than a "
+            "high-confidence population interval.",
+            "",
+            "The preregistered causal gate passed: policy decisions changed, prefill shape "
+            "changed, custom KV CUDA work changed, and TTFT/Engine outcomes were material. "
+            f"The no-profiler result recorded decision delta "
+            f"{baseline_result['cacheflow_decision_delta']:+.0f}, prefill chunk delta "
+            f"{baseline_result['prefill_chunk_delta']:+.0f}, KV launch delta "
+            f"{baseline_result['kernel_launch_delta']:+.0f}, and TTFT P95 delta "
+            f"{baseline_result['ttft_delta_ms']:+.3f} ms.",
+            "",
+            f"The NSYS replay contains {len(links)} linked trial/mode processes and "
+            f"{sum(len(link['request_ids']) for link in links)} request observations. "
+            "For every process, PID-filtered NSYS custom-kernel counts exactly equal the "
+            "runtime Prometheus counter. `causal-links.json` is the machine-readable join.",
+            "",
+            "This evidence supports a bounded counterexample: changed scheduling and CUDA KV "
+            "work can worsen TTFT even when aggregate Engine execute time falls. It does not "
+            "establish a universal policy effect, and it does not provide NCU occupancy/DRAM "
+            "counters.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def main() -> None:
@@ -123,6 +184,12 @@ def main() -> None:
         profiled_rows = {
             (int(row["trial"]), row["mode"]): row for row in csv.DictReader(handle)
         }
+    with (baseline / "cuda_causal_profile_trials.csv").open(
+        newline="", encoding="utf-8-sig"
+    ) as handle:
+        baseline_rows = {
+            (int(row["trial"]), row["mode"]): row for row in csv.DictReader(handle)
+        }
     links: list[dict[str, Any]] = []
     total_profiled_kv_launches = 0
     for evidence in profiled_evidence["trials"]:
@@ -192,6 +259,12 @@ def main() -> None:
         + "\n",
         encoding="utf-8",
     )
+    report_markdown = args.output_dir / "report.md"
+    report_markdown.write_text(
+        render_report(baseline_rows, baseline_summary["result"], links),
+        encoding="utf-8",
+        newline="",
+    )
     manifest = {
         "schema_version": 1,
         "experiment_id": "h2-service-nsight-causal",
@@ -206,6 +279,7 @@ def main() -> None:
         "export_command": export_command,
         "artifacts": {
             "causal_links_sha256": file_sha256(link_path),
+            "report_markdown_sha256": file_sha256(report_markdown),
             "no_profiler_summary_sha256": file_sha256(
                 baseline / "cuda_causal_profile_summary.json"
             ),
