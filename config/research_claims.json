@@ -26,7 +26,7 @@
         "warm-up and synchronization placement"
       ],
       "baselines": ["scalar-remap", "vector-remap"],
-      "mechanism": "Candidate mechanism, not an observed result: each aligned thread moves eight FP16 elements through one uint4 load/store and may reduce descriptor-loop and instruction overhead. The cause of the observed scale trend remains prospective until H2 profiling distinguishes launch, instruction, cache, and bandwidth effects.",
+      "mechanism": "Each aligned vector thread moves eight FP16 elements through one uint4 load/store. H2 Nsight Systems traces show equal scalar/vector launch counts and shorter aligned-small vector kernel duration, ruling out fewer launches as the cause; the misaligned scalar-lane fallback reverses the effect. Instruction, cache, occupancy, and hardware-bandwidth attribution remain prospective until NCU counters are available.",
       "falsification": [
         "Any preregistered block count has paired median GPU regression above 3%.",
         "No preregistered block count reaches 10% paired median GPU improvement.",
@@ -56,7 +56,7 @@
       "id": "H2-copy-bottleneck",
       "question": "Under which workload and layout regimes does explicit KV movement materially affect decode service outcomes?",
       "hypothesis": "Explicit KV movement becomes material as moved bytes, fragmentation, shared-prefix COW, and memory pressure increase, but scheduler-induced queueing can dominate or reverse the operator-level effect.",
-      "status": "prospective",
+      "status": "limited-evidence",
       "independent_variables": [
         "context length and moved KV bytes",
         "fragmentation and overlap class",
@@ -84,14 +84,23 @@
       ],
       "evidence_sources": [
         "docs/research/primary-source-foundations.md",
+        "results/research/h2-kv-profile-v1.0.0/report.md",
+        "results/research/h2-kv-profile-v1.0.0/manifest.json",
         "results/cuda_causal_profile_evidence.json",
         "https://docs.nvidia.com/nsight-compute/NsightCompute/index.html"
       ],
-      "observed_results": [],
+      "observed_results": [
+        "Four preregistered regimes produced 160 no-profiler paired observations and four successful Nsight Systems traces.",
+        "Aligned 1-block vectorization improved CUDA-event time by a paired median 57.10% (95% CI 38.51% to 57.14%), while aligned 16/32-block cases were neutral under the 10% materiality gate.",
+        "The misaligned 1-block layout was a retained counterexample: vectorization regressed CUDA-event time by 137.94% (95% CI 137.84% to 140.55% regression) and end-to-end time by 113.02%.",
+        "Scalar and vectorized paths each launched 10 profiled kernels per regime, ruling out reduced launch count as the cause of the aligned-small gain.",
+        "Nsight Compute counters remain unavailable because the installed profiler reported driver incompatibility and ERR_NVGPUCTRPERM; memory-bound, roofline, occupancy, and hardware-DRAM-byte claims remain prohibited."
+      ],
       "scope_limits": [
         "Single RTX 4050 Laptop GPU",
         "Qwen2.5-0.5B-Instruct serving slice",
-        "No occupancy, roofline, or memory-bound claim until Nsight evidence exists"
+        "Nsight Systems kernel/copy/synchronization timeline is available; Nsight Compute hardware counters are not",
+        "No occupancy, roofline, hardware DRAM byte, or memory-bound claim until NCU evidence exists"
       ],
       "negative_result_policy": "Publish regimes where non-KV compute or queueing dominates and narrow the research question instead of relabeling noise as a gain."
     },

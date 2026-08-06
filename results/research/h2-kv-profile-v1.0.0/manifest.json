@@ -1,0 +1,389 @@
+{
+  "schema_version": 1,
+  "experiment_id": "h2-kv-profile",
+  "protocol_version": "1.0.0",
+  "protocol_sha256": "327e536f80e7cdc6d1c857621bf2363bd77f2983825aa28df702536b25d2220b",
+  "code_revision": "a2c120ccdba699ec71e95be766266e5c517370fc",
+  "vendor_revision": "3b15ec453962fb7c98f5d25186de853eff2058a7",
+  "repository_dirty_before_run": false,
+  "vendor_dirty_before_run": false,
+  "binary_sha256": "c83347ee6a6c8eaa35a54970c794ff18822f9bece5754a98c15569ca341e0be5",
+  "captured_at_utc": "2026-08-06T15:23:29.905793+00:00",
+  "invocation": [
+    "C:\\Users\\hp\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+    "scripts/run_cuda_profile_experiment.py",
+    "--output-dir",
+    "results/research/h2-kv-profile-v1.0.0",
+    "--allow-ncu-unavailable"
+  ],
+  "tools": {
+    "nsys": {
+      "path": "D:\\llama\\runtime\\nsight-systems-2026.3.1\\ProgramFiles64Folder\\NVIDIA Corporation\\Nsight Systems 2026.3.1\\target-windows-x64\\nsys.exe",
+      "version": "NVIDIA Nsight Systems version 2026.3.1.157-263138048394v0"
+    },
+    "ncu": {
+      "path": "C:\\Program Files\\NVIDIA Corporation\\Nsight Compute 2025.4.1\\target\\windows-desktop-win7-x64\\ncu.exe",
+      "version": "NVIDIA (R) Nsight Compute Command Line Profiler\nCopyright (c) 2018-2025 NVIDIA Corporation\nVersion 2025.4.1.0 (build 37096885) (public-release)"
+    }
+  },
+  "raw_trial_count": 160,
+  "regime_count": 4,
+  "commands": [
+    {
+      "regime_id": "aligned-small",
+      "no_profiler": {
+        "command": [
+          "D:\\llama\\build\\patched-cuda-ninja3\\bin\\bench-kv-block-cuda.exe",
+          "--profile",
+          "--blocks",
+          "1",
+          "--layout",
+          "aligned",
+          "--method",
+          "paired",
+          "--repetitions",
+          "20"
+        ],
+        "exit_code": 0,
+        "stdout_sha256": "9c7cafe7d2f1229b91de2a4b88eb2f0878df80dd2ef544da49f33bd105fd2c85",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "nsys": {
+        "capture_command": [
+          "D:\\llama\\runtime\\nsight-systems-2026.3.1\\ProgramFiles64Folder\\NVIDIA Corporation\\Nsight Systems 2026.3.1\\target-windows-x64\\nsys.exe",
+          "profile",
+          "--trace=cuda,nvtx",
+          "--sample=none",
+          "--cpuctxsw=none",
+          "--capture-range=cudaProfilerApi",
+          "--capture-range-end=stop-shutdown",
+          "--force-overwrite=true",
+          "--output=results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-small\\nsys",
+          "D:\\llama\\build\\patched-cuda-ninja3\\bin\\bench-kv-block-cuda.exe",
+          "--profile",
+          "--blocks",
+          "1",
+          "--layout",
+          "aligned",
+          "--method",
+          "paired",
+          "--repetitions",
+          "5"
+        ],
+        "capture_exit_code": 0,
+        "export_command": [
+          "D:\\llama\\runtime\\nsight-systems-2026.3.1\\ProgramFiles64Folder\\NVIDIA Corporation\\Nsight Systems 2026.3.1\\target-windows-x64\\nsys.exe",
+          "export",
+          "--type=sqlite",
+          "--force-overwrite=true",
+          "--output=results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-small\\nsys.sqlite",
+          "results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-small\\nsys.nsys-rep"
+        ],
+        "export_exit_code": 0,
+        "report_sha256": "bfb38f34ff1e344450a0a23d135744ff2eb8e0ccd268d1617b663caf551cfbf9",
+        "sqlite_sha256": "8d111d23aa3c1ce3e01116fbb7a6644df07f77d748f2f42cb004ec2268ae4ecc"
+      },
+      "ncu": {
+        "command": [
+          "C:\\Program Files\\NVIDIA Corporation\\Nsight Compute 2025.4.1\\target\\windows-desktop-win7-x64\\ncu.exe",
+          "--target-processes=all",
+          "--profile-from-start=off",
+          "--kernel-name-base=demangled",
+          "--kernel-name=regex:llama_kv_remap_.*",
+          "--replay-mode=kernel",
+          "--cache-control=all",
+          "--clock-control=base",
+          "--metrics=gpu__time_duration.sum,dram__bytes_read.sum,dram__bytes_write.sum,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,sm__warps_active.avg.pct_of_peak_sustained_active",
+          "--page=raw",
+          "--csv",
+          "--log-file=results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-small\\ncu.csv",
+          "--export=results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-small\\ncu",
+          "--force-overwrite",
+          "D:\\llama\\build\\patched-cuda-ninja3\\bin\\bench-kv-block-cuda.exe",
+          "--profile",
+          "--blocks",
+          "1",
+          "--layout",
+          "aligned",
+          "--method",
+          "paired",
+          "--repetitions",
+          "5"
+        ],
+        "exit_code": 1,
+        "csv_sha256": "6d6917aa546f78310525e064819f3849348b15ec0bda43054945bb1ba268f9a1",
+        "permission_denied": true,
+        "driver_incompatible": true
+      }
+    },
+    {
+      "regime_id": "aligned-transition",
+      "no_profiler": {
+        "command": [
+          "D:\\llama\\build\\patched-cuda-ninja3\\bin\\bench-kv-block-cuda.exe",
+          "--profile",
+          "--blocks",
+          "16",
+          "--layout",
+          "aligned",
+          "--method",
+          "paired",
+          "--repetitions",
+          "20"
+        ],
+        "exit_code": 0,
+        "stdout_sha256": "28441054a694cd6e99b784dea9b8dc08034af30c8e6f840a9c46b8edd1eff63d",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "nsys": {
+        "capture_command": [
+          "D:\\llama\\runtime\\nsight-systems-2026.3.1\\ProgramFiles64Folder\\NVIDIA Corporation\\Nsight Systems 2026.3.1\\target-windows-x64\\nsys.exe",
+          "profile",
+          "--trace=cuda,nvtx",
+          "--sample=none",
+          "--cpuctxsw=none",
+          "--capture-range=cudaProfilerApi",
+          "--capture-range-end=stop-shutdown",
+          "--force-overwrite=true",
+          "--output=results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-transition\\nsys",
+          "D:\\llama\\build\\patched-cuda-ninja3\\bin\\bench-kv-block-cuda.exe",
+          "--profile",
+          "--blocks",
+          "16",
+          "--layout",
+          "aligned",
+          "--method",
+          "paired",
+          "--repetitions",
+          "5"
+        ],
+        "capture_exit_code": 0,
+        "export_command": [
+          "D:\\llama\\runtime\\nsight-systems-2026.3.1\\ProgramFiles64Folder\\NVIDIA Corporation\\Nsight Systems 2026.3.1\\target-windows-x64\\nsys.exe",
+          "export",
+          "--type=sqlite",
+          "--force-overwrite=true",
+          "--output=results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-transition\\nsys.sqlite",
+          "results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-transition\\nsys.nsys-rep"
+        ],
+        "export_exit_code": 0,
+        "report_sha256": "e7738c066e039dbc22d0b3d56ad2acc0d74377aa0281455908f01b90259091c5",
+        "sqlite_sha256": "249fb88ac7977872b5fa722ccd112fc0ffaa96915c42cdc2869f8ff72f208450"
+      },
+      "ncu": {
+        "command": [
+          "C:\\Program Files\\NVIDIA Corporation\\Nsight Compute 2025.4.1\\target\\windows-desktop-win7-x64\\ncu.exe",
+          "--target-processes=all",
+          "--profile-from-start=off",
+          "--kernel-name-base=demangled",
+          "--kernel-name=regex:llama_kv_remap_.*",
+          "--replay-mode=kernel",
+          "--cache-control=all",
+          "--clock-control=base",
+          "--metrics=gpu__time_duration.sum,dram__bytes_read.sum,dram__bytes_write.sum,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,sm__warps_active.avg.pct_of_peak_sustained_active",
+          "--page=raw",
+          "--csv",
+          "--log-file=results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-transition\\ncu.csv",
+          "--export=results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-transition\\ncu",
+          "--force-overwrite",
+          "D:\\llama\\build\\patched-cuda-ninja3\\bin\\bench-kv-block-cuda.exe",
+          "--profile",
+          "--blocks",
+          "16",
+          "--layout",
+          "aligned",
+          "--method",
+          "paired",
+          "--repetitions",
+          "5"
+        ],
+        "exit_code": 1,
+        "csv_sha256": "835d5d4acfbf3f24ce1282367d4437bc4d7a373e66ff6d0f330aeccfaea290d7",
+        "permission_denied": true,
+        "driver_incompatible": true
+      }
+    },
+    {
+      "regime_id": "aligned-large",
+      "no_profiler": {
+        "command": [
+          "D:\\llama\\build\\patched-cuda-ninja3\\bin\\bench-kv-block-cuda.exe",
+          "--profile",
+          "--blocks",
+          "32",
+          "--layout",
+          "aligned",
+          "--method",
+          "paired",
+          "--repetitions",
+          "20"
+        ],
+        "exit_code": 0,
+        "stdout_sha256": "ee6919a26da008dbaf664539bd8f77996fb5425e503f210b96126d776e0c6a63",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "nsys": {
+        "capture_command": [
+          "D:\\llama\\runtime\\nsight-systems-2026.3.1\\ProgramFiles64Folder\\NVIDIA Corporation\\Nsight Systems 2026.3.1\\target-windows-x64\\nsys.exe",
+          "profile",
+          "--trace=cuda,nvtx",
+          "--sample=none",
+          "--cpuctxsw=none",
+          "--capture-range=cudaProfilerApi",
+          "--capture-range-end=stop-shutdown",
+          "--force-overwrite=true",
+          "--output=results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-large\\nsys",
+          "D:\\llama\\build\\patched-cuda-ninja3\\bin\\bench-kv-block-cuda.exe",
+          "--profile",
+          "--blocks",
+          "32",
+          "--layout",
+          "aligned",
+          "--method",
+          "paired",
+          "--repetitions",
+          "5"
+        ],
+        "capture_exit_code": 0,
+        "export_command": [
+          "D:\\llama\\runtime\\nsight-systems-2026.3.1\\ProgramFiles64Folder\\NVIDIA Corporation\\Nsight Systems 2026.3.1\\target-windows-x64\\nsys.exe",
+          "export",
+          "--type=sqlite",
+          "--force-overwrite=true",
+          "--output=results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-large\\nsys.sqlite",
+          "results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-large\\nsys.nsys-rep"
+        ],
+        "export_exit_code": 0,
+        "report_sha256": "ea1beb95084ace796dc2577528cec77d0809b34128f46fe711cf3ee22f59a2f3",
+        "sqlite_sha256": "827781b94d770fd08ebf6255769fce2ad8d64de190091f01bde472bad201aee7"
+      },
+      "ncu": {
+        "command": [
+          "C:\\Program Files\\NVIDIA Corporation\\Nsight Compute 2025.4.1\\target\\windows-desktop-win7-x64\\ncu.exe",
+          "--target-processes=all",
+          "--profile-from-start=off",
+          "--kernel-name-base=demangled",
+          "--kernel-name=regex:llama_kv_remap_.*",
+          "--replay-mode=kernel",
+          "--cache-control=all",
+          "--clock-control=base",
+          "--metrics=gpu__time_duration.sum,dram__bytes_read.sum,dram__bytes_write.sum,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,sm__warps_active.avg.pct_of_peak_sustained_active",
+          "--page=raw",
+          "--csv",
+          "--log-file=results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-large\\ncu.csv",
+          "--export=results\\research\\h2-kv-profile-v1.0.0\\profiles\\aligned-large\\ncu",
+          "--force-overwrite",
+          "D:\\llama\\build\\patched-cuda-ninja3\\bin\\bench-kv-block-cuda.exe",
+          "--profile",
+          "--blocks",
+          "32",
+          "--layout",
+          "aligned",
+          "--method",
+          "paired",
+          "--repetitions",
+          "5"
+        ],
+        "exit_code": 1,
+        "csv_sha256": "3d797325cc7fd0e47bf02bdbde0612ac49eb40c9cf31ac3137cc0274d038dc6c",
+        "permission_denied": true,
+        "driver_incompatible": true
+      }
+    },
+    {
+      "regime_id": "misaligned-small",
+      "no_profiler": {
+        "command": [
+          "D:\\llama\\build\\patched-cuda-ninja3\\bin\\bench-kv-block-cuda.exe",
+          "--profile",
+          "--blocks",
+          "1",
+          "--layout",
+          "misaligned",
+          "--method",
+          "paired",
+          "--repetitions",
+          "20"
+        ],
+        "exit_code": 0,
+        "stdout_sha256": "c76caa1410c63a542f66ae60b6f3919dc774451bd21ef0c8dd539532aeda3605",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "nsys": {
+        "capture_command": [
+          "D:\\llama\\runtime\\nsight-systems-2026.3.1\\ProgramFiles64Folder\\NVIDIA Corporation\\Nsight Systems 2026.3.1\\target-windows-x64\\nsys.exe",
+          "profile",
+          "--trace=cuda,nvtx",
+          "--sample=none",
+          "--cpuctxsw=none",
+          "--capture-range=cudaProfilerApi",
+          "--capture-range-end=stop-shutdown",
+          "--force-overwrite=true",
+          "--output=results\\research\\h2-kv-profile-v1.0.0\\profiles\\misaligned-small\\nsys",
+          "D:\\llama\\build\\patched-cuda-ninja3\\bin\\bench-kv-block-cuda.exe",
+          "--profile",
+          "--blocks",
+          "1",
+          "--layout",
+          "misaligned",
+          "--method",
+          "paired",
+          "--repetitions",
+          "5"
+        ],
+        "capture_exit_code": 0,
+        "export_command": [
+          "D:\\llama\\runtime\\nsight-systems-2026.3.1\\ProgramFiles64Folder\\NVIDIA Corporation\\Nsight Systems 2026.3.1\\target-windows-x64\\nsys.exe",
+          "export",
+          "--type=sqlite",
+          "--force-overwrite=true",
+          "--output=results\\research\\h2-kv-profile-v1.0.0\\profiles\\misaligned-small\\nsys.sqlite",
+          "results\\research\\h2-kv-profile-v1.0.0\\profiles\\misaligned-small\\nsys.nsys-rep"
+        ],
+        "export_exit_code": 0,
+        "report_sha256": "f2f08d5314b465e329f55f1e803f1dabfa7d558441bb33606509b43c007c0d60",
+        "sqlite_sha256": "5bcf2f25ebf1ceb498f6abc802e13df421cdb2d779e1cfc54cfab3e723366883"
+      },
+      "ncu": {
+        "command": [
+          "C:\\Program Files\\NVIDIA Corporation\\Nsight Compute 2025.4.1\\target\\windows-desktop-win7-x64\\ncu.exe",
+          "--target-processes=all",
+          "--profile-from-start=off",
+          "--kernel-name-base=demangled",
+          "--kernel-name=regex:llama_kv_remap_.*",
+          "--replay-mode=kernel",
+          "--cache-control=all",
+          "--clock-control=base",
+          "--metrics=gpu__time_duration.sum,dram__bytes_read.sum,dram__bytes_write.sum,dram__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sector_hit_rate.pct,sm__warps_active.avg.pct_of_peak_sustained_active",
+          "--page=raw",
+          "--csv",
+          "--log-file=results\\research\\h2-kv-profile-v1.0.0\\profiles\\misaligned-small\\ncu.csv",
+          "--export=results\\research\\h2-kv-profile-v1.0.0\\profiles\\misaligned-small\\ncu",
+          "--force-overwrite",
+          "D:\\llama\\build\\patched-cuda-ninja3\\bin\\bench-kv-block-cuda.exe",
+          "--profile",
+          "--blocks",
+          "1",
+          "--layout",
+          "misaligned",
+          "--method",
+          "paired",
+          "--repetitions",
+          "5"
+        ],
+        "exit_code": 1,
+        "csv_sha256": "8a9ca5c4d4d4319e476575f853eff4d51ec25d8c5c69ebd52ea97e37ff4b8a8f",
+        "permission_denied": true,
+        "driver_incompatible": true
+      }
+    }
+  ],
+  "artifact_hashes": {
+    "trials": "e4d6fb6de46d733243c3a7a67b51e7addeb218a3f638eed637686e0d5be2c1e4",
+    "report": "415ed968879600967a2530d4383a1a445e626985fa503fca82a14c82d0c06235",
+    "report_markdown": "cd6758d9bd26c53e37526d55e729ade3633d565d92bcffce542942f8c54ef53f"
+  },
+  "nsys_complete": true,
+  "ncu_complete": false,
+  "limited_claims_protocol_compliant": true
+}

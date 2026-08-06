@@ -24,7 +24,7 @@ _LIST_FIELDS = {
     "scope_limits",
 }
 _TEXT_FIELDS = {"id", "question", "hypothesis", "mechanism", "negative_result_policy"}
-_STATUSES = {"prospective", "existing-evidence"}
+_STATUSES = {"prospective", "limited-evidence", "existing-evidence"}
 
 
 def load_research_charter(
@@ -79,9 +79,12 @@ def load_research_charter(
             raise CharterError(
                 f"{claim_id}: prospective claim cannot contain observed results"
             )
-        if claim["status"] == "existing-evidence" and not claim["observed_results"]:
+        if (
+            claim["status"] in {"limited-evidence", "existing-evidence"}
+            and not claim["observed_results"]
+        ):
             raise CharterError(
-                f"{claim_id}: existing-evidence claim must cite observed results"
+                f"{claim_id}: evidence-bearing claim must cite observed results"
             )
 
     return charter

@@ -193,7 +193,7 @@ CUDA mixed workload 缺少 backend-aware policy guard；Hybrid/Recurrent 只有 
 
 ### 如果再做两周？
 
-当前已完成 prefill 级 Conservative Benefit Gating、53-wave 长驻收敛和 CUDA Event/Engine/TTFT 因果链。再做两周会在安装 Nsight Systems/Compute 后补 kernel occupancy/roofline，并把动作空间扩展到 slot placement/KV admission/speculation，而不是继续堆外围功能。
+当前已完成 prefill 级 Conservative Benefit Gating、53-wave 长驻收敛、CUDA Event/Engine/TTFT 服务因果链，以及 4-regime Nsight Systems KV kernel timeline。下一步是在管理员启用 GPU performance counter、并匹配 driver/NCU 版本后补 DRAM/L2/occupancy/roofline；在此之前只讲 NSYS launch/copy/sync 与 paired latency，不假装已有硬件计数器。之后再把动作空间扩展到 slot placement/KV admission/speculation，而不是继续堆外围功能。
 
 ### Benefit Gating 怎么讲？
 
@@ -204,6 +204,8 @@ CUDA mixed workload 缺少 backend-aware policy guard；Hybrid/Recurrent 只有 
 ### CUDA 因果链怎么讲？
 
 先说明干预不是相关性截图：每个 trial 配对运行 upstream/always，并做 Latin 顺序轮换。然后沿四层证据讲：动作计数变化 → prefill token/chunk 变化 → KV copy byte/CUDA Event 与 GPU activity 变化 → Engine execute/TTFT 变化。本轮强制启用增加 23 个 chunk，同时减少 145 个 prefill token、2.52 MB KV copy 和 0.260 ms CUDA Event，但 Engine execute 增加 31.2 ms、TTFT P95 增加 44.8 ms；说明 kernel/copy 局部改善不等于服务尾延迟改善，分块与排队结构同样重要。最后展示可提交 evidence JSON，并主动限定这不是 Nsight 全 kernel census。
+
+如果追问算子机制，切到 H2 artifact：20-pair 无 profiler 主表与 5-pair NSYS 机制 trace 分开。aligned 1 block 的 GPU 改善 +57.10% [38.51%, 57.14%]，16/32 blocks 只有 +5.24%/+3.93%，misaligned 1 block 则回退 137.94%。四个 regime 的 scalar/vector NSYS launch 均为 10/10，所以不是减少 launch 数；错位时 vector grid 中每个线程走 8-lane scalar fallback，说明 alignment 必须进入 action gate。NCU 报 `ERR_NVGPUCTRPERM`，所以不能回答 occupancy/DRAM-bound，只能说明需要哪组 metric 才能继续证伪。
 
 ## 三分钟现场演示顺序
 

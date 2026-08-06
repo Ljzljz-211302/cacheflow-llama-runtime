@@ -33,3 +33,5 @@ CPU cacheflow 在两轮独立的 3-trial workload 中都改善 TTFT P95、TPOT P
 ## Profiler 权限
 
 Windows Performance Recorder 的 sampled-stack profile 因当前非管理员会话缺少 `SeSystemProfilePrivilege` 而失败，VSDiagnostics attach 也未建立可用 session。项目保留该失败边界，并使用 production Engine 自带的 Chrome/Perfetto complete-event trace 生成 `results/engine-flame.svg`。这张图只能归因 prepare/plan/execute/commit phase duration，不能替代 CPU sampled stack、Nsight Systems timeline 或 Nsight Compute kernel 分析。
+
+Issue #4 已补上真实 Nsight Systems CUDA timeline：四个 KV regime 均保存 native `.nsys-rep` 和 SQLite export，能够核对自研 gather/scatter launch、descriptor memcpy 与 CUDA synchronization。它仍不是 CPU sampled-stack profile，也不是全模型 serving trace。Nsight Compute 2025.4.1 已安装并实际尝试四个 regime，但 561.19 driver compatibility 检查与 `ERR_NVGPUCTRPERM` 阻止硬件 performance counters；因此当前不能用 occupancy、DRAM throughput、L2 hit 或 roofline 解释结果。报告中的 effective payload GB/s 只是逻辑 bytes / CUDA-event time，不是硬件带宽。

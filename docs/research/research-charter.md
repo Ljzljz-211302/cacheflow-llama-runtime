@@ -24,7 +24,7 @@
 | ID | 研究问题 | 状态 | 核心主张 | 首要证伪条件 |
 |---|---|---|---|---|
 | H1 | 128-bit 向量化何时降低 snapshot-preserving Remap 成本？ | existing-evidence | 锁定环境中 1/4/16/32 blocks 的配对改善非递增 | 趋势不再非递增、任一规模回归超过 3%、没有规模改善至少 10%，或正确性失败 |
-| H2 | KV 搬运何时成为请求级瓶颈？ | prospective | bytes、碎片、COW 和压力提高搬运重要性，但排队可能反转算子收益 | 所有预注册高搬运场景中 KV 均不 material，或没有 CUDA mediator |
+| H2 | KV 搬运何时成为请求级瓶颈？ | limited evidence | 对齐小搬运中向量化材料性获益，规模增大后收益低于门槛；错位 layout 明确反转 | 所有预注册高搬运场景中 KV 均不 material，或没有 CUDA mediator |
 | H3 | Paged Decode Attention 何时优于 Direct/Remap？ | prospective | 只在上下文、碎片、复用或容量 frontier 之后可能占优 | 所有场景既无延迟 non-inferiority 也无容量收益，或数值不正确 |
 | H4 | 可解释代价模型能否安全优于固定规则？ | prospective | 在 held-out workload 上降低 regret，且不错误启用有害动作 | regret/回归超门槛、开销吃掉收益、分布切换后仍持续错误启用 |
 | H5 | 调度能否改变 CUDA 工作却在 execute 汇总下降时恶化 TTFT？ | existing-evidence | 请求排队结构可使 phase aggregate 与请求 SLO 反向 | 决策、CUDA mediator、请求结果三段因果链任一不存在 |
@@ -57,7 +57,9 @@
 - 基线：`upstream`、`direct-copy`、`scalar-remap`、`vector-remap`。
 - 机制：显式搬运消耗 bandwidth 与 launch；snapshot 合法性限制 Direct；调度改变排队后可能掩盖或放大该成本。
 
-当前只有 3-pair CUDA 因果链，且没有 Nsight kernel census。只有 Issue #4 获得 Nsight Systems/Compute 或等价带宽证据后，才能写“memory-bound”“occupancy”或“roofline”。若所有高搬运场景中 KV 仍不 material，应缩小或否定 H2。
+Issue #4 现有 4 个预注册 regime、160 条无 profiler paired observations 与 4 份 NSYS native/SQLite trace。aligned-small 的 CUDA-event 改善中位数为 57.10%（95% CI 38.51%–57.14%），aligned 16/32 blocks 均低于 10% 材料性门槛；misaligned-small 反而回退 137.94%（95% CI 137.84%–140.55% regression），对应 end-to-end 回退 113.02%。NSYS 中每个 regime 的 scalar/vector 都各有 10 次 launch，因此收益并非来自减少 launch 数；错位反例则证明 layout 合法性必须进入 action gate。
+
+这仍没有证明 memory-bound：本机 NCU 同时报 driver incompatibility 与 `ERR_NVGPUCTRPERM`，因此 DRAM throughput、L2 和 occupancy 未采到。`effective_payload_gbps` 只允许解释为逻辑 payload / CUDA-event time，不能冒充硬件带宽或 roofline。当前 H2 结论只覆盖 KV 算子机制；原有 3-pair 服务因果链仍负责说明 scheduler/CUDA mediator 与 TTFT 可能反向，不能把 +57.10% 写成端到端推理加速。
 
 ## 5. H3：Paged Decode Attention frontier
 

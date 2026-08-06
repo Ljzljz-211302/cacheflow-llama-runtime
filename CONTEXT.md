@@ -72,7 +72,7 @@ _Avoid_: 把不同模型格式、运行时、调度器或硬件上的论文数�
 
 ## Research Claim
 
-研究章程中可被实验推翻的主张。每条 Research Claim 必须显式记录自变量、因变量、混杂因素、Research Baseline、预期机制、证伪条件、证据来源、适用边界和负结果处理，并区分 `existing-evidence` 与 `prospective`。
+研究章程中可被实验推翻的主张。每条 Research Claim 必须显式记录自变量、因变量、混杂因素、Research Baseline、预期机制、证伪条件、证据来源、适用边界和负结果处理，并区分 `prospective`、`limited-evidence` 与 `existing-evidence`；`limited-evidence` 表示已有可复现观测，但仍有关键机制指标或适用范围未闭合。
 
 _Avoid_: objective（只表达目标而不要求可证伪）；把 prospective hypothesis 写成已经获得的 result。
 
@@ -93,3 +93,15 @@ _Avoid_: benchmark script（只执行代码但不冻结分析决策）；根据�
 同一 configuration 和 nuisance block 内，各执行一次 baseline 与 candidate 的最小配对分析单位。两侧共享输入、layout、bytes、进程热状态和测量边界，执行顺序由预注册 seed 随机化并记录。
 
 _Avoid_: 把两个独立运行集合的中位数事后相除；只删除 pair 中较慢的一侧。
+
+## Profiler Mechanism Evidence
+
+与无 profiler Trial Pair 分开采集、只用于解释机制的 NSYS/NCU 证据。NSYS 拥有 CUDA API、kernel、memcpy 与 synchronization 的时间线；NCU 在指标实际存在时拥有 DRAM/L2/occupancy 等硬件计数器解释。Profiler replay 或 tracing 下的 wall time 不进入性能主表。
+
+_Avoid_: 把 profiler 插桩耗时当成自然延迟；只有 NSYS timeline 时声称 memory-bound、roofline 或 achieved occupancy。
+
+## Effective Payload Throughput
+
+逻辑 KV payload bytes 除以无 profiler CUDA-event 时间，用于描述同一语义工作量的有效处理速率。它包含实现效率但不等于实际 DRAM traffic 或显存硬件带宽。
+
+_Avoid_: hardware bandwidth；没有 NCU DRAM counters 时把该值称为 bandwidth utilization。

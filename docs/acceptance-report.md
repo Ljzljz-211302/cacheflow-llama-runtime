@@ -87,7 +87,11 @@ P95 改善 97.41%。这证明被隔离的 COW hot path，不等价于整个 serv
 
 ### CUDA profiling 因果链
 
-3 组 paired Latin upstream/always 干预通过。强制 CacheFlow 中位造成决策 +13、prefill chunk +23、prefill token -354、自研 KV kernel launch +2、KV copy +20,066,300 B、CUDA Event +0.808 ms、GPU busy 与最大 idle gap中位差不变，Engine execute 汇总 -11,446 us，但 TTFT P95 +85.61 ms。完整 GPU samples、Engine events 和相关 Prometheus 快照保存在 `results/cuda_causal_profile_evidence.json`；门禁拒绝仅有采样噪声而没有 material 请求级结果的 trace。本机没有 Nsight，因此不声称全模型 occupancy/roofline。
+3 组 paired Latin upstream/always 干预通过。强制 CacheFlow 中位造成决策 +13、prefill chunk +23、prefill token -354、自研 KV kernel launch +2、KV copy +20,066,300 B、CUDA Event +0.808 ms、GPU busy 与最大 idle gap中位差不变，Engine execute 汇总 -11,446 us，但 TTFT P95 +85.61 ms。完整 GPU samples、Engine events 和相关 Prometheus 快照保存在 `results/cuda_causal_profile_evidence.json`；门禁拒绝仅有采样噪声而没有 material 请求级结果的 trace。
+
+H2 进一步完成 4 个预注册 KV regime、160 条无 profiler paired trials 与 4 份真实 Nsight Systems trace。aligned 1 block 的 CUDA-event 改善为 +57.10% [95% CI +38.51%, +57.14%]，aligned 16/32 blocks 只有 +5.24%/+3.93%，按 10% 门槛判为 neutral；misaligned 1 block 保留为反例，CUDA-event/end-to-end 分别回退 137.94%/113.02%。NSYS 中 scalar/vector 每个 regime 均为 10/10 launches，否定“减少 launch 数”解释。正式 artifact 在 `results/research/h2-kv-profile-v1.0.0/`。
+
+Nsight Compute 已实际执行，但当前 driver/tool compatibility 检查和 `ERR_NVGPUCTRPERM` 阻止硬件计数器采集；失败命令与日志均保留。因此验收只通过 NSYS + no-profiler effect 的限定主张，明确不声称 memory-bound、roofline、achieved occupancy 或 hardware DRAM bytes。
 
 exact output hash 被保留为审计指标而非并发性能硬门槛：batch composition 会改变近似相等 logits 与 EOS 位置；HTTP/SSE、上游兼容和语义质量分别由专门 gate 验证。
 

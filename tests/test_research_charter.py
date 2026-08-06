@@ -21,6 +21,7 @@ class ResearchCharterTests(unittest.TestCase):
         statuses = {claim["status"] for claim in charter["claims"]}
         self.assertIn("prospective", statuses)
         self.assertIn("existing-evidence", statuses)
+        self.assertIn("limited-evidence", statuses)
         for claim in charter["claims"]:
             self.assertTrue(claim["independent_variables"])
             self.assertTrue(claim["dependent_metrics"])
