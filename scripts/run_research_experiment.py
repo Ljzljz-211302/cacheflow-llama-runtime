@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from llama_lab.research_protocol import (  # noqa: E402
+    file_sha256,
     load_research_protocol,
     package_cpu_correctness_run,
     package_cuda_remap_trials,
@@ -45,14 +46,6 @@ def git_dirty(directory: Path) -> bool:
         capture_output=True,
     )
     return bool(completed.stdout.strip())
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def command_snapshot(command: list[str]) -> dict[str, object]:
@@ -119,6 +112,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.output_dir.exists() and any(args.output_dir.iterdir()):
+        parser.error("output directory must be absent or empty; confirmatory artifacts are immutable")
+
     protocol_path = ROOT / "config" / "research_protocol.json"
     claims_path = ROOT / "config" / "research_claims.json"
     environment_path = ROOT / "results" / "environment.json"
@@ -131,12 +127,41 @@ def main() -> int:
     if args.experiment == "h1-vector-remap":
         workload = protocol["workloads"]["h1_vector_remap"]
         command = [str(item) for item in workload["runner"]]
+        correctness_evidence = None
         if not args.skip_execution:
             env = os.environ.copy()
             env["PYTHONPATH"] = os.pathsep.join(
                 (str(ROOT / "src"), str(ROOT / "prototypes"))
             )
+            correctness_command = [str(item) for item in workload["correctness_runner"]]
+            correctness = subprocess.run(
+                correctness_command,
+                cwd=ROOT,
+                env=env,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            correctness_evidence = {
+                "command": correctness_command,
+                "exit_code": correctness.returncode,
+                "passed": correctness.returncode == 0,
+                "stdout_sha256": hashlib.sha256(
+                    correctness.stdout.encode("utf-8")
+                ).hexdigest(),
+                "stderr_sha256": hashlib.sha256(
+                    correctness.stderr.encode("utf-8")
+                ).hexdigest(),
+                "checks": protocol["correctness"]["cuda"],
+            }
+            if correctness.returncode != 0:
+                sys.stderr.write(correctness.stdout)
+                sys.stderr.write(correctness.stderr)
+                raise SystemExit("CUDA correctness preflight failed")
             subprocess.run(command, cwd=ROOT, env=env, check=True)
+        baselines = json.loads(
+            (ROOT / "config" / "research_baselines.json").read_text(encoding="utf-8")
+        )
         artifacts = package_cuda_remap_trials(
             protocol_path,
             claims_path,
@@ -153,6 +178,11 @@ def main() -> int:
             binary_sha256=file_sha256(
                 ROOT / "build" / "patched-cuda-ninja3" / "bin" / "bench-kv-block-cuda.exe"
             ),
+            correctness_evidence=correctness_evidence,
+            invocation_command=[sys.executable, *sys.argv],
+            execution_mode="repackage" if args.skip_execution else "execute",
+            patch_sha256=file_sha256(ROOT / "patches" / "0001-cache-aware-slot-scheduler.patch"),
+            upstream_revision=baselines["upstream_revision"],
         )
     else:
         if args.skip_execution:

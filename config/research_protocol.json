@@ -22,6 +22,7 @@
   "workloads": {
     "h1_vector_remap": {
       "claim": "H1-vector-remap",
+      "correctness_runner": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/build_cuda_kv.ps1", "-Sanitize"],
       "runner": ["python", "scripts/run_cuda_kv_benchmark.py"],
       "source": "results/raw/cuda-kv-transport.csv",
       "methods": ["scalar_gather_scatter", "vectorized_gather_scatter"],
@@ -69,10 +70,10 @@
     "bootstrap_resamples": 10000,
     "minimum_pairs_per_case": 20,
     "gates": {
-      "correctness": "all valid observations pass the oracle and sanitizer gate",
-      "non_regression": "lower 95% CI of paired kernel improvement is at least -3% for every block count",
-      "material_effect": "lower 95% CI reaches at least 10% for one or more block counts",
-      "trend": "point-estimate improvement is non-increasing for 1, 4, 16, and 32 blocks"
+      "correctness_required": true,
+      "maximum_regression_percent": 3.0,
+      "material_improvement_percent": 10.0,
+      "trend": "non_increasing_by_block_count"
     }
   },
   "outliers": {
@@ -91,7 +92,7 @@
       "CPU element-wise oracle for snapshot mappings",
       "guard regions and randomized overlap/cycle mappings",
       "Compute Sanitizer memcheck and racecheck",
-      "real Qwen tensor deterministic-output comparison"
+      "real Qwen tensor swap roundtrip state equality"
     ],
     "performance_is_secondary_to_correctness": true
   },

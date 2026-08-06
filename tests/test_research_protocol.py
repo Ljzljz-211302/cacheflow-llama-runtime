@@ -31,6 +31,10 @@ class ResearchProtocolTests(unittest.TestCase):
         self.assertEqual(protocol["outliers"]["outcome_based_deletion"], "forbidden")
         self.assertGreaterEqual(protocol["statistics"]["confidence_level"], 0.95)
         self.assertGreaterEqual(protocol["statistics"]["bootstrap_resamples"], 10000)
+        self.assertIsInstance(
+            protocol["statistics"]["gates"]["maximum_regression_percent"], float
+        )
+        self.assertTrue(protocol["workloads"]["h1_vector_remap"]["correctness_runner"])
         self.assertTrue(protocol["cpu_correctness_fallback"]["command"])
 
     def test_paired_bootstrap_uses_within_pair_effects(self) -> None:
@@ -59,6 +63,7 @@ class ResearchProtocolTests(unittest.TestCase):
                         "blocks",
                         "trial",
                         "order_in_pair",
+                        "random_seed",
                         "host_enqueue_ms",
                         "gpu_ms",
                         "end_to_end_ms",
@@ -74,6 +79,7 @@ class ResearchProtocolTests(unittest.TestCase):
                             "blocks": 1,
                             "trial": 0,
                             "order_in_pair": 0,
+                            "random_seed": 20260806,
                             "host_enqueue_ms": 0.010,
                             "gpu_ms": 0.030,
                             "end_to_end_ms": 0.040,
@@ -85,6 +91,7 @@ class ResearchProtocolTests(unittest.TestCase):
                             "blocks": 1,
                             "trial": 0,
                             "order_in_pair": 1,
+                            "random_seed": 20260806,
                             "host_enqueue_ms": 0.008,
                             "gpu_ms": 0.015,
                             "end_to_end_ms": 0.025,
@@ -105,6 +112,7 @@ class ResearchProtocolTests(unittest.TestCase):
                 command=["bench-kv-block-cuda.exe"],
                 code_revision="a" * 40,
                 captured_at_utc="2026-08-06T00:00:00Z",
+                correctness_evidence={"passed": True, "command": ["oracle"]},
             )
 
             manifest = json.loads(artifacts.manifest.read_text(encoding="utf-8"))
@@ -121,14 +129,35 @@ class ResearchProtocolTests(unittest.TestCase):
             )
             self.assertEqual(records[0]["order_in_pair"], 0)
             self.assertEqual(records[1]["order_in_pair"], 1)
+            self.assertFalse(manifest["protocol_compliant"])
+            self.assertTrue(manifest["acceptance"]["correctness"])
+
+            repackaged = package_cuda_remap_trials(
+                protocol_path=ROOT / "config" / "research_protocol.json",
+                claims_path=ROOT / "config" / "research_claims.json",
+                source_path=source,
+                environment_path=environment,
+                output_dir=root / "repackaged",
+                command=["bench-kv-block-cuda.exe"],
+                code_revision="a" * 40,
+                captured_at_utc="2026-08-06T00:00:00Z",
+            )
+            repackaged_manifest = json.loads(
+                repackaged.manifest.read_text(encoding="utf-8")
+            )
+            self.assertFalse(repackaged_manifest["acceptance"]["correctness"])
+            self.assertIn(
+                "independent correctness preflight did not pass",
+                repackaged_manifest["violations"],
+            )
 
     def test_packager_rejects_missing_enqueue_timing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "source.csv"
             source.write_text(
-                "phase,method,blocks,trial,order_in_pair,gpu_ms,end_to_end_ms,bytes\n"
-                "confirmatory,scalar_gather_scatter,1,0,0,0.03,0.04,1024\n",
+                "phase,method,blocks,trial,order_in_pair,random_seed,gpu_ms,end_to_end_ms,bytes\n"
+                "confirmatory,scalar_gather_scatter,1,0,0,20260806,0.03,0.04,1024\n",
                 encoding="utf-8",
             )
             environment = root / "environment.json"

@@ -1427,10 +1427,10 @@ index e284a58..17d7748 100644
  
 diff --git a/tests/bench-kv-block-cuda.cu b/tests/bench-kv-block-cuda.cu
 new file mode 100644
-index 0000000..22f7983
+index 0000000..fbddd88
 --- /dev/null
 +++ b/tests/bench-kv-block-cuda.cu
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,152 @@
 +#include "server-kv-block-backend.h"
 +#include "llama-kv-remap-cuda.cuh"
 +
@@ -1517,7 +1517,7 @@ index 0000000..22f7983
 +
 +    std::mt19937 order_rng(20260806);
 +    std::bernoulli_distribution scalar_first_distribution(0.5);
-+    std::puts("phase,method,blocks,trial,order_in_pair,host_enqueue_ms,gpu_ms,end_to_end_ms,bytes");
++    std::puts("phase,method,blocks,trial,order_in_pair,random_seed,host_enqueue_ms,gpu_ms,end_to_end_ms,bytes");
 +    for (const size_t count : { 1u, 4u, 16u, 32u }) {
 +        std::vector<server_kv_block_copy> mapping;
 +        for (size_t i = 0; i < count; ++i) mapping.push_back({ (uint32_t) i, (uint32_t) (48 + i) });
@@ -1529,14 +1529,26 @@ index 0000000..22f7983
 +            copies.push_back({ v + (size_t) copy.source * elements,
 +                    v + (size_t) copy.destination * elements, (2 * i + 1) * elements, elements });
 +        }
-+        const timings warmup_scalar = measure_batch(staging, device_copies, copies, elements,
-+                stream, llama_kv_remap_mode::scalar);
-+        const timings warmup_vectorized = measure_batch(staging, device_copies, copies, elements,
-+                stream, llama_kv_remap_mode::vectorized);
-+        std::printf("warmup,scalar_gather_scatter,%zu,-1,0,%.6f,%.6f,%.6f,%zu\n", count,
++        timings warmup_scalar{};
++        timings warmup_vectorized{};
++        const bool warmup_scalar_first = scalar_first_distribution(order_rng);
++        if (warmup_scalar_first) {
++            warmup_scalar = measure_batch(staging, device_copies, copies, elements,
++                    stream, llama_kv_remap_mode::scalar);
++            warmup_vectorized = measure_batch(staging, device_copies, copies, elements,
++                    stream, llama_kv_remap_mode::vectorized);
++        } else {
++            warmup_vectorized = measure_batch(staging, device_copies, copies, elements,
++                    stream, llama_kv_remap_mode::vectorized);
++            warmup_scalar = measure_batch(staging, device_copies, copies, elements,
++                    stream, llama_kv_remap_mode::scalar);
++        }
++        std::printf("warmup,scalar_gather_scatter,%zu,-1,%d,20260806,%.6f,%.6f,%.6f,%zu\n", count,
++                warmup_scalar_first ? 0 : 1,
 +                warmup_scalar.host_enqueue_ms, warmup_scalar.gpu_ms, warmup_scalar.end_to_end_ms,
 +                count * layout.bytes_per_block());
-+        std::printf("warmup,vectorized_gather_scatter,%zu,-1,1,%.6f,%.6f,%.6f,%zu\n", count,
++        std::printf("warmup,vectorized_gather_scatter,%zu,-1,%d,20260806,%.6f,%.6f,%.6f,%zu\n", count,
++                warmup_scalar_first ? 1 : 0,
 +                warmup_vectorized.host_enqueue_ms, warmup_vectorized.gpu_ms,
 +                warmup_vectorized.end_to_end_ms, count * layout.bytes_per_block());
 +        for (int trial = 0; trial < 20; ++trial) {
@@ -1554,11 +1566,11 @@ index 0000000..22f7983
 +                scalar = measure_batch(staging, device_copies, copies, elements, stream,
 +                        llama_kv_remap_mode::scalar);
 +            }
-+            std::printf("confirmatory,scalar_gather_scatter,%zu,%d,%d,%.6f,%.6f,%.6f,%zu\n",
++            std::printf("confirmatory,scalar_gather_scatter,%zu,%d,%d,20260806,%.6f,%.6f,%.6f,%zu\n",
 +                    count, trial, scalar_first ? 0 : 1,
 +                    scalar.host_enqueue_ms, scalar.gpu_ms, scalar.end_to_end_ms,
 +                    count * layout.bytes_per_block());
-+            std::printf("confirmatory,vectorized_gather_scatter,%zu,%d,%d,%.6f,%.6f,%.6f,%zu\n",
++            std::printf("confirmatory,vectorized_gather_scatter,%zu,%d,%d,20260806,%.6f,%.6f,%.6f,%zu\n",
 +                    count, trial, scalar_first ? 1 : 0,
 +                    vectorized.host_enqueue_ms, vectorized.gpu_ms, vectorized.end_to_end_ms,
 +                    count * layout.bytes_per_block());

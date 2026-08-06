@@ -12,12 +12,12 @@ python scripts/run_research_experiment.py `
   --output-dir results/research/h1-vector-remap-v1
 ```
 
-命令先运行现有 CUDA benchmark，再生成：
+命令先执行 `build_cuda_kv.ps1 -Sanitize` 的独立 oracle/guard/随机映射/Compute Sanitizer/真实 Qwen swap roundtrip 正确性预检，再运行 CUDA benchmark 并生成：
 
 - `manifest.json`：协议/主张/source/binary SHA-256、outer/vendor revision 与 dirty flag、真实命令、实时 GPU/toolchain 环境、统计摘要和验收结果；
 - `trials.jsonl`：warm-up 与 confirmatory 的逐 action 原始行，包含 pair、真实执行顺序、bytes、正确性和三种计时口径。
 
-只重新封装已经生成的、字段完整的 CSV 时可加 `--skip-execution --source <path>`；这种操作不会伪装成重新采集。
+只重新封装已经生成的、字段完整的 CSV 时可加 `--skip-execution --source <path>`；这种模式没有本轮独立正确性证据，必须写入 `execution_mode=repackage` 且 `protocol_compliant=false`，不能伪装成确认性采集。非空输出目录会被拒绝，确认性制品不可原地覆盖。
 
 无 CUDA 时使用：
 
@@ -34,8 +34,8 @@ CPU fallback 验证调度、Block Table、refcount、COW、Swap 和参考语义�
 - 固定布局：32 layers、8 KV heads、head dimension 128、16-token blocks、FP16 K/V。
 - treatment：Scalar Gather/Scatter 与 `uint4` Vector Gather/Scatter。
 - configuration：1、4、16、32 remapped blocks。
-- 每个 configuration 先执行 1 个 warm-up pair，再执行 20 个 confirmatory pairs。
-- 伪随机种子固定为 `20260806`；每个 pair 内 treatment 顺序随机并写入 `order_in_pair`。
+- 每个 configuration 先执行 1 个随机化 warm-up pair，再执行 20 个 confirmatory pairs。
+- 伪随机种子固定为 `20260806` 并写入每条原始记录；每个 pair 内 treatment 顺序随机并写入 `order_in_pair`。
 - 每对共享 descriptor、mapping、staging、stream、bytes 和进程热状态；分析只使用完整 pair。
 - warm-up 不进入统计，但仍写入 raw records；不得根据结果临时追加或删除 warm-up。
 
@@ -59,7 +59,7 @@ improvement_percent = 100 * (scalar_ms - vector_ms) / scalar_ms
 
 主估计量是 paired improvement 的中位数。95% CI 使用整 pair 重采样的 deterministic percentile bootstrap，固定 10,000 resamples 和配置 seed；不分别 bootstrap 两个 treatment。
 
-H1 同时通过以下门禁才算 confirmatory pass：
+H1 同时通过以下门禁才算 confirmatory pass；所有数值均由 JSON 的 numeric gate 字段读取，不允许代码另藏一套阈值：
 
 1. 所有有效记录通过 oracle，且 correctness 优先于性能；
 2. 每个 block count 至少 20 个完整 pair；
@@ -86,4 +86,3 @@ CI 表达当前采样下的不确定性，不证明跨 GPU 普遍成立。P95/P9
 - 不追加样本直到 CI 过线；v1 使用固定 20 pairs/configuration。
 - 任一命令、样本数、warm-up、随机化、计时、CI 或 gate 偏离都写入新版本或 amendment。
 - 失败、OOM、correctness failure、反号结果和 dirty run 都是需要保存的结果，不允许静默重跑到成功。
-

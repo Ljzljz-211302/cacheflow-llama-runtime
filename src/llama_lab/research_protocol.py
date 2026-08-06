@@ -25,7 +25,7 @@ class RunArtifacts:
     trials: Path
 
 
-def _sha256(path: Path) -> str:
+def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -53,6 +53,13 @@ def load_research_protocol(
         raise ProtocolError("confidence_level must be in (0, 1)")
     if statistics_config.get("bootstrap_resamples", 0) < 1000:
         raise ProtocolError("bootstrap_resamples must be at least 1000")
+    gates = statistics_config.get("gates", {})
+    if not isinstance(gates.get("maximum_regression_percent"), (int, float)):
+        raise ProtocolError("maximum_regression_percent must be numeric")
+    if not isinstance(gates.get("material_improvement_percent"), (int, float)):
+        raise ProtocolError("material_improvement_percent must be numeric")
+    if gates.get("trend") != "non_increasing_by_block_count":
+        raise ProtocolError("unsupported trend gate")
     outliers = protocol.get("outliers", {})
     if outliers.get("outcome_based_deletion") != "forbidden":
         raise ProtocolError("outcome-based outlier deletion must be forbidden")
@@ -117,6 +124,11 @@ def package_cuda_remap_trials(
     repository_dirty: bool | None = None,
     vendor_dirty: bool | None = None,
     binary_sha256: str | None = None,
+    correctness_evidence: dict[str, Any] | None = None,
+    invocation_command: list[str] | None = None,
+    execution_mode: str = "repackage",
+    patch_sha256: str | None = None,
+    upstream_revision: str | None = None,
 ) -> RunArtifacts:
     protocol = load_research_protocol(protocol_path, claims_path)
     if len(code_revision) != 40:
@@ -136,6 +148,7 @@ def package_cuda_remap_trials(
         "blocks",
         "trial",
         "order_in_pair",
+        "random_seed",
         "host_enqueue_ms",
         "gpu_ms",
         "end_to_end_ms",
@@ -147,13 +160,24 @@ def package_cuda_remap_trials(
     if missing:
         raise ProtocolError(f"raw source missing fields: {', '.join(sorted(missing))}")
 
+    correctness_passed = bool(
+        correctness_evidence and correctness_evidence.get("passed") is True
+    )
     records: list[dict[str, Any]] = []
     by_case: dict[int, dict[int, dict[str, float]]] = {}
+    pair_metadata: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
+    seen_rows: set[tuple[str, int, int, str]] = set()
+    design_violations: list[str] = []
+    workload = protocol["workloads"]["h1_vector_remap"]
+    expected_blocks = {int(value) for value in workload["block_counts"]}
+    expected_seed = int(protocol["random_seed"])
     for row in rows:
         method = row["method"]
         if method not in {"scalar_gather_scatter", "vectorized_gather_scatter"}:
             raise ProtocolError(f"unknown CUDA Remap method: {method}")
         blocks = int(row["blocks"])
+        if blocks not in expected_blocks:
+            design_violations.append(f"unexpected block count: {blocks}")
         trial = int(row["trial"])
         phase = row["phase"]
         if phase not in {"warmup", "confirmatory"}:
@@ -161,6 +185,15 @@ def package_cuda_remap_trials(
         order_in_pair = int(row["order_in_pair"])
         if order_in_pair not in {0, 1}:
             raise ProtocolError("order_in_pair must be 0 or 1")
+        if int(row["random_seed"]) != expected_seed:
+            design_violations.append(
+                f"blocks={blocks} trial={trial} has unexpected random seed"
+            )
+        row_key = (phase, blocks, trial, method)
+        if row_key in seen_rows:
+            design_violations.append(f"duplicate row: {row_key}")
+            continue
+        seen_rows.add(row_key)
         timing = {
             "host_enqueue_ms": float(row["host_enqueue_ms"]),
             "synchronized_kernel_ms": float(row["gpu_ms"]),
@@ -168,8 +201,7 @@ def package_cuda_remap_trials(
         }
         if any(value < 0 for value in timing.values()):
             raise ProtocolError("timing values must be non-negative")
-        records.append(
-            {
+        record = {
                 "claim_id": "H1-vector-remap",
                 "experiment_id": "h1-vector-remap",
                 "pair_id": f"blocks-{blocks}-trial-{trial}",
@@ -180,10 +212,11 @@ def package_cuda_remap_trials(
                 "bytes": int(row["bytes"]),
                 "valid": True,
                 "invalid_reason": None,
-                "correctness_passed": True,
+                "correctness_passed": correctness_passed,
                 "timing_ms": timing,
             }
-        )
+        records.append(record)
+        pair_metadata.setdefault((phase, blocks, trial), []).append(record)
         if phase == "confirmatory":
             by_case.setdefault(blocks, {}).setdefault(trial, {})[method] = timing[
                 "synchronized_kernel_ms"
@@ -191,12 +224,42 @@ def package_cuda_remap_trials(
 
     stats = protocol["statistics"]
     summaries: list[dict[str, Any]] = []
-    violations: list[str] = []
+    violations: list[str] = list(design_violations)
+    if not correctness_passed:
+        violations.append("independent correctness preflight did not pass")
     if repository_dirty:
         violations.append("outer repository was dirty before the run")
     if vendor_dirty:
         violations.append("vendor repository was dirty before the run")
-    for blocks, trials in sorted(by_case.items()):
+    expected_confirmatory_trials = set(range(int(workload["pairs_per_block_count"])))
+    for blocks in sorted(expected_blocks):
+        warmup = pair_metadata.get(("warmup", blocks, -1), [])
+        if len(warmup) != 2:
+            violations.append(f"blocks={blocks} must contain one complete warmup pair")
+        confirmatory_trials = {
+            trial
+            for phase, row_blocks, trial in pair_metadata
+            if phase == "confirmatory" and row_blocks == blocks
+        }
+        if confirmatory_trials != expected_confirmatory_trials:
+            violations.append(f"blocks={blocks} confirmatory trial ids do not match protocol")
+        for (phase, row_blocks, trial), pair_rows in pair_metadata.items():
+            if row_blocks != blocks:
+                continue
+            if len(pair_rows) != 2:
+                violations.append(f"{phase} blocks={blocks} trial={trial} is incomplete")
+                continue
+            if {row["method"] for row in pair_rows} != {
+                "scalar_gather_scatter",
+                "vectorized_gather_scatter",
+            }:
+                violations.append(f"{phase} blocks={blocks} trial={trial} has wrong methods")
+            if {row["order_in_pair"] for row in pair_rows} != {0, 1}:
+                violations.append(f"{phase} blocks={blocks} trial={trial} has invalid order")
+            if len({row["bytes"] for row in pair_rows}) != 1:
+                violations.append(f"{phase} blocks={blocks} trial={trial} has unequal bytes")
+
+        trials = by_case.get(blocks, {})
         pairs: list[tuple[float, float]] = []
         for trial, methods in sorted(trials.items()):
             if set(methods) != {"scalar_gather_scatter", "vectorized_gather_scatter"}:
@@ -208,22 +271,30 @@ def package_cuda_remap_trials(
                     methods["vectorized_gather_scatter"],
                 )
             )
-        summary = paired_bootstrap_summary(
-            pairs,
-            confidence_level=float(stats["confidence_level"]),
-            resamples=int(stats["bootstrap_resamples"]),
-            seed=int(protocol["random_seed"]) + blocks,
-        )
-        summary["blocks"] = blocks
-        summaries.append(summary)
+        if pairs:
+            summary = paired_bootstrap_summary(
+                pairs,
+                confidence_level=float(stats["confidence_level"]),
+                resamples=int(stats["bootstrap_resamples"]),
+                seed=int(protocol["random_seed"]) + blocks,
+            )
+            summary["blocks"] = blocks
+            summaries.append(summary)
         if len(pairs) < int(stats["minimum_pairs_per_case"]):
             violations.append(
                 f"blocks={blocks} has {len(pairs)} pairs; require {stats['minimum_pairs_per_case']}"
             )
 
+    gates = stats["gates"]
+    maximum_regression = float(gates["maximum_regression_percent"])
+    material_threshold = float(gates["material_improvement_percent"])
     estimates = [float(item["median_improvement_percent"]) for item in summaries]
-    non_regression = all(float(item["ci_lower_percent"]) >= -3.0 for item in summaries)
-    material_effect = any(float(item["ci_lower_percent"]) >= 10.0 for item in summaries)
+    non_regression = len(summaries) == len(expected_blocks) and all(
+        float(item["ci_lower_percent"]) >= -maximum_regression for item in summaries
+    )
+    material_effect = any(
+        float(item["ci_lower_percent"]) >= material_threshold for item in summaries
+    )
     trend = all(left >= right for left, right in zip(estimates, estimates[1:]))
     if not non_regression:
         violations.append("non-regression CI gate failed")
@@ -240,21 +311,28 @@ def package_cuda_remap_trials(
         "experiment_id": "h1-vector-remap",
         "claim_id": "H1-vector-remap",
         "protocol_version": protocol["protocol_version"],
-        "protocol_sha256": _sha256(protocol_path),
-        "claims_sha256": _sha256(claims_path),
-        "source_sha256": _sha256(source_path),
+        "protocol_sha256": file_sha256(protocol_path),
+        "claims_sha256": file_sha256(claims_path),
+        "source_sha256": file_sha256(source_path),
         "code_revision": code_revision,
         "vendor_revision": vendor_revision,
+        "upstream_revision": upstream_revision,
+        "patch_sha256": patch_sha256,
         "repository_dirty_before_run": repository_dirty,
         "vendor_dirty_before_run": vendor_dirty,
         "benchmark_binary_sha256": binary_sha256,
         "captured_at_utc": captured_at_utc,
-        "command": command,
+        "execution_mode": execution_mode,
+        "invocation_command": invocation_command,
+        "runner_command": command,
+        "source_path": str(source_path),
+        "output_dir": str(output_dir),
+        "correctness_evidence": correctness_evidence,
         "environment": environment,
         "raw_trial_count": len(records),
         "paired_summaries": summaries,
         "acceptance": {
-            "correctness": all(record["correctness_passed"] for record in records),
+            "correctness": correctness_passed,
             "non_regression": non_regression,
             "material_effect": material_effect,
             "non_increasing_trend": trend,
@@ -315,8 +393,8 @@ def package_cpu_correctness_run(
         "experiment_id": "cpu-correctness",
         "claim_id": None,
         "protocol_version": protocol["protocol_version"],
-        "protocol_sha256": _sha256(protocol_path),
-        "claims_sha256": _sha256(claims_path),
+        "protocol_sha256": file_sha256(protocol_path),
+        "claims_sha256": file_sha256(claims_path),
         "code_revision": code_revision,
         "repository_dirty_before_run": repository_dirty,
         "captured_at_utc": captured_at_utc,
