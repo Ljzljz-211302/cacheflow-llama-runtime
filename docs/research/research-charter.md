@@ -11,7 +11,7 @@
 
 本项目研究：在消费级单 GPU llama.cpp Serving 中，何时应显式复制 KV、何时应直接分页读取，以及能否用可解释且有安全回退的策略在这些动作间选择。
 
-章程不预设 Paged Decode 一定更快。原始 PagedAttention 工作已经给出反例：分页 attention kernel 可能因索引、分支和变长处理而更慢，系统仍可能因减少 KV 浪费、容纳更大 batch 而获益。因此所有后续结论必须分开回答：
+章程不预设 Paged Decode Attention 一定更快。原始 PagedAttention 工作已经给出反例：分页 attention kernel 可能因索引、分支和变长处理而更慢，系统仍可能因减少 KV 浪费、容纳更大 batch 而获益。因此所有后续结论必须分开回答：
 
 1. 算子是否正确、kernel 是否更快；
 2. 峰值 KV 与可驻留请求数是否改善；
@@ -23,9 +23,9 @@
 
 | ID | 研究问题 | 状态 | 核心主张 | 首要证伪条件 |
 |---|---|---|---|---|
-| H1 | 128-bit 向量化何时降低 snapshot-preserving Remap 成本？ | existing-evidence | 小 block 数收益大，流量增大后收益收敛 | 任一规模回归超过 3%，或没有规模改善至少 10%，或正确性失败 |
+| H1 | 128-bit 向量化何时降低 snapshot-preserving Remap 成本？ | existing-evidence | 锁定环境中 1/4/16/32 blocks 的配对改善非递增 | 趋势不再非递增、任一规模回归超过 3%、没有规模改善至少 10%，或正确性失败 |
 | H2 | KV 搬运何时成为请求级瓶颈？ | prospective | bytes、碎片、COW 和压力提高搬运重要性，但排队可能反转算子收益 | 所有预注册高搬运场景中 KV 均不 material，或没有 CUDA mediator |
-| H3 | Paged Decode 何时优于 Direct/Remap？ | prospective | 只在上下文、碎片、复用或容量 frontier 之后可能占优 | 所有场景既无延迟 non-inferiority 也无容量收益，或数值不正确 |
+| H3 | Paged Decode Attention 何时优于 Direct/Remap？ | prospective | 只在上下文、碎片、复用或容量 frontier 之后可能占优 | 所有场景既无延迟 non-inferiority 也无容量收益，或数值不正确 |
 | H4 | 可解释代价模型能否安全优于固定规则？ | prospective | 在 held-out workload 上降低 regret，且不错误启用有害动作 | regret/回归超门槛、开销吃掉收益、分布切换后仍持续错误启用 |
 | H5 | 调度能否改变 CUDA 工作却在 execute 汇总下降时恶化 TTFT？ | existing-evidence | 请求排队结构可使 phase aggregate 与请求 SLO 反向 | 决策、CUDA mediator、请求结果三段因果链任一不存在 |
 
@@ -42,7 +42,7 @@
 
 ### 当前证据
 
-20 组配对且交替顺序的结果为 53.33% / 48.89% / 3.13% / 1.87%。这支持“收益随规模收敛”，不支持“端到端推理加速 53.33%”。真实应用累计 5,603,330 vectorized bytes 只证明生产链路调用。
+20 组配对且交替顺序的结果为 53.33% / 48.89% / 3.13% / 1.87%，在锁定的四个规模上呈非递增趋势。这不支持“端到端推理加速 53.33%”。减少指令、launch、cache 或 bandwidth 中哪一项造成趋势仍是 prospective explanation，必须由 H2 profiling 区分；真实应用累计 5,603,330 vectorized bytes 只证明生产链路调用。
 
 ### 负结果处理
 
@@ -59,7 +59,7 @@
 
 当前只有 3-pair CUDA 因果链，且没有 Nsight kernel census。只有 Issue #4 获得 Nsight Systems/Compute 或等价带宽证据后，才能写“memory-bound”“occupancy”或“roofline”。若所有高搬运场景中 KV 仍不 material，应缩小或否定 H2。
 
-## 5. H3：Paged Decode frontier
+## 5. H3：Paged Decode Attention frontier
 
 ### 变量、指标与机制
 
@@ -94,7 +94,7 @@ Paged 路径省去 materialization，却增加 page-table lookup、不规则访�
 
 - Issue #3 冻结实验协议、统计方法和确切 pass/fail thresholds。
 - Issue #4 用 profiling 验证或否定 H2。
-- Issue #5 规定并原型验证 H3 的受限 Paged Decode。
+- Issue #5 规定并原型验证 H3 的受限 Paged Decode Attention。
 - Issue #6 设计 H4 的统一代价模型。
 - Issue #7 才允许把通过门禁的 Paged/Policy 接入生产路径。
 - Issue #8/#9 负责消融、外部有效性、制品和论文式报告。

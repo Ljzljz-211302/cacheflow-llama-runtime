@@ -6,7 +6,7 @@
     {
       "id": "H1-vector-remap",
       "question": "When does 128-bit vectorization reduce the cost of snapshot-preserving KV Remap?",
-      "hypothesis": "With identical descriptors and snapshot semantics, uint4 Gather/Scatter reduces GPU time relative to scalar Remap for aligned FP16 KV, with the largest relative effect at small block counts and diminishing benefit as memory traffic dominates.",
+      "hypothesis": "With identical descriptors and snapshot semantics on the locked environment, uint4 Gather/Scatter reduces GPU time relative to scalar Remap for aligned FP16 KV, and the paired median improvement is non-increasing across 1, 4, 16, and 32 remapped blocks.",
       "status": "existing-evidence",
       "independent_variables": [
         "scalar versus uint4 Remap",
@@ -26,10 +26,11 @@
         "warm-up and synchronization placement"
       ],
       "baselines": ["scalar-remap", "vector-remap"],
-      "mechanism": "Each aligned thread moves eight FP16 elements through one uint4 load/store, reducing descriptor-loop and instruction overhead; as transfers grow, bandwidth and staging traffic bound the attainable gain.",
+      "mechanism": "Candidate mechanism, not an observed result: each aligned thread moves eight FP16 elements through one uint4 load/store and may reduce descriptor-loop and instruction overhead. The cause of the observed scale trend remains prospective until H2 profiling distinguishes launch, instruction, cache, and bandwidth effects.",
       "falsification": [
         "Any preregistered block count has paired median GPU regression above 3%.",
         "No preregistered block count reaches 10% paired median GPU improvement.",
+        "Paired median improvement is not non-increasing across the locked 1, 4, 16, and 32 block sequence.",
         "The vector path changes output, violates snapshot semantics, or produces sanitizer errors.",
         "Production application evidence records no vectorized bytes while claiming that the path is used."
       ],
@@ -100,7 +101,7 @@
       "hypothesis": "Direct page-table reads can avoid materialization bytes and improve capacity or latency only beyond a context, fragmentation, or reuse frontier; indirect addressing and online-softmax overhead may make it slower for short or contiguous cases.",
       "status": "prospective",
       "independent_variables": [
-        "Direct, Remap, or Paged Decode action",
+        "Direct, Remap, or Paged Decode Attention action",
         "context length, page size, and physical fragmentation",
         "batch size and GQA shape",
         "prefix reuse and resident sequence count"
@@ -118,7 +119,7 @@
         "scheduler and allocator differences"
       ],
       "baselines": ["direct-copy", "scalar-remap", "vector-remap"],
-      "mechanism": "Paged Decode removes full-cache materialization but adds block-table lookup, irregular memory access, masking, online softmax, and reduction costs; the winning action depends on avoided bytes and available concurrency.",
+      "mechanism": "Paged Decode Attention removes full-cache materialization but adds block-table lookup, irregular memory access, masking, online softmax, and reduction costs; the winning action depends on avoided bytes and available concurrency.",
       "falsification": [
         "The restricted kernel fails the numerical oracle or memory-safety checks.",
         "It is neither non-inferior in latency nor beneficial in resident capacity in every preregistered regime.",
