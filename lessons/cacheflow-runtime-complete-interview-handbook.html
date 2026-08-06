@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CacheFlow Runtime：从零到项目面试完全手册</title>
+  <link rel="stylesheet" href="../assets/handbook.css">
+</head>
+<body><main>
+  <p class="kicker">Single-document interview handbook · 2026-08-06</p>
+  <h1>CacheFlow Runtime：从零到项目面试完全手册</h1>
+  <p class="lead">从“一次聊天请求到底发生了什么”讲到 Transformer、LLM Serving、KV Cache、调度、CUDA 算子、在线学习、实验统计和源码答辩。目标不是背术语，而是让你能够定义、推导、定位代码、解释证据并主动说出边界。</p>
+
+  <div class="callout danger"><strong>当前事实基线（面试必须以此为准）</strong><br>
+    固定上游为 llama.cpp <code>acd79d603…</code>；当前个人上游差异约为 61 files、<code>+8708/-99</code>。向量化 KV Remap 的 20 组配对微基准改善为 53.33% / 48.89% / 3.13% / 1.87%，真实应用累计执行 5,603,330 个向量化 Remap byte。增量的功能、真实模型、Sanitizer 和算子性能门禁通过；两次重新执行全量统计套件分别被不同的时序敏感门禁拦截，所以<strong>不能声称当前 Full 稳定全绿</strong>。项目实现的是 KV 数据移动 Remap，不是 FlashAttention、GEMM 或 PagedAttention。
+  </div>
+
+  <h2 id="how">0. 如何使用这份手册</h2>
+  <ol>
+    <li><strong>第一次：</strong>顺序阅读，不懂的名词只看当节解释，不要同时打开十个网页。</li>
+    <li><strong>第二次：</strong>合上答案，完成每节“闭卷输出”。能认出来不等于能说出来。</li>
+    <li><strong>第三次：</strong>按代码地图打开本地源码，沿一次请求和一次 KV 操作走读。</li>
+    <li><strong>第四次：</strong>随机抽取问题库，每题先用 30 秒给结论，再接受 2 分钟追问。</li>
+    <li><strong>面试前：</strong>只复习速查表、数据卡、边界表和错题，不再通读全文。</li>
+  </ol>
+  <div class="card"><strong>掌握标准：</strong>每个核心点都要回答五层：是什么 → 为什么 → 怎么做 → 如何验证 → 有什么边界。只会背定义，最多算第一层。</div>
+
+  <h2>目录</h2>
+  <ol class="toc">
+    <li><a href="#pitch">项目定位与口述版本</a></li><li><a href="#request">一次请求的完整旅程</a></li>
+    <li><a href="#transformer">Transformer 与推理基础</a></li><li><a href="#kv-formula">KV Cache 公式与手算</a></li>
+    <li><a href="#serving">LLM Serving 与指标</a></li><li><a href="#architecture">项目架构与事务迭代</a></li>
+    <li><a href="#scheduler">Scheduler 与容量规划</a></li><li><a href="#paged-kv">Block Table、Prefix、COW、Swap</a></li>
+    <li><a href="#cuda">CUDA 从硬件到 Remap 算子</a></li><li><a href="#learning">在线 Ridge 与保守门控</a></li>
+    <li><a href="#adaptive">Adaptive Prefill 与 Speculation</a></li><li><a href="#experiments">实验设计、数据与负结果</a></li>
+    <li><a href="#application">真实用户应用</a></li><li><a href="#code-map">源码地图与现场走读</a></li>
+    <li><a href="#qa">分方向问题库</a></li><li><a href="#whiteboard">白板推导与现场编码</a></li>
+    <li><a href="#claims">可以说与不能说</a></li><li><a href="#plan">14 天学习与模拟计划</a></li>
+    <li><a href="#sources">权威来源</a></li>
+  </ol>
+
+  <h2 id="pitch">1. 先把项目说清楚</h2>
+  <h3>1.1 一句话定位</h3>
+  <p>CacheFlow Runtime 是一个基于固定 llama.cpp 上游版本、进入真实 <code>llama-server → llama_decode → KV memory → CUDA</code> 热路径的单机 LLM Serving / AI Infra 项目，核心工作覆盖推理迭代事务、缓存感知调度、块级 KV 生命周期、事务 Swap、在线收益门控和 CUDA KV Remap。</p>
+  <h3>1.2 30 秒版本</h3>
+  <blockquote class="card">我基于固定版本 llama.cpp 改造了真实推理热路径，而不是在外层套一个 Agent。控制面把每轮推理拆成 prepare、plan、execute、commit/abort；KV 侧实现 Prefix Block 共享、引用计数、尾块 COW、容量规划和 Host/File/CUDA Swap；CUDA 侧实现进入真实 Qwen KV tensor 的 128-bit Gather/Scatter Remap。算子通过 CPU oracle、Compute Sanitizer、真实模型输出对照和配对微基准验证。小规模 Remap 提升约 49%–53%，但这不是端到端推理加速，而且当前没有实现 PagedAttention。</blockquote>
+  <h3>1.3 三分钟组织方式</h3>
+  <ol><li><strong>问题：</strong>多轮/并发请求重复 Prefill，KV 占用大，长 Prefill 会阻塞 Decode，抢占与共享又会产生复制和一致性问题。</li>
+    <li><strong>架构：</strong>Engine 统一拥有调度、容量、KV、Swap 和迭代状态；HTTP 层只做协议与组合。</li>
+    <li><strong>机制：</strong>Continuous Batching + Aging；Block Table + PrefixIndex + refcount；partial-tail COW；事务 Swap。</li>
+    <li><strong>底层：</strong>真实 KV tensor 的 descriptor-driven CUDA Remap，对齐路径使用 <code>uint4</code>，异常路径安全回退。</li>
+    <li><strong>证据：</strong>单元/性质测试、Sanitizer、真实 Qwen、真实应用、配对实验。</li>
+    <li><strong>边界：</strong>单机单 GPU、0.5B 模型；Remap 微基准不等于端到端；Full 统计门禁存在波动；未实现 PagedAttention。</li></ol>
+  <h3>1.4 面试官在评估什么</h3>
+  <table><tr><th>维度</th><th>合格表现</th><th>危险信号</th></tr>
+    <tr><td>个人贡献</td><td>说出固定上游、具体差异、接口和测试</td><td>把 vendor 全仓算作自己代码</td></tr>
+    <tr><td>技术理解</td><td>从 workload 推到数据结构与不变量</td><td>只会念“分页、异步、向量化”</td></tr>
+    <tr><td>工程能力</td><td>解释失败路径、所有权、回滚、监控</td><td>只讲 happy path</td></tr>
+    <tr><td>实验能力</td><td>说明配对、顺序、混杂因素和负结果</td><td>拿单次最快值当结论</td></tr>
+    <tr><td>诚信边界</td><td>主动说明未实现内容</td><td>把 Remap 说成 PagedAttention</td></tr></table>
+
+  <h2 id="request">2. 从一次聊天请求开始</h2>
+  <p><strong>模型</strong>是根据输入数字计算下一个 token 概率的参数化函数；<strong>推理</strong>是用训练好的参数做前向计算；<strong>训练</strong>才会计算梯度并更新参数。项目处理的是推理和服务，不训练模型。</p>
+  <ol><li>浏览器发送 HTTP 请求，包含消息、最大生成长度等参数。</li><li>应用检索本地资料，构造完整 prompt。</li>
+    <li>Tokenizer 把文本切成整数 token。token 是词表中的子词单元，不严格等于汉字或单词。</li>
+    <li>请求进入 llama-server 队列，Scheduler 将它绑定到可执行 slot。</li>
+    <li>Prefill 处理已有 prompt，产生每层 K/V 并写入 KV Cache。</li>
+    <li>Decode 每轮通常为每条活跃序列产生一个新 token，新 token 又成为下一轮输入。</li>
+    <li>Sampler 根据 logits 选择 token；logits 是 softmax 前的未归一化分数。</li>
+    <li>服务器用 SSE 分块发送文本；SSE 是服务器到浏览器的事件流。</li>
+    <li>生成完整结束后才把 assistant 消息写入 SQLite，避免断流留下半条回答。</li></ol>
+  <div class="diagram">HTTP/SSE → 应用检索 → Tokenizer → Request Queue → Slot
+                ↓
+      Prefill（处理整段 prompt）
+                ↓  写入 K/V
+      Decode（每轮生成一个 token）↺
+                ↓
+         Sampling → 文本流 → SQLite</div>
+  <div class="task"><strong>闭卷输出：</strong>不用任何英文缩写，向非计算机同学解释一次提问为什么要经过“切数字、先读题、逐字续写、保存中间记忆”四步。</div>
+
+  <h2 id="transformer">3. Transformer 与自回归推理</h2>
+  <h3>3.1 向量、矩阵、Embedding</h3>
+  <p>向量是一列数，表示对象在多个特征方向上的坐标；矩阵是批量做线性变换的规则。点积 <code>q·k</code> 把两个向量压成一个数，可理解为方向匹配程度。Token ID 本身没有大小语义，Embedding 表按 ID 查出长度为 <code>d_model</code> 的向量。</p>
+  <h3>3.2 Self-Attention</h3>
+  <div class="formula">Q = XW<sub>Q</sub>, K = XW<sub>K</sub>, V = XW<sub>V</sub><br>Attention(Q,K,V) = softmax(QK<sup>T</sup>/√d<sub>h</sub> + Mask)V</div>
+  <p class="source">原始依据：<a href="https://papers.neurips.cc/paper/7181-attention-is-all-you-need.pdf">Attention Is All You Need</a>。</p>
+  <ul><li><strong>Q：</strong>当前位置想从历史中找什么。</li><li><strong>K：</strong>历史位置提供的匹配索引。</li>
+    <li><strong>V：</strong>匹配后真正聚合的信息。</li><li><strong>√d 缩放：</strong>避免维度增大使点积方差过大、softmax 饱和。</li>
+    <li><strong>Causal Mask：</strong>禁止看未来 token，保证自回归生成合法。</li></ul>
+  <h3>3.3 KV Cache</h3>
+  <p>Decode 第 t 步的旧 token K/V 与前一步相同。KV Cache 保存每层历史 K/V，新一轮只计算新 token 的 Q/K/V，并让新 Q 读取历史 K/V，避免重复投影。代价是显存随层数、上下文和并发线性增长。</p>
+  <h3>3.4 MHA、MQA、GQA</h3>
+  <table><tr><th>结构</th><th>Q head</th><th>KV head</th><th>特点</th></tr>
+    <tr><td>MHA</td><td>H</td><td>H</td><td>每个 Q head 独立 K/V，容量最大</td></tr>
+    <tr><td>MQA</td><td>H</td><td>1</td><td>全部 Q head 共用 K/V，最省显存</td></tr>
+    <tr><td>GQA</td><td>H</td><td>H<sub>kv</sub></td><td>若干 Q head 共用一组 K/V，折中质量与带宽</td></tr></table>
+  <p>真实 Qwen2.5-0.5B 日志是 14 个 Q head、2 个 KV head、24 层、head_dim 64，属于 GQA。CUDA 微基准的 32 层、8 KV head、head_dim 128 是合成传输布局，不能冒充模型结构。</p>
+  <h3>3.5 RoPE、RMSNorm、SwiGLU</h3>
+  <ul><li><strong>RoPE：</strong>按位置旋转 Q/K 的二维分量，使点积携带相对位置；通常 V 不旋转。</li>
+    <li><strong>RMSNorm：</strong>按均方根缩放向量，不减均值，稳定层间数值尺度。</li>
+    <li><strong>SwiGLU：</strong>常写为 <code>down(silu(gate(x)) ⊙ up(x))</code> 的门控前馈结构。</li></ul>
+  <h3>3.6 Prefill 与 Decode</h3>
+  <table><tr><th></th><th>Prefill</th><th>Decode</th></tr><tr><td>输入</td><td>多个 prompt token</td><td>每序列通常一个新 token</td></tr>
+    <tr><td>并行性</td><td>大矩阵，GPU 利用率较高</td><td>窄矩阵，常受带宽/launch 影响</td></tr>
+    <tr><td>指标</td><td>主要影响 TTFT</td><td>主要影响 TPOT</td></tr><tr><td>调度风险</td><td>长 Prefill 阻塞 Decode</td><td>Decode 过多挤压新请求</td></tr></table>
+  <h3>3.7 量化、GGUF、GGML</h3>
+  <p><strong>量化</strong>用更少 bit 表示权重，降低模型文件、内存和带宽，但引入近似误差。Q4_K_M 是一类 K-quant 权重量化；本项目相关 KV 路径按 FP16 讨论。<strong>GGUF</strong>是模型张量与元数据文件格式；<strong>GGML</strong>是 llama.cpp 的张量计算和后端基础设施。</p>
+
+  <h2 id="kv-formula">4. KV Cache 公式与手算</h2>
+  <div class="formula">KV bytes = 2 × L × T × H<sub>kv</sub> × D<sub>head</sub> × element_bytes × N<sub>seq</sub></div>
+  <p>第一个 2 是 K/V 两份；L 是层数；T 是每序列 token；H<sub>kv</sub> 是 KV head；D<sub>head</sub> 是 head 维度；FP16 每元素 2 byte。</p>
+  <div class="card"><strong>真实模型示例：</strong>2×24×2×64×2 = 12,288 byte/token = 12 KiB/token。单序列 4096 token 约 48 MiB，32768 token 约 384 MiB。还没算权重、计算 buffer 和碎片。</div>
+  <div class="task"><strong>闭卷手算：</strong>32 层、8 KV head、head_dim 128、FP16、上下文 8192、并发 4，需要 4 GiB KV。</div>
+
+  <h2 id="serving">5. LLM Serving：从单请求到多用户</h2>
+  <h3>5.1 四个容易混淆的对象</h3>
+  <dl><dt>Request</dt><dd>一次 HTTP 任务，包含 prompt、采样参数、deadline 等。</dd>
+    <dt>Sequence</dt><dd>一条正在生成的 token 序列；一个请求在某些算法中可能产生多条候选 sequence。</dd>
+    <dt>Slot</dt><dd>服务器中承载 sequence 状态的执行位置，拥有 prompt/KV/计时等状态。</dd>
+    <dt>Iteration</dt><dd>服务循环的一轮。Continuous Batching 在 iteration 边界增删 sequence，而不是等整批请求全部完成。</dd></dl>
+
+  <h3>5.2 Static Batching 为什么不适合生成</h3>
+  <p>不同请求的 prompt 长度和生成长度不同。若固定一批请求直到全部结束，短请求会等待长请求，GPU 还会为结束序列留下空洞。Iteration-level / Continuous Batching 允许每轮把已完成序列移出、新请求加入，并为活跃序列各推进少量 token。</p>
+  <p class="source">系统参照：<a href="https://www.usenix.org/system/files/osdi22-yu.pdf">Orca, OSDI 2022</a>。</p>
+
+  <h3>5.3 四个核心指标</h3>
+  <table><tr><th>指标</th><th>定义</th><th>用户感受</th><th>可能的作弊方式</th></tr>
+    <tr><td>TTFT</td><td>请求到第一个输出 token 的时间</td><td>“多久开始回答”</td><td>优先新请求但饿死旧请求</td></tr>
+    <tr><td>TPOT</td><td>首 token 后相邻输出 token 的平均/分位间隔</td><td>“打字是否流畅”</td><td>牺牲 TTFT 只服务 decode</td></tr>
+    <tr><td>Latency</td><td>请求到完整结束</td><td>“多久答完”</td><td>只测很短输出</td></tr>
+    <tr><td>Throughput</td><td>单位时间处理 token/请求数</td><td>系统总能力/成本</td><td>无限增大 batch，牺牲尾延迟</td></tr></table>
+  <p>P95 是 95% 样本不超过的值，反映尾部体验；它不是“最慢 5% 的平均值”。吞吐和延迟往往冲突，因此不能只报一个指标。</p>
+
+  <h3>5.4 Chunked Prefill</h3>
+  <p>把长 prompt 的 Prefill 切成多个 chunk，与已有 Decode 交错。chunk 太大：单轮占用久，TPOT 变差；太小：iteration、kernel launch 和调度开销增加，吞吐下降。最优值取决于 CPU/CUDA、上下文、并发、模型和硬件。</p>
+
+  <h3>5.5 背压、取消与 Deadline</h3>
+  <ul><li><strong>背压：</strong>队列或生成槽达到上限时拒绝/延后新请求，防止内存无限增长和尾延迟雪崩。</li>
+    <li><strong>取消：</strong>客户端断流后要向上游 llama-server 传播取消，释放 slot/KV；只关闭浏览器连接不够。</li>
+    <li><strong>Deadline：</strong>超过时限的任务不应继续消耗稀缺 GPU；但清理必须保持状态一致。</li></ul>
+
+  <h2 id="architecture">6. 项目架构：所有权与迭代事务</h2>
+  <div class="diagram">OpenAI HTTP/SSE
+      │
+server_context：协议、组合、llama_decode callback
+      │
+server_inference_engine：控制面唯一所有者
+      ├─ Scheduler / Capacity Planner / Benefit Policy
+      ├─ KV Runtime / Block Manager / Swap Store
+      ├─ Adaptive Prefill / Speculation
+      └─ Iteration Transaction / Sequence State
+      │
+llama memory capability
+      ├─ unsupported → upstream fallback
+      └─ Attention KV → CUDA copy/COW/swap/remap</div>
+
+  <h3>6.1 为什么强调“唯一所有者”</h3>
+  <p>如果 HTTP、Scheduler、KV Manager 和 CUDA backend 都能直接修改 slot/KV 状态，就很难知道谁负责回滚、谁能释放资源。Engine 统一拥有控制状态，模块通过窄接口提供计划或机制，减少跨层隐式耦合。</p>
+
+  <h3>6.2 prepare → plan → execute → commit/abort</h3>
+  <ol><li><strong>prepare：</strong>收集当前队列、slot、KV 容量和完成状态，建立本轮视图。</li>
+    <li><strong>plan：</strong>产生不可变的物理 batch/调度计划，不直接发布副作用。</li>
+    <li><strong>execute：</strong>调用真实 runtime/llama_decode，记录实际执行 token 数。</li>
+    <li><strong>commit：</strong>只有计划全部成功执行后才发布状态、推进位置和产生可见输出。</li>
+    <li><strong>abort：</strong>异常或部分执行时停止提交，保留失败原因并进行资源清理/重算。</li></ol>
+  <p>它不是完整数据库 ACID：网络已经发出的字节无法回滚，也没有多节点隔离。但它保证单 iteration 内计划与运行时状态的原子可见性，并拒绝“只执行一半却提交整批”。</p>
+  <div class="callout"><strong>关键代码不变量：</strong><code>server_inference_iteration::begin_commit()</code> 要求 <code>executed_tokens == physical_batch_tokens</code>；否则不能进入 committed。</div>
+
+  <h3>6.3 为什么 Scheduler 只返回 plan</h3>
+  <p>策略负责“应该做什么”，Runtime 负责“怎么做”。纯计划更容易单元测试、重放和比较；若 Scheduler 内直接搬 KV 或调用 CUDA，就无法在不启动模型的情况下验证公平性，也会把失败处理散到每个策略分支。</p>
+
+  <h3>6.4 Capability fallback</h3>
+  <p>不同 llama memory 类型并不都支持块级 Attention KV。调用方先询问 capability；不支持时保持上游行为。Fallback 是兼容性设计，不等于“所有模型都支持物理 paged KV”。</p>
+
+  <h2 id="scheduler">7. Scheduler、Aging 与容量规划</h2>
+  <h3>7.1 Decode 为什么通常优先</h3>
+  <p>已经开始生成的请求每错过一轮，TPOT 都直接增加；而 Prefill 延迟主要进入 TTFT。Decode-first 能保护交互流畅度，但绝对优先会让新/长 Prefill 饥饿，所以必须加入 Aging、token budget 和 deadline。</p>
+
+  <h3>7.2 Aging 防饥饿</h3>
+  <p>Aging 随等待时间增加任务优先级。直觉上：</p>
+  <div class="formula">effective_priority = base_priority + α × waiting_time</div>
+  <p>α 太小无法防饿死，太大则刚等待一会儿的低价值任务抢占 Decode。项目强调不变量：长期等待的可运行任务最终应获得机会，而不是追求某个公式的理论最优。</p>
+
+  <h3>7.3 缓存感知效用</h3>
+  <div class="formula">utility ≈ reused_tokens − λ·victim_recompute_tokens + aging_bonus − deadline_risk</div>
+  <p>只最大化 prefix hit 可能为了复用 100 token 淘汰一个未来要重算 2000 token 的 slot。容量规划必须把回收收益、重算代价、deadline 和等待纳入。</p>
+
+  <h3>7.4 为什么不用全局最优</h3>
+  <p>未来到达时间、生成长度、回访概率不可知；精确组合优化在每 token iteration 中也过于昂贵。当前使用可解释启发式，并通过 upstream/fixed 模式、指标和实验控制风险。面试时不要声称求得全局最优。</p>
+
+  <h3>7.5 Admission、Reservation 与 Victim</h3>
+  <ul><li><strong>Admission：</strong>决定请求是否能进入当前容量。</li><li><strong>Reservation：</strong>在执行前预留计划所需块，防止半途 OOM。</li>
+    <li><strong>Victim：</strong>容量不足时选择可抢占对象；价值不仅是占用大小，还包括重算成本和活跃状态。</li></ul>
+  <p>容量守恒可写为：<code>free + allocated + reserved = capacity</code>。任何失败路径都不能让同一块既 free 又被引用，或 reservation 永久泄漏。</p>
+
+  <h2 id="paged-kv">8. Block Table、Prefix Sharing、COW 与 Swap</h2>
+  <h3>8.1 “Paged KV”在本项目里是什么意思</h3>
+  <p>把连续 token 空间切成固定大小的逻辑 block，每条 sequence 的 Block Table 将逻辑块号映射到物理块 ID。类似操作系统页表，但只是类比：这里没有 CPU MMU 自动地址翻译，映射由软件显式维护。</p>
+  <p class="source">学术参照：<a href="https://doi.org/10.1145/3600006.3613165">PagedAttention / vLLM, SOSP 2023</a>。本项目仅借鉴块映射思想，未实现其 Attention kernel。</p>
+  <div class="diagram">Sequence A logical: [0][1][2]
+                         │  │  └── physical 9 (private tail)
+                         │  └───── physical 5 (shared)
+                         └──────── physical 2 (shared)
+Sequence B logical: [0][1][2]
+                         │  │  └── physical 11 (private tail)
+                         │  └───── physical 5
+                         └──────── physical 2</div>
+
+  <h3>8.2 PrefixIndex 为什么不是普通字符串缓存</h3>
+  <p>PrefixIndex 按 token block 的链式 hash 查找 exact prefix，并校验父块链和 token 内容。只用单块 hash 会把“同一 token 块但前文不同”的路径混在一起；只信 hash 又有碰撞风险。索引必须只发布已经写完、可共享的 canonical block。</p>
+
+  <h3>8.3 Refcount 不变量</h3>
+  <ul><li>每条 Block Table 引用贡献一次 refcount。</li><li>PrefixIndex 若拥有独立生命周期，也必须明确是否贡献引用。</li>
+    <li>refcount 归零且无 reservation/异步 lease 时才可回收。</li><li>释放 sequence 时逐块递减，不能重复释放。</li></ul>
+
+  <h3>8.4 为什么 partial-tail 必须 COW</h3>
+  <p>只共享完整 block 会浪费公共 prompt 尾部的 1…B−1 token。共享部分尾块能提高命中，但第一次 append 若原地写入会污染其他 sequence。因此写前检查共享状态：</p>
+  <ol><li>发现 tail 的 refcount &gt; 1；</li><li>预留/分配新物理块；</li><li>复制旧 tail 的有效 token；</li><li>复制成功后切换写者 Block Table；</li><li>再递减旧块引用；</li><li>任一步失败都保留旧映射。</li></ol>
+  <p>复制复杂度由 whole-sequence 的 O(L) 降为 O(B)。这不是“零复制”：COW 在首次写时仍复制一个 tail block。</p>
+
+  <h3>8.5 COW 与数据库事务的共同点</h3>
+  <p>两者都遵守“先准备新状态，成功后原子发布，再回收旧状态”。区别是数据库事务还涉及并发隔离和持久性，而这里主要保证内存映射和异步复制的一致性。</p>
+
+  <h3>8.6 Preemption 与 Swap</h3>
+  <p>Preemption 把 GPU KV 让给更有价值的请求。可选择 recompute（释放后以后重算）或 swap（保存到 Host/File，稍后恢复）。Swap 适合重算成本高且 Host/磁盘传输可接受的序列；否则保存/恢复开销可能比重算更差。</p>
+  <table><tr><th>阶段</th><th>成功语义</th><th>失败语义</th></tr>
+    <tr><td>save</td><td>完整 payload+checksum 可见后才释放 resident KV</td><td>保留 resident，不丢请求</td></tr>
+    <tr><td>file commit</td><td>temporary → flush/fsync → atomic replace</td><td>旧文件仍有效，临时文件不可见</td></tr>
+    <tr><td>restore</td><td>校验后完整安装状态和映射</td><td>丢弃无效快照，完整 recompute</td></tr>
+    <tr><td>CUDA copy</td><td>Event 完成后才发布/复用 buffer</td><td>不上报成功，不释放仍在用的资源</td></tr></table>
+  <p>Swap payload 不能只有 K/V bytes，还需与 llama sequence 的逻辑状态兼容，否则恢复后位置、旋转或模型内部状态可能不一致。</p>
+
+  <h2 id="cuda">9. CUDA：从零到真实 KV Remap</h2>
+  <h3>9.1 CPU、GPU、SM、Warp、Thread</h3>
+  <p>CPU 擅长低延迟控制流，GPU 擅长大量相似工作。CUDA kernel 是在 GPU 上执行的函数；grid 由多个 block 构成，block 由多个 thread 构成。NVIDIA GPU 通常以 32 个 thread 的 warp 为调度单位。warp 内严重分支会让不同路径串行执行，称为 divergence。</p>
+  <p class="source">官方依据：<a href="https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html">CUDA C Programming Guide</a>。</p>
+
+  <h3>9.2 内存层次与合并访存</h3>
+  <ul><li><strong>Global memory：</strong>容量大、延迟高，KV tensor 位于此处。</li><li><strong>Shared memory：</strong>block 内共享、片上、容量小。</li>
+    <li><strong>Register：</strong>每 thread 私有、最快但过多会降低 occupancy。</li><li><strong>Pinned host memory：</strong>不可分页的 Host 内存，便于 DMA/异步传输，但应受预算限制。</li></ul>
+  <p>Coalescing 指相邻线程访问相邻地址，使硬件合并内存事务。128-bit 向量访问能减少指令和线程工作单元，但前提是地址和布局适合；它不自动提升带宽上限。</p>
+
+  <h3>9.3 Remap descriptor</h3>
+  <pre><code>struct llama_kv_remap_copy {
+    const uint16_t * source;
+    uint16_t * destination;
+    size_t staging_offset;
+    size_t elements;
+};</code></pre>
+  <p>每个 descriptor 描述一段 FP16 元素的源、目的、staging 偏移和长度。公开 seam 同时支持 scalar 与 vectorized 模式，方便正确性对照和微基准。</p>
+
+  <h3>9.4 为什么要 Gather → staging → Scatter</h3>
+  <p>若映射重叠或循环，例如 A→B、B→A，直接依次复制会让第一次写覆盖第二次尚未读取的源。Gather 先把所有源读入独立 staging，形成同一时刻的 snapshot；Scatter 再统一写回，从而保证顺序无关。</p>
+  <div class="diagram">错误：A → B（B 被覆盖）→ A（读到新 B）
+正确：A,B → staging[A,B] → B,A</div>
+  <p>完全不重叠映射不需要 snapshot，多个 <code>cudaMemcpyAsync</code> 可能比两次 kernel 加 staging 更快，所以正确的生产策略应分流，而不是“所有复制都 kernel 化”。</p>
+
+  <h3>9.5 为什么 <code>uint4</code> 是 128 bit</h3>
+  <p>CUDA 的 <code>uint4</code> 包含 4 个 32-bit unsigned integer，总计 16 byte = 128 bit。KV 元素是 FP16（2 byte），因此一次向量工作单元覆盖 8 个 FP16。代码不是把 FP16 做整数计算，而是用等宽类型搬运原始 bit。</p>
+
+  <h3>9.6 对齐与尾部</h3>
+  <p>source、destination、staging 都满足 16-byte 对齐且剩余至少 8 个 FP16 时才可安全走完整向量路径。地址不对齐或最后不足 8 个元素时逐元素回退。守卫区测试验证 kernel 没写到合法范围之外。</p>
+
+  <h3>9.7 Launch geometry 与溢出</h3>
+  <div class="formula">work = ceil(max_elements / elements_per_work)<br>grid_x = ceil(work / 256)</div>
+  <p>实现用商加余数的方式 ceil-div，避免 <code>max_elements + 7</code> 在 <code>size_t::max</code> 附近溢出；Host 在 launch 前检查 <code>grid.x ≤ 2³¹−1</code>、<code>grid.y ≤ 65535</code>。这属于输入验证，不应等 CUDA runtime 模糊报错。</p>
+
+  <h3>9.8 Stream、Event 与异步错误</h3>
+  <p>把 kernel 放入 stream 只表示入队，不表示 GPU 已完成。Event 记录在 stream 中，<code>cudaEventSynchronize</code> 建立 Host 等待点；在它成功前，descriptor、staging、source/destination lease 都不能释放。Kernel launch 错误可由 <code>cudaGetLastError</code> 发现，执行期错误常要到同步点才暴露。</p>
+  <div class="callout good"><strong>审查后修复：</strong>Remap byte、kernel launch、COW 和 copied block 指标只在 Event 同步成功后累加，避免失败操作污染 Prometheus 证据。</div>
+
+  <h3>9.9 Compute Sanitizer 能证明什么</h3>
+  <ul><li><strong>memcheck：</strong>检测非法/越界访问和部分 API 错误。</li><li><strong>racecheck：</strong>检查 shared-memory 数据竞争等 hazard。</li>
+    <li><strong>不能证明：</strong>所有输入都正确、没有逻辑 bug、性能好、没有未覆盖的竞态、不同 GPU 都安全。</li></ul>
+  <p>本项目新 Remap 的 memcheck 0 error、racecheck 0 hazard；还需 CPU oracle、边界/尾部测试和真实 Qwen 输出对照共同建立信心。</p>
+
+  <h2 id="learning">10. 在线 Ridge、置信度与保守收益门控</h2>
+  <h3>10.1 为什么需要在线门控</h3>
+  <p>同一种 CacheFlow 策略在 CPU 和 CUDA、短/长上下文、低/高并发下可能方向相反。固定阈值无法覆盖硬件与负载变化，因此控制器为 upstream 与 CacheFlow 分别学习成本，并只在证据足够时启用。</p>
+
+  <h3>10.2 Ridge Regression</h3>
+  <p>设特征向量 x 包含 backend、上下文 bucket、并发、prefix reuse、KV 压力等，目标 y 是观测成本。Ridge 目标：</p>
+  <div class="formula">min<sub>θ</sub> Σ(y<sub>i</sub>−x<sub>i</sub><sup>T</sup>θ)² + λ||θ||²<br>
+  A = λI + Σx<sub>i</sub>x<sub>i</sub><sup>T</sup>, b = Σx<sub>i</sub>y<sub>i</sub>, θ = A<sup>−1</sup>b</div>
+  <p>λ 是 L2 正则：过小会让少量/共线样本导致系数不稳定，过大会把系数压向零、产生欠拟合。在线更新只需累加 A 和 b，不必保存所有历史样本。</p>
+  <p class="source">置信探索参照：<a href="https://arxiv.org/abs/1003.0146">LinUCB, WWW 2010</a>。项目是服务成本门控，不是新闻推荐算法复现。</p>
+
+  <h3>10.3 不确定性半径</h3>
+  <div class="formula">prediction = x<sup>T</sup>θ<br>radius ∝ β·σ·√(x<sup>T</sup>A<sup>−1</sup>x)</div>
+  <p><code>xᵀA⁻¹x</code> 是当前方向的数据稀缺程度：训练样本充分覆盖该方向时 A 的信息量大，逆矩阵方向值小；陌生 workload 则半径大。β 越大越保守。</p>
+
+  <h3>10.4 Positive lower bound</h3>
+  <p>定义预测收益为 upstream cost − CacheFlow cost。只有：</p>
+  <div class="formula">predicted_benefit − uncertainty − safety_margin &gt; 0</div>
+  <p>才因为 <code>positive_lower_bound</code> 启用 CacheFlow。预测均值为正但下界不正，仍应走 upstream。这是“宁可错过收益，也减少错误启用”的保守策略。</p>
+
+  <h3>10.5 冷启动、有限探索、漂移与 cooldown</h3>
+  <ul><li><strong>Cold start：</strong>样本不足时 fail closed，默认 upstream。</li><li><strong>Safe exploration：</strong>风险可接受且满足间隔时有限尝试 CacheFlow，用于收集反事实动作数据。</li>
+    <li><strong>Drift：</strong>实际残差持续远超历史尺度，说明分布变化。</li><li><strong>Cooldown：</strong>漂移/SLO 风险后暂时退回 upstream，防止反复抖动。</li></ul>
+  <p>探索是为了学习，不等于模型已有正收益证据；指标必须分开记录 <code>safe_exploration</code> 与 <code>positive_lower_bound</code>。</p>
+
+  <h3>10.6 为什么按 backend 分模型</h3>
+  <p>CPU 的计算/内存比例、CUDA 的 kernel launch/batching/WDDM 抖动不同。把两者混在一个线性模型里，会用 CPU 的收益证据错误启用 CUDA。项目维护 backend-local state，并把 compatibility key 绑定模型与 serving shape。</p>
+
+  <h3>10.7 Checkpoint 为什么属于算法正确性</h3>
+  <p>若在线模型重启即丢失，它会重复探索，发布/故障恢复会改变决策行为。Checkpoint 保存 A、b、残差、cooldown 和探索进度；恢复前校验 schema、feature count、兼容 key、CRC、矩阵维数/对称性和有限数值，全部通过后一次性替换状态。损坏文件 fail closed 到空模型。</p>
+
+  <h2 id="adaptive">11. Adaptive Prefill 与 Speculation</h2>
+  <h3>11.1 Adaptive Prefill</h3>
+  <p>动作是 chunk size。控制器按 backend/context/concurrency bucket 记录候选成本，在 greedy、固定候选与在线估计之间选择。它的价值不一定是击败所有固定点，更现实的是识别并规避明显坏点。</p>
+  <table><tr><th>Chunk</th><th>优势</th><th>风险</th></tr><tr><td>小</td><td>更快让出 GPU 给 Decode</td><td>更多调度、launch、iteration 开销</td></tr>
+    <tr><td>大</td><td>大矩阵利用率/吞吐较好</td><td>Head-of-line blocking，TPOT/TTFT 尾部恶化</td></tr></table>
+
+  <h3>11.2 Speculative Decoding 基础</h3>
+  <p>标准推测解码用便宜 draft model 提议多个 token，再由 target model 一次验证；通过接受/拒绝规则保持目标分布。加速来自减少昂贵 target model 的串行步数，而不是“跳过正确性验证”。</p>
+  <p class="source">原始算法：<a href="https://proceedings.mlr.press/v202/leviathan23a.html">Fast Inference from Transformers via Speculative Decoding, ICML 2023</a>。</p>
+
+  <h3>11.3 本项目的边界</h3>
+  <p>项目采用 N-gram 候选和 adaptive draft length，控制器依据接受率 EWMA、最小证据、迟滞和 KV 压力调整深度。它不是论文中的完整 draft-model speculative decoding，不能写成“复现全部推测解码算法”。</p>
+  <p>深度过大时无效 draft 计算和 KV 临时状态增加；过小时即使接受率高也难摊薄验证开销。EWMA：</p>
+  <div class="formula">m<sub>t</sub> = α·observation<sub>t</sub> + (1−α)·m<sub>t−1</sub></div>
+  <p>α 大响应快但噪声大，α 小稳定但跟不上分布变化；迟滞用不同升/降阈值减少来回切换。</p>
+
+  <h2 id="experiments">12. 实验设计、证据等级与负结果</h2>
+  <h3>12.1 证据金字塔</h3>
+  <ol><li>代码存在：只能证明写过。</li><li>单元测试：证明选定输入上的算法/不变量。</li>
+    <li>Sanitizer：提高内存/竞态信心。</li><li>真实模型 smoke：证明进入真实路径并保持输出/协议。</li>
+    <li>微基准：隔离回答某个机制的成本。</li><li>端到端配对实验：回答用户指标，但受混杂影响更大。</li>
+    <li>跨模型/硬件/长期线上：才接近外部有效性；本项目尚未达到。</li></ol>
+
+  <h3>12.2 Paired trial 与 Latin rotation</h3>
+  <p>配对实验在相同 trial 环境比较 A/B，先算每对差异，再对差异做统计，能抵消温度、后台负载等共同漂移。交替/Latin rotation 改变执行顺序，减少永远“先跑 A、后跑 B”的热机偏差。</p>
+  <div class="formula">paired improvement<sub>i</sub> = (scalar<sub>i</sub> − vector<sub>i</sub>) / scalar<sub>i</sub></div>
+  <p><code>median(A)/median(B)</code> 不是 median paired ratio；前者可能来自不同 trial。中位数抗离群，但不能替代置信区间或足够样本。</p>
+
+  <h3>12.3 CUDA Remap 实验</h3>
+  <table><tr><th>Blocks</th><th>Scalar GPU median</th><th>Vector GPU median</th><th>配对中位改善</th></tr>
+    <tr><td>1</td><td>0.029696 ms</td><td>0.013312 ms</td><td>53.33%</td></tr>
+    <tr><td>4</td><td>0.117712 ms</td><td>0.059776 ms</td><td>48.89%</td></tr>
+    <tr><td>16</td><td>0.812544 ms</td><td>0.787920 ms</td><td>3.13%</td></tr>
+    <tr><td>32</td><td>1.600864 ms</td><td>1.571344 ms</td><td>1.87%</td></tr></table>
+  <p><strong>解释：</strong>小规模时减少 thread/指令/launch 内固定开销的比例大；规模增大后 global memory bandwidth 主导，向量化不能突破带宽上限，收益收敛。不能说“块越多一定越慢”——总工作量也在增加。</p>
+  <p><strong>能证明：</strong>当前 RTX 4050、合成 FP16 layout、该 Remap seam 上，向量路径相对标量更快且无规模回归。<strong>不能证明：</strong>端到端 TTFT/TPS 同比例提升、A100/H100 相同、Attention 本身更快。</p>
+
+  <h3>12.4 真实路径证据</h3>
+  <ul><li>真实 Qwen 请求共享 21 个 Prefix KV Block（324 token），触发 partial-tail COW。</li>
+    <li>真实 tensor smoke 记录 3,981,310 个向量化 Remap byte，并与 cold deterministic decode 输出一致。</li>
+    <li>用户应用旅程累计 5,603,330 个向量化 byte、456 cached prompt token、19 prefill chunk、6 次 CUDA KV kernel。</li>
+    <li>指标在 CUDA Event 成功同步之后提交，减少“入队即算成功”的假证据。</li></ul>
+
+  <h3>12.5 为什么 Full 没稳定全绿</h3>
+  <p>2026-08-01 的基线版本曾完整通过 Full；新增 Remap 后两次重跑分别在既有统计门禁失败：</p>
+  <ul><li>一次长驻末态预测收益 7.86 ms，小于不确定性 9.00 ms；同场景单独复现为 17.82 ms &gt; 8.49 ms。</li>
+    <li>另一次 CPU learned oracle regret 26.1% 超过 20%，CUDA paired regression 3.7% 超过 3%。</li></ul>
+  <p>失败点不同且专项功能稳定，说明统计实验受 WDDM、调度、温度和执行时序影响；但不能因此宣布 Full 通过。正确表述是“增量专项门禁通过，全量统计门禁仍需更稳健的样本量、收敛窗口和置信区间设计”。不要无限重跑直到抽到绿灯，也不要悄悄放宽阈值。</p>
+
+  <h3>12.6 因果链怎么讲</h3>
+  <div class="diagram">策略干预（upstream vs CacheFlow）
+  → 决策计数改变
+  → Scheduler mediator（chunk/token/batch）改变
+  → CUDA mediator（kernel/bytes/event）改变
+  → Engine phase 时间改变
+  → TTFT/TPOT/吞吐结果改变</div>
+  <p>每一箭头都要有观测，否则只是相关性故事。此前 paired profiling 中强制 CacheFlow 确实改变 scheduler 和 CUDA mediator，但 TTFT P95 反而恶化；这是说明控制策略与 GPU batching 交互的负结果，不是项目失败，也不能被省略。</p>
+
+  <h3>12.7 常见混杂因素</h3>
+  <ul><li>GPU dynamic clock、温度、功耗限制和 WDDM；</li><li>模型/文件系统缓存、首次初始化；</li><li>执行顺序、进程复用、后台程序；</li>
+    <li>不同输出长度、EOS、batch composition；</li><li>近似相等 logits 因浮点归约顺序改变而产生 token 差异；</li><li>只看均值掩盖尾延迟。</li></ul>
+
+  <h2 id="application">13. 真实用户应用为什么重要</h2>
+  <p><code>interview_assistant</code> 是实际消费者，不是 llama.cpp 热路径的一部分。它负责本地资料切分与 IDF 检索、SSE 浏览器适配和 SQLite 会话；llama-server 独占模型、Scheduler、KV 和 CUDA。二者通过 loopback OpenAI-compatible API 连接。</p>
+  <h3>13.1 安全与一致性</h3>
+  <ul><li>模型地址必须是显式端口的 loopback IP，客户端拒绝重定向，避免 API key 外发。</li>
+    <li>无资料命中 fail closed，不伪造回答。</li><li>浏览器断流关闭 application generator，再关闭上游模型流。</li>
+    <li>只有模型流完整结束才持久化 assistant；消息与 session 时间戳在同一 SQLite 事务。</li>
+    <li>并发槽满返回 429，展示真实背压而不是无界堆积。</li></ul>
+  <h3>13.2 它证明和不证明什么</h3>
+  <p>证明了独立应用进程能通过真实协议触发 Prefix、COW、CUDA、取消、重启恢复和观测指标；不证明已有外部用户、公网多租户安全、高可用或生产采用率。</p>
+
+  <h2 id="code-map">14. 源码地图：面试现场怎么定位</h2>
+  <table><tr><th>问题</th><th>文件 / 入口</th><th>你要指出的不变量</th></tr>
+    <tr><td>一轮推理</td><td><code>server-inference-engine.h::step/execute/commit_with</code></td><td>计划完整执行后才 commit</td></tr>
+    <tr><td>迭代状态机</td><td><code>server-inference-iteration.cpp</code></td><td>planned→executing→committing；部分 batch 拒绝</td></tr>
+    <tr><td>Block/refcount</td><td><code>server-kv-block-manager.cpp</code></td><td>容量守恒、父链 canonical、COW 切换顺序</td></tr>
+    <tr><td>Prefix/Residency</td><td><code>server-kv-runtime.cpp</code></td><td>候选副本成功后整体提交</td></tr>
+    <tr><td>Capacity/Victim</td><td><code>server-kv-capacity-planner.*</code></td><td>不足时显式 fail，而非执行中 OOM</td></tr>
+    <tr><td>Host/File Swap</td><td><code>server-kv-swap-store.*</code></td><td>checksum、budget、temp+replace、失败保留旧状态</td></tr>
+    <tr><td>抽象 CUDA block backend</td><td><code>server-kv-block-cuda.cu</code></td><td>pinned/stream/event lease 和 guard</td></tr>
+    <tr><td>真实 llama KV tensor</td><td><code>src/llama-kv-cache-paged.cu::copy_streams_paged_cuda</code></td><td>真实 K/V plane、同步后提交指标</td></tr>
+    <tr><td>向量 Remap</td><td><code>src/llama-kv-remap-cuda.cuh</code></td><td>snapshot、对齐、尾部、grid 上限</td></tr>
+    <tr><td>在线门控</td><td><code>server-benefit-policy.cpp::choose/observe</code></td><td>lower bound、有限探索、backend isolation</td></tr>
+    <tr><td>HTTP/组合/指标</td><td><code>server-context.cpp</code></td><td>不重新拥有 Engine 内部状态</td></tr>
+    <tr><td>算子测试</td><td><code>tests/test-kv-remap-cuda.cu</code></td><td>CPU oracle、scalar/vector、tail/guard/grid</td></tr>
+    <tr><td>配对基准</td><td><code>tests/bench-kv-block-cuda.cu</code>、<code>run_cuda_kv_benchmark.py</code></td><td>同一 production seam、交替顺序、paired median</td></tr></table>
+
+  <h3>14.1 一次请求走读顺序</h3>
+  <ol><li>从 <code>server_context</code> 的任务/slot 选择开始。</li><li>进入 Engine <code>step</code>，看 prepare 和 iteration phase。</li>
+    <li>看 Scheduler/Capacity 输出 plan，不要陷入 HTTP JSON。</li><li>跟到 runtime callback / <code>llama_decode</code>。</li>
+    <li>若 Prefix 共享或 COW，进入 KV Runtime/Block Manager，再到 llama memory capability。</li>
+    <li>真实 tensor remap 进入 <code>copy_streams_paged_cuda</code> 和 CUDA seam。</li>
+    <li>同步成功后回到 commit 和 metrics。</li></ol>
+
+  <h3>14.2 一次 COW 走读时必须回答</h3>
+  <p>谁发现共享尾块？谁分配新块？谁复制数据？何时切换映射？复制失败旧引用是否还在？CUDA 完成前谁持有 buffer？哪个测试覆盖？哪个真实日志证明触发？</p>
+
+  <h2 id="qa">15. 分方向面试问题库（先答再展开）</h2>
+  <p><span class="pill p0">P0 必会</span><span class="pill p1">P1 高频追问</span><span class="pill p2">P2 延伸</span> 推荐回答结构：结论一句 → 原因/机制 → 项目证据 → 边界。</p>
+
+  <h3>15.1 项目总览与个人贡献</h3>
+  <details class="qa"><summary><span class="pill p0">P0</span>这个项目解决了什么问题？</summary><p>解决单机 LLM Serving 中重复 Prefill、KV 显存管理、长 Prefill 阻塞 Decode、共享/抢占的一致性和底层 KV 数据移动问题。方案横跨 Engine transaction、缓存感知 Scheduler、块级 KV/COW/Swap、在线收益门控和真实 CUDA Remap。不是训练框架，也不是 Agent 编排。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>为什么不用 vLLM，自己基于 llama.cpp 做？</summary><p>目标是学习并改造本地单机 C++ 推理热路径，llama.cpp 便于固定版本、消费级 GPU 和 GGUF 部署。项目借鉴 PagedAttention/Orca 等思想，但不声称替代 vLLM。若目标是直接上线高吞吐服务，成熟框架更合适；这里的价值是可审计的系统与算子贡献。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>哪些是上游，哪些是你做的？</summary><p>上游提供 GGUF、模型 graph、GGML backend、通用模型算子、sampling 和 HTTP 基础设施。个人差异是 Engine/iteration、Scheduler、KV Block/Runtime/Capacity/Swap、llama KV capability、CUDA copy/COW/swap/remap、在线策略、metrics、故障注入和实验。用固定基线 diff 统计，不把 vendor 总量算个人工作。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>最大的技术难点是什么？</summary><p>不是写一个孤立 kernel，而是让 Scheduler 的逻辑块决策、真实 llama KV tensor、异步 CUDA 生命周期和失败回滚保持一致；同时用真实指标证明路径被调用。可具体讲 snapshot Remap、partial-tail COW 的发布顺序和同步后指标提交。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>项目最有创新性的点？</summary><p>“创新”应限定为个人工程设计：把 transaction-based Engine、paged prefix/COW/swap、backend-local benefit gating 与真实 CUDA Remap 串成可观测因果链。单个思想已有学术/工业先例，个人贡献在于 llama.cpp 固定版本上的重构、集成、故障语义和证据体系，而非发明 PagedAttention。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>为什么说它不是简单复现？</summary><p>因为上游差异进入真实 server 和 KV tensor 路径，包含新接口、状态所有权、失败处理、CUDA seam、测试与实际消费者；同时保留固定上游 patch 和个人 diff。仍应承认基础模型算子与框架来自上游。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>如果重做一次会改什么？</summary><p>先把实验协议稳定性做成一等设计：预注册样本量、置信区间、bounded convergence、设备状态记录；然后实现受限的 paged decode attention，直接读取 Block Table，减少 Remap。不会先继续堆外围功能。</p></details>
+
+  <h3>15.2 Transformer 与模型基础</h3>
+  <details class="qa"><summary><span class="pill p0">P0</span>为什么 Attention 要分 Q/K/V？</summary><p>同一隐状态通过不同线性投影承担查询、匹配索引和值的角色，使模型能按当前位置需求选择历史信息。若共用同一表示，表达能力和角色分离受限。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>为什么除以 √d？</summary><p>若各维近似独立同方差，点积方差随 d 增长。除以 √d 让尺度更稳定，避免 softmax 进入极端饱和区导致梯度/概率过尖。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>KV Cache 缓存的是什么，为什么不缓存 Q？</summary><p>缓存每层历史 token 的 K/V。新 token 的 Q 只在当前步查询历史，之后不再被未来位置直接读取；未来位置需要历史的 K/V，因此它们值得保存。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>Prefill 和 Decode 有什么区别？</summary><p>Prefill 处理多个 prompt token，矩阵较大、主要影响 TTFT；Decode 每序列每轮通常一个 token，算子窄且反复读取 KV，主要影响 TPOT，往往更 memory/launch sensitive。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>GQA 为什么省显存？</summary><p>KV 容量取决于 KV head 数。GQA 让多组 Q head 共用较少 K/V head，因此相对 MHA 按 Hkv/H 比例减少 KV 和读带宽。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>RoPE 对 KV Cache 有什么影响？</summary><p>RoPE 通常在写 K 前根据位置旋转；恢复或移动 KV 必须保持位置/sequence state 一致。不能只拷贝 bytes 却丢失逻辑位置状态。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>量化权重是否意味着 KV 也是 4 bit？</summary><p>不一定。模型文件 Q4_K_M 描述权重量化；KV dtype 是独立配置/实现选择。本项目 Remap 和容量示例按 FP16 KV，不能用权重 bit 直接代入 KV 公式。</p></details>
+  <details class="qa"><summary><span class="pill p2">P2</span>为什么 batch composition 可能改变输出 hash？</summary><p>浮点运算不满足严格结合律，不同 batch/归约顺序可能让近似相等 logits 的排序或 EOS 位置变化。协议、确定 seed 和语义质量应分别验证，不能要求所有并发布局逐字节一致。</p></details>
+
+  <h3>15.3 Serving 与 Scheduler</h3>
+  <details class="qa"><summary><span class="pill p0">P0</span>什么是 Continuous Batching？</summary><p>在每个生成 iteration 边界动态加入新 sequence、移除完成 sequence，而不是固定整批直到所有请求结束。它减少空洞并提高 GPU 利用率。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>为什么 Decode 优先但又要 Aging？</summary><p>Decode 延迟一轮直接恶化 TPOT，所以通常优先；绝对优先会让长 Prefill 永远进不来，Aging 让等待时间转化为优先级，保证最终服务。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>TTFT、TPOT、吞吐如何权衡？</summary><p>大 batch/chunk 提高吞吐但可能阻塞首 token和 Decode；小 chunk改善交互但增加 launch/调度开销。应同时报告 TTFT/TPOT/latency/throughput 的中位与尾部，而非单指标优化。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>缓存感知调度为什么不能只看最长公共前缀？</summary><p>复用收益可能小于淘汰其他 slot 的重算代价，还受 deadline、等待和容量约束。效用应是 reuse、victim cost、aging 和风险的组合。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>Scheduler 复杂度如何？</summary><p>小 slot 集合下候选扫描约 O(S)；Prefix 按 block 递进约 O(P/B)，具体还取决于 hash bucket 验证。项目选择低开销可解释启发式，不做昂贵全局优化。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>背压为什么比扩容队列更重要？</summary><p>无限队列只把过载转化为内存增长和不可控尾延迟。背压让过载显式失败，保护在途请求和服务恢复能力；应用用并发槽与 429 验证。</p></details>
+  <details class="qa"><summary><span class="pill p2">P2</span>如何避免 Scheduler 自己成为瓶颈？</summary><p>保持 per-iteration 计算近线性/小常数、纯 plan、增量索引和预计算 bucket；用 Engine trace 比较 plan 占比。若 slot 数扩大会考虑 heap/分层队列，但需衡量更新成本。</p></details>
+
+  <h3>15.4 KV、COW 与 Swap</h3>
+  <details class="qa"><summary><span class="pill p0">P0</span>Block Table 类比页表有哪些相同和不同？</summary><p>相同：逻辑空间映射到离散物理块，降低连续分配与碎片压力。不同：没有硬件 MMU/TLB 自动翻译，由 serving/runtime 显式维护，block 大小和语义也针对 token/KV。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>为什么共享 partial tail？</summary><p>只共享完整块会丢失最多 B−1 个公共 token 的复用。共享 tail 提升命中，但 append 前必须 COW。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>COW 正确操作顺序？</summary><p>分配新块→复制有效 tail→复制成功后切换当前 sequence 映射→递减旧引用。失败前不修改旧映射，保证其他共享者和写者都安全。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>如何证明 refcount 正确？</summary><p>定义 Block Table/索引/异步 lease 对引用的贡献，验证 refcount 等于所有活跃引用之和；随机状态测试执行 attach/append/release/COW 后检查容量和父链不变量；真实 smoke 验证路径。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>Prefix hash 碰撞怎么办？</summary><p>Hash 用于缩小候选，不能作为最终相等证明；还需校验父链、token 数量和实际 token 内容。否则错误共享会直接破坏模型输出。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>Swap 还是 recompute，怎么选？</summary><p>比较保存+恢复传输/存储成本与未来重算 Prefill 成本，并考虑回访概率、Host budget 和 deadline。短/低价值序列可能直接 recompute 更好。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>为什么 file swap 要临时文件+原子替换？</summary><p>直接覆盖若中途失败会破坏旧快照。先完整写临时文件并 flush/fsync，再 atomic replace，使读者看到旧完整版本或新完整版本，而非半写文件。</p></details>
+  <details class="qa"><summary><span class="pill p2">P2</span>ABA/并发释放如何防？</summary><p>用唯一 block/operation generation、明确所有权和 event lease，避免物理 ID 回收后旧异步回调误认为仍是同一对象。当前单机控制面简化并发，但异步 CUDA 生命周期仍需独立 lease。</p></details>
+
+  <h3>15.5 CUDA 与算子</h3>
+  <details class="qa"><summary><span class="pill p0">P0</span>这个 CUDA 算子具体做什么？</summary><p>它按 descriptor 把真实 K/V tensor 的若干 source range Gather 到 staging，再 Scatter 到 destination；用于跨 stream/block Remap 和需要 snapshot 的 COW/映射复制，不计算 Attention。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>为什么用 staging？</summary><p>重叠/循环映射中直接 in-place copy 会覆盖尚未读取的源。两阶段先建立完整快照，再写回，保证与 descriptor 执行顺序无关。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span><code>uint4</code> 为什么能加速？</summary><p>每 thread 从处理 1 个 FP16 变为最多 8 个，减少线程和 load/store 指令固定开销，并形成 16-byte 访问。大规模时受内存带宽限制，收益会收敛。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>非对齐怎么办？</summary><p>运行时检查 source/staging 或 destination/staging 的 16-byte 对齐；不满足或尾部不足 8 元素时在同一 kernel 标量逐元素处理，保证正确性优先。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>为什么不全部用 cudaMemcpyAsync？</summary><p>不重叠的连续 range 用 memcpy 往往更快；重叠/循环映射需要全局 snapshot，单纯异步 memcpy 的顺序语义不够。生产路径应按 mapping 性质分流。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>kernel 返回成功为什么还可能失败？</summary><p>Launch 是异步入队，<code>cudaGetLastError</code> 主要捕获 launch 配置等错误；非法内存访问可能到 Event/Device 同步才暴露。因此指标和资源释放必须等同步成功。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>为什么小 block 收益大、大 block 收益小？</summary><p>小工作量中线程/指令/launch 固定开销占比高，向量化减少它们；大工作量中 global memory bandwidth 主导，标量线程也能形成较好合并访问，剩余优化空间小。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>怎么验证 snapshot 语义？</summary><p>构造 A↔B 重叠交换，先在 CPU 对原始数组做独立快照得到 oracle，再运行 GPU Gather/Scatter 对比完整数组；不能用同一 GPU 实现生成期望值。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>Sanitizer 0 error 是否等于无 bug？</summary><p>不是。它只覆盖本次运行和工具能检测的错误；仍需边界输入、逻辑 oracle、真实模型输出和不同设备验证。</p></details>
+  <details class="qa"><summary><span class="pill p2">P2</span>下一步为什么是 Paged Decode Attention？</summary><p>当前先 Remap 再让 Attention 读取连续 KV，仍有搬运。Paged Attention 让 kernel 通过 Block Table 直接读取非连续 KV，可能消除部分 copy。应先支持受限 Qwen GQA/FP16/decode，保留上游回退并验证数值与端到端指标。</p></details>
+
+  <h3>15.6 在线学习与实验</h3>
+  <details class="qa"><summary><span class="pill p0">P0</span>为什么用 Ridge 而不是神经网络？</summary><p>特征维度小、在线样本有限，需要低开销、可解释、可增量更新和置信度估计。复杂模型会增加冷启动、过拟合和每 iteration 成本。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>正则 λ 的作用？</summary><p>让 A 可逆并抑制系数过大，降低共线/少样本的不稳定。太大欠拟合，太小高方差。</p></details>
+  <details class="qa"><summary><span class="pill p0">P0</span>为什么只在 lower bound 正时启用？</summary><p>均值正不能排除估计误差；下界减去不确定性和安全 margin 后仍为正，才有更保守的收益证据，降低错误启用有害策略。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>不探索怎么学 CacheFlow 成本？</summary><p>需要 bounded safe exploration 收集另一动作样本，但应限制频率、风险和冷却；长期实验与短进程风险预算分开。探索决策不能冒充正下界利用。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>为什么 Full 会波动？</summary><p>性能门槛接近噪声尺度，受 WDDM、GPU clock/温度、调度和样本量影响；一次 terminal snapshot 也可能不稳。应增加样本、预注册统计、使用置信区间与 bounded convergence，而不是重跑挑好结果。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>微基准与端到端冲突怎么办？</summary><p>不冲突：kernel 局部更快，但在总请求中占比小，或改变 batching/launch 数、引入控制成本。用 Amdahl 定律和因果链定位；不能从局部 53% 推出服务 53%。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>为什么配对实验优于独立中位数？</summary><p>同一 trial 的环境漂移对 A/B 更相似，先做差可抵消公共噪声。独立中位数可能来自不同热状态，比例不对应任何真实 pair。</p></details>
+  <details class="qa"><summary><span class="pill p2">P2</span>如何给 Remap 改善加置信区间？</summary><p>对 20 个 paired improvement 做 bootstrap 重采样，计算中位改善的 percentile/BCa 区间；预先规定重采样次数和判定阈值。若区间跨 0，只能说趋势而非稳定提升。</p></details>
+
+  <h3>15.7 系统、数据库与工程延伸</h3>
+  <details class="qa"><summary><span class="pill p0">P0</span>RAII 在这里有什么价值？</summary><p>把 stream/event/buffer/file handle 生命周期绑定对象析构，异常或早退时自动清理，减少 goto/多分支泄漏。异步资源还要确保析构前 work 已完成，RAII 不自动解决 happens-before。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>Counter、Gauge、Histogram 怎么选？</summary><p>累计决策/byte 用只增 Counter；当前 cooldown/预测值用 Gauge；TTFT/TPOT 分布用 Histogram。失败操作不能累加成功 Counter。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>SQLite 为什么每操作新连接？</summary><p>线程式 HTTP 服务中避免跨线程长期共享连接及泄漏，操作边界清晰。代价是连接开销；当前本地低并发可接受，更高吞吐可用连接池和 WAL。</p></details>
+  <details class="qa"><summary><span class="pill p1">P1</span>取消为何可能留下半状态？</summary><p>网络断开、模型 generator、KV slot 和数据库是不同资源。必须沿层级传播关闭；数据库只在完整生成后写 assistant，并在同一事务更新 session。</p></details>
+  <details class="qa"><summary><span class="pill p2">P2</span>如果扩展多 GPU，最大的变化？</summary><p>要引入 tensor/pipeline parallel、跨设备 KV placement/通信、拓扑感知调度、分布式状态/故障模型。当前单机 refcount 和 atomic file 语义不能直接外推。</p></details>
+
+  <h2 id="whiteboard">16. 白板推导与现场编码</h2>
+  <h3>16.1 必会推导一：KV 容量</h3>
+  <ol><li>每层每 token 有 K/V 两份；</li><li>每份含 Hkv×Dhead 个元素；</li><li>乘元素 byte、层数、token、sequence；</li><li>最后换算 KiB/MiB/GiB，说明不含权重和 workspace。</li></ol>
+  <p>面试官改变 MHA→GQA、FP16→FP8、并发或 context 时，应能即时按比例缩放。</p>
+
+  <h3>16.2 必会推导二：Ridge 正规方程</h3>
+  <div class="formula">J(θ)=(y−Xθ)<sup>T</sup>(y−Xθ)+λθ<sup>T</sup>θ<br>
+  ∇J=−2X<sup>T</sup>y+2X<sup>T</sup>Xθ+2λθ=0<br>
+  (X<sup>T</sup>X+λI)θ=X<sup>T</sup>y</div>
+  <p>再把历史和写成在线 A、b。不要机械背导数：解释 λI 让矩阵更稳定、A 表示累计信息。</p>
+
+  <h3>16.3 必会推导三：COW 状态机</h3>
+  <pre><code>ensure_writable(sequence):
+    tail = table.last()
+    if tail.refcount == 1: return tail
+    reserve 1 block
+    fresh = allocate()
+    copy(valid_prefix(tail), fresh)
+    wait/verify copy success
+    table.replace_last(fresh)   // publish
+    decref(tail)               // retire old
+    return fresh</code></pre>
+  <p>追问失败处理：allocate/copy/wait 任一失败都不能 replace/decref；reservation 要释放；旧 tail 仍可读。</p>
+
+  <h3>16.4 必会编码一：安全 ceil-div</h3>
+  <pre><code>size_t ceil_div(size_t n, size_t d) {
+    return n / d + (n % d != 0); // 避免 (n + d - 1) 溢出
+}</code></pre>
+  <p>进一步检查 <code>d != 0</code>，结果是否超出 CUDA grid 上限，类型转换是否截断。</p>
+
+  <h3>16.5 必会编码二：一维 CUDA kernel</h3>
+  <pre><code>__global__ void copy(const half *src, half *dst, size_t n) {
+    size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i &lt; n) dst[i] = src[i];
+}</code></pre>
+  <p>追问：为什么转 size_t？如何算 grid？为什么仍需同步检查？如何变成 8-element vector path？</p>
+
+  <h3>16.6 Amdahl 定律解释局部优化</h3>
+  <div class="formula">overall speedup = 1 / ((1−p) + p/s)</div>
+  <p>若 Remap 只占端到端 2%，即使局部加速 2 倍，总加速也约 1.01 倍。因此要测其占比、调用次数和对 batching 的副作用。</p>
+
+  <h3>16.7 现场系统设计题：增加 Paged Decode Attention</h3>
+  <ol><li><strong>Scope：</strong>先支持 Qwen2.5、FP16 KV、GQA、single-token decode、单 GPU。</li>
+    <li><strong>接口：</strong>Q、Block Table、KV block pool、sequence length、head mapping → output。</li>
+    <li><strong>算法：</strong>按 KV block 流式计算 score，在线维护 max/sum 做稳定 softmax，避免存完整 score。</li>
+    <li><strong>正确性：</strong>与上游连续 Attention 对照误差，覆盖非整块 tail、共享 Prefix、不同长度。</li>
+    <li><strong>Fallback：</strong>不支持 dtype/layout/head dim 时回上游。</li>
+    <li><strong>性能：</strong>先 kernel microbench，再证明 KV copy byte 减少，最后测 Decode TPOT/TPS。</li>
+    <li><strong>边界：</strong>不声称通用 vLLM PagedAttention，不先支持 Prefill、多 GPU、全部量化。</li></ol>
+
+  <h2 id="claims">17. 可以说、不能说、如何纠错</h2>
+  <table><tr><th>不要说</th><th>应该说</th></tr>
+    <tr><td>我重写了 llama.cpp</td><td>我固定上游 commit，在真实热路径形成约 61 files、+8708/-99 的可重放差异</td></tr>
+    <tr><td>实现了 PagedAttention</td><td>实现了块级 KV Runtime 和真实 tensor Remap；Attention 仍由上游计算</td></tr>
+    <tr><td>端到端加速 53.33%</td><td>1-block KV Remap 微基准配对中位改善 53.33%；不外推端到端</td></tr>
+    <tr><td>项目已全面生产可用</td><td>单机可信环境、真实应用旅程通过；没有公网多租户/HA/外部用户证据</td></tr>
+    <tr><td>Full 全部通过</td><td>基线曾通过；当前增量专项通过，但两次 Full 统计门禁出现不同波动</td></tr>
+    <tr><td>Sanitizer 证明没有 bug</td><td>当前覆盖下 memcheck/racecheck 无报告，结合 oracle/边界/真实模型验证</td></tr>
+    <tr><td>这是科研成果</td><td>这是个人科研型项目/科研实践；除非确有导师、立项、论文事实</td></tr>
+    <tr><td>CUDA 一定比 memcpy 快</td><td>重叠映射需要 staging kernel；disjoint mapping 保留更快的 async memcpy</td></tr></table>
+
+  <h3>17.1 不会回答时的专业处理</h3>
+  <blockquote class="card">“这个项目当前没有实现/测量这一点，所以我不直接下结论。我的初步判断是……，因为……。要验证它，我会固定模型和 workload，增加……指标，并做……对照。”</blockquote>
+  <p>这比编造更强。面试官常在评估你是否知道证据边界。</p>
+
+  <h2>18. 完整口述模板</h2>
+  <h3>18.1 15 分钟版本提纲</h3>
+  <ol><li>1 分钟：问题与 workload；</li><li>2 分钟：上游边界和总体架构；</li><li>2 分钟：iteration transaction；</li>
+    <li>3 分钟：Block Table、Prefix、COW、Swap；</li><li>3 分钟：CUDA Remap 与异步正确性；</li>
+    <li>2 分钟：在线门控/自适应算法；</li><li>1 分钟：实验结果与负结果；</li><li>1 分钟：限制和下一步 Paged Decode Attention。</li></ol>
+
+  <h3>18.2 六句回答法</h3>
+  <ol><li>问题：什么 workload 下出现什么失败？</li><li>约束：不能破坏什么？</li><li>方案：核心数据结构/算法？</li>
+    <li>不变量：失败/并发怎么保证正确？</li><li>证据：测试、指标、实验？</li><li>边界：当前没覆盖什么？</li></ol>
+  <p><strong>COW 示例：</strong>共享 partial tail 提高 Prefix 复用，但 append 会污染其他 sequence；约束是失败不能改变旧映射。写前分配新块并复制有效 tail，成功后切换 Block Table 再递减旧引用。随机状态测试检查 refcount/容量，真实 Qwen 和 Sanitizer 验证 tensor 路径。当前只覆盖单 GPU，不含跨 GPU KV 迁移。</p>
+
+  <h2 id="plan">19. 14 天学习与模拟计划</h2>
+  <table><tr><th>天</th><th>学习</th><th>闭卷产出</th></tr>
+    <tr><td>1</td><td>第 2–4 节：请求、Transformer、KV 公式</td><td>手算 3 个 KV 容量；画 Attention</td></tr>
+    <tr><td>2</td><td>第 5 节：Serving/指标</td><td>解释 TTFT/TPOT 冲突和 Continuous Batching</td></tr>
+    <tr><td>3</td><td>第 6–7 节：Engine/Scheduler</td><td>画 transaction 状态机；说出失败路径</td></tr>
+    <tr><td>4</td><td>第 8 节：Block/Prefix/refcount</td><td>用 4-token block 手演 attach/share/release</td></tr>
+    <tr><td>5</td><td>COW/Swap</td><td>不看文档写正确发布顺序和故障矩阵</td></tr>
+    <tr><td>6</td><td>第 9 节前半：GPU/CUDA/内存</td><td>画 grid/block/thread、stream/event 时间线</td></tr>
+    <tr><td>7</td><td>Remap 算子</td><td>解释 uint4、对齐、tail、snapshot、grid</td></tr>
+    <tr><td>8</td><td>第 10 节：Ridge/置信度</td><td>推导正规方程与 lower bound</td></tr>
+    <tr><td>9</td><td>第 11 节：Adaptive 算法</td><td>比较 chunk/draft 深浅的代价</td></tr>
+    <tr><td>10</td><td>第 12 节：实验统计</td><td>解释 paired/Latin/P95/混杂</td></tr>
+    <tr><td>11</td><td>第 14 节：代码地图</td><td>5 分钟定位 Engine、COW、Remap、Policy</td></tr>
+    <tr><td>12</td><td>问题库前半</td><td>随机 25 题，每题录音 60 秒</td></tr>
+    <tr><td>13</td><td>问题库后半与白板题</td><td>随机 25 题；完成 4 次推导/编码</td></tr>
+    <tr><td>14</td><td>完整模拟与 Demo</td><td>30 秒/3 分钟/15 分钟三版；复盘错题</td></tr></table>
+  <p>错题按第 1/3/7 天间隔重答。每次先闭卷，再核对；不要连续重读制造“我好像会了”的流畅性错觉。</p>
+
+  <h3>19.1 评分标准（每题 0–4）</h3>
+  <ul><li>0：答错或编造；</li><li>1：只有名词定义；</li><li>2：能解释动机与机制；</li>
+    <li>3：能说不变量、代码和证据；</li><li>4：能主动讲边界、替代方案和实验设计。</li></ul>
+  <p>P0 题不得低于 3 分；总平均达到 3 分再参加正式模拟。</p>
+
+  <h2>20. 面试前一页速查</h2>
+  <div class="two-col">
+    <div class="card"><strong>四条公式</strong><ul><li>Attention = softmax(QKᵀ/√d+mask)V</li><li>KV = 2LTHkvDbytesN</li><li>θ=A⁻¹b，A=λI+Σxxᵀ</li><li>LB=benefit−uncertainty−margin</li></ul></div>
+    <div class="card"><strong>六个不变量</strong><ul><li>计划完整执行才 commit</li><li>free+allocated+reserved=capacity</li><li>shared tail 写前 COW</li><li>复制成功后再切映射</li><li>Event 完成前不释放 lease</li><li>不支持 capability 就 fallback</li></ul></div>
+    <div class="card"><strong>关键数字</strong><ul><li>61 files，+8708/-99</li><li>21 Prefix blocks / 324 tokens</li><li>Remap：53.33/48.89/3.13/1.87%</li><li>真实应用：5,603,330 vector bytes</li><li>Sanitizer：0 error / 0 hazard</li></ul></div>
+    <div class="card"><strong>四条边界</strong><ul><li>Remap ≠ PagedAttention</li><li>微基准 ≠ 端到端</li><li>单机 4050/0.5B 不外推</li><li>当前 Full 统计门禁不稳定</li></ul></div>
+  </div>
+
+  <h2>21. 最终自测</h2>
+  <div class="quiz"><strong>为什么不能把 53.33% 写成端到端加速？</strong>
+    <button data-answer="false">因为 RTX 4050 的性能不够稳定</button><button data-answer="true">因为它只测 Remap 局部路径且占比未知</button>
+    <div class="feedback"></div><details><summary>解析</summary><p>Amdahl 定律和跨层副作用决定局部加速不能直接外推端到端。</p></details></div>
+  <div class="quiz"><strong>共享 partial tail 第一次写入的正确顺序？</strong>
+    <button data-answer="true">分配复制成功、切换映射、递减旧引用</button><button data-answer="false">递减旧引用、原地写入、必要时重新分配</button>
+    <div class="feedback"></div><details><summary>解析</summary><p>先发布新状态，后回收旧状态；失败时旧映射必须完整。</p></details></div>
+  <div class="quiz"><strong>CUDA kernel launch 返回后最安全的判断？</strong>
+    <button data-answer="false">GPU 已完成，所有 buffer 可以立即释放</button><button data-answer="true">工作可能仅入队，执行错误需同步点确认</button>
+    <div class="feedback"></div><details><summary>解析</summary><p>异步执行是 CUDA 生命周期题目的核心。</p></details></div>
+  <div class="quiz"><strong>当前项目与 PagedAttention 的关系？</strong>
+    <button data-answer="true">管理分页 KV 并做 Remap，但 Attention 未直接读 Block Table</button><button data-answer="false">已经完整实现与 vLLM 相同的 PagedAttention</button>
+    <div class="feedback"></div><details><summary>解析</summary><p>项目当前的底层算子是 KV 数据移动，不是 attention score/softmax/value 聚合。</p></details></div>
+
+  <h2 id="sources">22. 权威来源与继续深挖</h2>
+  <ul class="source">
+    <li><a href="https://papers.neurips.cc/paper/7181-attention-is-all-you-need.pdf">Vaswani et al., Attention Is All You Need, NeurIPS 2017</a>：Transformer 与 scaled dot-product attention 原始论文。</li>
+    <li><a href="https://www.usenix.org/system/files/osdi22-yu.pdf">Yu et al., Orca, OSDI 2022</a>：iteration-level scheduling 与 selective batching。</li>
+    <li><a href="https://doi.org/10.1145/3600006.3613165">Kwon et al., Efficient Memory Management for LLM Serving with PagedAttention, SOSP 2023</a>：PagedAttention/vLLM 的原始系统论文。</li>
+    <li><a href="https://www.usenix.org/conference/osdi24/presentation/agrawal">Agrawal et al., Sarathi-Serve, OSDI 2024</a>：chunked prefill 与 stall-free scheduling。</li>
+    <li><a href="https://proceedings.mlr.press/v202/leviathan23a.html">Leviathan et al., Fast Inference from Transformers via Speculative Decoding, ICML 2023</a>：推测解码正确性。</li>
+    <li><a href="https://arxiv.org/abs/1003.0146">Li et al., LinUCB, WWW 2010</a>：contextual bandit 与置信上界思想。</li>
+    <li><a href="https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html">NVIDIA CUDA C Programming Guide</a>：线程层次、内存、stream/event 与异步执行。</li>
+    <li><a href="https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html">NVIDIA Compute Sanitizer</a>：memcheck/racecheck 能力边界。</li>
+    <li><a href="https://prometheus.io/docs/concepts/metric_types/">Prometheus Metric Types</a>：Counter/Gauge/Histogram 语义。</li>
+    <li><a href="https://github.com/ggml-org/llama.cpp">llama.cpp upstream</a>：项目固定上游语境；面试时以本地固定 commit 为准。</li>
+  </ul>
+
+  <h2>23. 学完之后你应该能够做到</h2>
+  <ul class="checklist"><li>□ 3 分钟讲清问题、架构、贡献、数字和限制；</li><li>□ 白板推导 Attention、KV 容量、Ridge 和 lower bound；</li>
+    <li>□ 手演 Prefix share、partial-tail COW、release 和 swap failure；</li><li>□ 解释 uint4、对齐、tail、snapshot、grid 和 Event；</li>
+    <li>□ 沿真实源码找到 Engine→KV→CUDA；</li><li>□ 区分微基准、真实调用、端到端和外部有效性；</li>
+    <li>□ 面对未实现内容不编造，并提出可验证的下一步。</li></ul>
+  <div class="callout good"><strong>最后提醒：</strong>这份文档可以覆盖知识，但面试能力必须通过闭卷口述、白板推导、代码定位和压力追问获得。请随时让你的 AI 教师从本页随机抽题、追问并按 0–4 分评分。</div>
+
+  <p class="nav"><a href="index.html">← 返回课程首页</a><a href="#how">回到使用说明 ↑</a></p>
+</main><script src="../assets/quiz.js"></script></body></html>

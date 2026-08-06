@@ -1,5 +1,7 @@
 # CacheFlow Runtime 面试深挖手册
 
+> 本文保留早期深挖笔记。2026-08-06 之后的统一事实、完整基础讲解和问题答案请以 [`lessons/cacheflow-runtime-complete-interview-handbook.html`](../lessons/cacheflow-runtime-complete-interview-handbook.html) 为准。
+
 ## 30 秒版本
 
 我基于固定版本 llama.cpp 做了一个单机 LLM Serving / AI Infra fork，重构了真实推理热路径，而不是在外面套 Python。核心包括 transaction-based Engine loop、token-level scheduler、paged prefix KV 的 Block Table/引用计数/尾块 COW、Host/File/CUDA 事务 Swap，以及真实 K/V Tensor 上的 CUDA Gather/Scatter/COW。项目还实现了 adaptive prefill/speculation、故障注入、原生 metrics 和 CPU/CUDA 多 trial 验证。最重要的结果是 Tail COW 把最终矩阵的 P95 从 0.998 ms 降到 0.026 ms；但我也保留了 CUDA mixed workload 指标跨轮反号的负结果，并据此说明策略需要 backend-aware gating。

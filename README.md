@@ -154,7 +154,7 @@ models/ runtime/ build/          下载模型、工具链和本机构建产物�
 
 ## 面试演示主线
 
-系统学习入口：[推免面试课程](lessons/index.html)；现已增加真正零基础的模型/数学/程序并发/GPU 四节桥接课。配套的 [18 天学习路线](docs/interview-study-roadmap.md)、[术语表](reference/glossary.html)、[公式/代码地图](reference/formulas-and-code-map.html) 和 [25 道追问题库](reference/interview-question-bank.html)，从输入一句话一直覆盖到项目算法、实验和答辩训练。
+只使用一份材料时，直接阅读 [《CacheFlow Runtime：从零到项目面试完全手册》](lessons/cacheflow-runtime-complete-interview-handbook.html)；它统一覆盖基础、架构、算法、CUDA、实验、源码地图、53 道追问和 14 天训练。分课入口仍见 [推免面试课程](lessons/index.html)，并配有 [18 天学习路线](docs/interview-study-roadmap.md)、[术语表](reference/glossary.html)、[公式/代码地图](reference/formulas-and-code-map.html) 和 [25 道追问题库](reference/interview-question-bank.html)。
 
 三分钟版本：
 
