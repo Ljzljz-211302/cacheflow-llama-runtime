@@ -93,7 +93,7 @@ H2 进一步完成 4 个预注册 KV regime、160 条无 profiler paired trials 
 
 Nsight Compute 已实际执行，但当前 driver/tool compatibility 检查和 `ERR_NVGPUCTRPERM` 阻止硬件计数器采集；失败命令与日志均保留。因此验收只通过 NSYS + no-profiler effect 的限定主张，明确不声称 memory-bound、roofline、achieved occupancy 或 hardware DRAM bytes。
 
-服务级链路也已补齐：3 个 no-profiler upstream/always pairs 给出主要请求效应，相同 seed/config 的 NSYS 重放用 6 个 server PID 和 72 个 request ID 连接 scheduler、KV action、CUDA timeline 与 TTFT；38 次自研 KV launch 均与逐进程运行时 counter 完全相等。本轮 paired median TTFT P95 +346.82 ms、Engine execute +258,596 us，两者同向恶化，因此报告明确写“未复现旧的 execute/TTFT 反号”，不挑选更好看的历史 run 替代。
+服务级链路也已补齐：3 个 no-profiler upstream/always pairs 给出主要请求效应，相同 seed/config 的 NSYS 重放用 6 个 server PID 和 72 个 request ID 连接 scheduler、KV action、CUDA timeline 与 TTFT；profiler replay 的 44 次自研 KV launch 均与逐进程运行时 counter 完全相等。本轮 no-profiler 中 decision +22、prefill chunk +32、prefill token -774、KV launch +2、copy bytes +9,904,200、CUDA Event -0.293 ms；paired median TTFT P95 +108.810 ms、Engine execute +181,209 us，两者同向恶化。因此报告明确写“未复现旧的 execute/TTFT 反号”，不挑选更好看的历史 run 替代。
 
 exact output hash 被保留为审计指标而非并发性能硬门槛：batch composition 会改变近似相等 logits 与 EOS 位置；HTTP/SSE、上游兼容和语义质量分别由专门 gate 验证。
 

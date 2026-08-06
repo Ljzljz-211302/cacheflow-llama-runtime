@@ -61,7 +61,7 @@ Issue #4 现有 4 个预注册 regime、160 条无 profiler paired observations 
 
 这仍没有证明 memory-bound：本机 NCU 同时报 driver incompatibility 与 `ERR_NVGPUCTRPERM`，因此 DRAM throughput、L2 和 occupancy 未采到。`effective_payload_gbps` 只允许解释为逻辑 payload / CUDA-event time，不能冒充硬件带宽或 roofline。当前 H2 结论只覆盖 KV 算子机制；原有 3-pair 服务因果链仍负责说明 scheduler/CUDA mediator 与 TTFT 可能反向，不能把 +57.10% 写成端到端推理加速。
 
-服务级 NSYS 复现实验进一步把 3 个 no-profiler pairs 与相同 seed/config 的 3 个 profiler pairs 分开：6 个 trial/mode server PID、72 个确定性 request ID 均连接到 benefit decision、prefill shape、KV action、PID-filtered NSYS timeline 和 TTFT。每个进程的 runtime KV launch counter 与 NSYS 完全相等。本轮 no-profiler 中 decision +26、chunk +39、copy bytes -9,621,500、CUDA-event +2.184 ms、TTFT P95 +346.82 ms、Engine execute +258,596 us；它关闭了用户请求因果链接，但没有复现旧实验的 execute/TTFT 反号，因此两种结果都保留。
+服务级 NSYS 复现实验进一步把 3 个 no-profiler pairs 与相同 seed/config 的 3 个 profiler pairs 分开：6 个 trial/mode server PID、72 个确定性 request ID 均连接到 benefit decision、prefill shape、KV action、PID-filtered NSYS timeline 和 TTFT。profiler replay 共记录 44 次自研 KV launch，每个进程的 runtime counter 与 NSYS 完全相等。本轮 no-profiler 中 decision +22、chunk +32、prefill token -774、KV launch +2、copy bytes +9,904,200、CUDA-event -0.293 ms、TTFT P95 +108.810 ms、Engine execute +181,209 us；它关闭了用户请求因果链接，但没有复现旧实验的 execute/TTFT 反号，因此两种结果都保留。
 
 ## 5. H3：Paged Decode Attention frontier
 

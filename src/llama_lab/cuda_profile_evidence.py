@@ -6,9 +6,12 @@ import sqlite3
 import statistics
 import sys
 from collections import defaultdict
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterable
 
+from llama_lab.cuda_causality import CudaProfileTrial, analyze_cuda_causality
+from llama_lab.metrics import percentile
 from llama_lab.research_protocol import paired_bootstrap_summary
 
 
@@ -663,10 +666,11 @@ def validate_service_profile_artifact(artifact_dir: Path) -> dict[str, Any]:
         )
     )
     baseline_evidence_items = baseline_evidence_payload["trials"]
-    baseline_evidence_keys = {
-        (int(item["trial"]), str(item["mode"]))
+    baseline_evidence = {
+        (int(item["trial"]), str(item["mode"])): item
         for item in baseline_evidence_items
     }
+    baseline_evidence_keys = set(baseline_evidence)
     if (
         baseline_keys != expected_keys
         or baseline_evidence_keys != expected_keys
@@ -674,6 +678,95 @@ def validate_service_profile_artifact(artifact_dir: Path) -> dict[str, Any]:
         or len(baseline_evidence_items) != len(expected_keys)
     ):
         raise ValueError("service profile no-profiler trial/mode coverage is incomplete")
+    baseline_trials = [
+        CudaProfileTrial(
+            mode=row["mode"],
+            trial=int(row["trial"]),
+            cacheflow_decisions=int(row["cacheflow_decisions"]),
+            prefill_chunks=int(row["prefill_chunks"]),
+            prefill_tokens=int(row["prefill_tokens"]),
+            kernel_launches=int(row["kernel_launches"]),
+            copy_bytes=int(row["copy_bytes"]),
+            cuda_event_ms=float(row["cuda_event_ms"]),
+            gpu_busy_ratio=float(row["gpu_busy_ratio"]),
+            maximum_idle_gap_ms=float(row["maximum_idle_gap_ms"]),
+            ttft_p95_ms=float(row["ttft_p95_ms"]),
+            execute_duration_us=float(row["execute_duration_us"]),
+        )
+        for row in baseline_row_list
+    ]
+    recomputed_primary = asdict(
+        analyze_cuda_causality(baseline_trials, minimum_trials=trials)
+    )
+    recomputed_primary["violations"] = list(recomputed_primary["violations"])
+    baseline_summary = json.loads(
+        (artifact_dir / "no-profiler/cuda_causal_profile_summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    if baseline_summary.get("result") != recomputed_primary:
+        raise ValueError("service profile no-profiler summary differs from raw trials")
+    for key, evidence in baseline_evidence.items():
+        trial, mode = key
+        row = next(
+            item
+            for item in baseline_row_list
+            if int(item["trial"]) == trial and item["mode"] == mode
+        )
+        if evidence.get("trial_id") != f"service-trial-{trial}-{mode}":
+            raise ValueError("service profile no-profiler trial ID is invalid")
+        if int(evidence.get("server_pid", 0)) <= 0:
+            raise ValueError("service profile no-profiler PID is invalid")
+        requests = evidence.get("requests", [])
+        request_ids = [request.get("request_id") for request in requests]
+        expected_request_ids = {
+            f"trial-{trial}-wave-{wave}-request-{request}"
+            for wave in range(2)
+            for request in range(6)
+        }
+        if len(request_ids) != 12 or set(request_ids) != expected_request_ids:
+            raise ValueError("service profile no-profiler request IDs are incomplete")
+        request_ttft = [float(request["ttft_ms"]) for request in requests]
+        if percentile(request_ttft, 0.95) != float(row["ttft_p95_ms"]):
+            raise ValueError("service profile no-profiler request timings differ from trials")
+        samples = [
+            float(value) for value in evidence["gpu_utilization_samples_percent"]
+        ]
+        busy_ratio = sum(value > 5.0 for value in samples) / len(samples)
+        longest_idle = current_idle = 0
+        for value in samples:
+            current_idle = current_idle + 1 if value <= 5.0 else 0
+            longest_idle = max(longest_idle, current_idle)
+        if busy_ratio != float(row["gpu_busy_ratio"]):
+            raise ValueError("service profile no-profiler GPU samples differ from trials")
+        if longest_idle * 100.0 != float(row["maximum_idle_gap_ms"]):
+            raise ValueError("service profile no-profiler idle gap differs from trials")
+        execute_us = sum(
+            float(event["dur"])
+            for event in evidence["engine_trace_events"]
+            if event.get("name") == "execute" and event.get("ph") == "X"
+        )
+        if execute_us != float(row["execute_duration_us"]):
+            raise ValueError("service profile no-profiler Engine trace differs from trials")
+        snapshot = evidence["prometheus_snapshot"]
+        snapshot_values = {
+            "prefill_chunks": int(snapshot["llamacpp:prefill_chunks_scheduled_total"]),
+            "prefill_tokens": int(snapshot["llamacpp:prefill_tokens_scheduled_total"]),
+            "kernel_launches": int(snapshot["llamacpp:cuda_kv_kernel_launches_total"]),
+            "copy_bytes": int(snapshot["llamacpp:cuda_kv_copy_bytes_total"]),
+        }
+        if any(snapshot_values[name] != int(row[name]) for name in snapshot_values):
+            raise ValueError("service profile no-profiler metrics differ from trials")
+        cuda_event_ms = 1000.0 * sum(
+            float(snapshot[name])
+            for name in (
+                "llamacpp:cuda_kv_copy_seconds",
+                "llamacpp:cuda_kv_swap_out_seconds",
+                "llamacpp:cuda_kv_swap_in_seconds",
+            )
+        )
+        if cuda_event_ms != float(row["cuda_event_ms"]):
+            raise ValueError("service profile no-profiler CUDA events differ from trials")
     link_keys = {(int(link["trial"]), str(link["mode"])) for link in links}
     if (
         set(profiled_rows) != expected_keys
@@ -735,6 +828,8 @@ def validate_service_profile_artifact(artifact_dir: Path) -> dict[str, Any]:
         if link["mode"] == "always" and link["scheduler_action"]["cacheflow_decisions"] <= 0:
             raise ValueError("always service profile contains no CacheFlow decisions")
     primary = links_payload.get("no_profiler_primary_result", {})
+    if primary != recomputed_primary:
+        raise ValueError("service profile copied primary result differs from raw trials")
     if not primary.get("passed"):
         raise ValueError("service profile no-profiler causal gate did not pass")
     if not manifest.get("protocol_compliant"):

@@ -253,6 +253,23 @@ class CudaProfileEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "duplicate or missing"):
                 validate_service_profile_artifact(artifact)
 
+    def test_service_validator_rejects_copied_primary_diverging_from_raw_trials(self) -> None:
+        source = Path("results/research/h2-service-nsight-causal-v1.0.0")
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact"
+            shutil.copytree(source, artifact)
+            links_path = artifact / "causal-links.json"
+            links = json.loads(links_path.read_text(encoding="utf-8"))
+            links["no_profiler_primary_result"]["ttft_delta_ms"] += 1.0
+            links_path.write_text(json.dumps(links), encoding="utf-8")
+            manifest_path = artifact / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["artifacts"]["causal_links_sha256"] = file_sha256(links_path)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "copied primary result differs"):
+                validate_service_profile_artifact(artifact)
+
     def test_builds_reproducible_profiler_commands_with_separate_reports(self) -> None:
         executable = Path("bench-kv-block-cuda.exe")
         output = Path("profiles") / "small-vector"
