@@ -71,6 +71,33 @@ class ResearchBaselineTests(unittest.TestCase):
             ):
                 load_baseline_manifest(path)
 
+    def test_conditional_kernel_requires_a_reproducible_command(self) -> None:
+        manifest = {
+            "schema_version": 1,
+            "upstream_revision": "a" * 40,
+            "scope": {"gpu": "test", "model": "test", "kv_layout": "test"},
+            "baselines": [
+                {
+                    "id": "future-kernel",
+                    "kind": "external",
+                    "comparison_class": "conditional-kernel",
+                    "runnable": False,
+                    "source": "https://example.invalid",
+                    "audit_revision": "b" * 40,
+                    "license": "MIT",
+                    "commands": [],
+                    "comparability_limits": ["adapter is not implemented"],
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(
+                BaselineManifestError, "comparison baseline must be runnable"
+            ):
+                load_baseline_manifest(path)
+
 
 if __name__ == "__main__":
     unittest.main()

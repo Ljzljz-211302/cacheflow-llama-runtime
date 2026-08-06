@@ -92,14 +92,14 @@ def load_baseline_manifest(path: Path) -> dict[str, Any]:
         commands = baseline["commands"]
         if not isinstance(commands, list):
             raise BaselineManifestError(f"{baseline_id}: commands must be a list")
-        if comparison_class == "quantitative":
+        if comparison_class != "related-work":
             if baseline["runnable"] is not True:
                 raise BaselineManifestError(
-                    f"{baseline_id}: quantitative baseline must be runnable"
+                    f"{baseline_id}: comparison baseline must be runnable"
                 )
             if not commands:
                 raise BaselineManifestError(
-                    f"{baseline_id}: quantitative baseline must declare commands"
+                    f"{baseline_id}: comparison baseline must declare commands"
                 )
         limits = baseline["comparability_limits"]
         if not isinstance(limits, list) or not limits:
