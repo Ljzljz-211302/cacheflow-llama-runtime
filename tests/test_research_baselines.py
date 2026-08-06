@@ -39,6 +39,9 @@ class ResearchBaselineTests(unittest.TestCase):
             self.assertIs(baseline["runnable"], True)
             self.assertTrue(baseline["commands"])
             self.assertEqual(baseline["license"], "MIT")
+        for baseline in manifest["baselines"]:
+            if baseline["kind"] == "external":
+                self.assertEqual(len(baseline["audit_revision"]), 40)
 
     def test_related_work_cannot_masquerade_as_local_quantitative_baseline(self) -> None:
         manifest = {
@@ -50,10 +53,11 @@ class ResearchBaselineTests(unittest.TestCase):
                     "id": "external-system",
                     "kind": "external",
                     "comparison_class": "quantitative",
-                    "runnable": False,
+                    "runnable": True,
                     "source": "https://example.invalid",
+                    "audit_revision": "b" * 40,
                     "license": "MIT",
-                    "commands": [],
+                    "commands": ["run-external-system"],
                     "comparability_limits": ["different runtime"],
                 }
             ],
@@ -62,7 +66,8 @@ class ResearchBaselineTests(unittest.TestCase):
             path = Path(directory) / "manifest.json"
             path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(
-                BaselineManifestError, "quantitative baseline must be runnable"
+                BaselineManifestError,
+                "external system cannot be a local quantitative baseline",
             ):
                 load_baseline_manifest(path)
 

@@ -26,6 +26,8 @@ _REQUIRED_BASELINE_FIELDS = {
     "commands",
     "comparability_limits",
 }
+_ALLOWED_KINDS = {"local", "external"}
+_ALLOWED_COMPARISON_CLASSES = {"quantitative", "conditional-kernel", "related-work"}
 
 
 def load_baseline_manifest(path: Path) -> dict[str, Any]:
@@ -66,10 +68,31 @@ def load_baseline_manifest(path: Path) -> dict[str, Any]:
             raise BaselineManifestError(f"duplicate baseline id: {baseline_id}")
         seen.add(baseline_id)
 
+        kind = baseline["kind"]
+        comparison_class = baseline["comparison_class"]
+        if kind not in _ALLOWED_KINDS:
+            raise BaselineManifestError(f"{baseline_id}: unknown baseline kind: {kind}")
+        if comparison_class not in _ALLOWED_COMPARISON_CLASSES:
+            raise BaselineManifestError(
+                f"{baseline_id}: unknown comparison class: {comparison_class}"
+            )
+        if not isinstance(baseline["runnable"], bool):
+            raise BaselineManifestError(f"{baseline_id}: runnable must be boolean")
+        if kind == "external" and comparison_class == "quantitative":
+            raise BaselineManifestError(
+                f"{baseline_id}: external system cannot be a local quantitative baseline"
+            )
+        if kind == "external" and not re.fullmatch(
+            r"[0-9a-f]{40}", baseline.get("audit_revision", "")
+        ):
+            raise BaselineManifestError(
+                f"{baseline_id}: external implementation must pin audit_revision"
+            )
+
         commands = baseline["commands"]
         if not isinstance(commands, list):
             raise BaselineManifestError(f"{baseline_id}: commands must be a list")
-        if baseline["comparison_class"] == "quantitative":
+        if comparison_class == "quantitative":
             if baseline["runnable"] is not True:
                 raise BaselineManifestError(
                     f"{baseline_id}: quantitative baseline must be runnable"
@@ -85,4 +108,3 @@ def load_baseline_manifest(path: Path) -> dict[str, Any]:
             )
 
     return manifest
-
