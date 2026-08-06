@@ -1427,10 +1427,10 @@ index e284a58..17d7748 100644
  
 diff --git a/tests/bench-kv-block-cuda.cu b/tests/bench-kv-block-cuda.cu
 new file mode 100644
-index 0000000..fbddd88
+index 0000000..f2f4e62
 --- /dev/null
 +++ b/tests/bench-kv-block-cuda.cu
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,285 @@
 +#include "server-kv-block-backend.h"
 +#include "llama-kv-remap-cuda.cuh"
 +
@@ -1440,8 +1440,15 @@ index 0000000..fbddd88
 +#include <cstdint>
 +#include <cstdio>
 +#include <cstdlib>
++#include <cstring>
 +#include <random>
 +#include <vector>
++
++// Some redistributable CUDA developer packages omit cuda_profiler_api.h even
++// though cudart exports these stable APIs. Keep the declarations local so the
++// profiling-only benchmark mode also builds in that supported package layout.
++extern "C" cudaError_t CUDARTAPI cudaProfilerStart(void);
++extern "C" cudaError_t CUDARTAPI cudaProfilerStop(void);
 +
 +namespace {
 +
@@ -1494,7 +1501,56 @@ index 0000000..fbddd88
 +
 +} // namespace
 +
-+int main() {
++int main(int argc, char ** argv) {
++    bool profile = false;
++    size_t profile_blocks = 0;
++    int profile_repetitions = 5;
++    bool profile_paired = false;
++    bool profile_misaligned = false;
++    llama_kv_remap_mode profile_mode = llama_kv_remap_mode::vectorized;
++    const char * profile_method = "vectorized_gather_scatter";
++    for (int argument = 1; argument < argc; ++argument) {
++        if (std::strcmp(argv[argument], "--profile") == 0) {
++            profile = true;
++        } else if (std::strcmp(argv[argument], "--blocks") == 0 && argument + 1 < argc) {
++            profile_blocks = std::strtoull(argv[++argument], nullptr, 10);
++        } else if (std::strcmp(argv[argument], "--repetitions") == 0 && argument + 1 < argc) {
++            profile_repetitions = std::atoi(argv[++argument]);
++        } else if (std::strcmp(argv[argument], "--method") == 0 && argument + 1 < argc) {
++            const char * method = argv[++argument];
++            if (std::strcmp(method, "scalar") == 0) {
++                profile_mode = llama_kv_remap_mode::scalar;
++                profile_method = "scalar_gather_scatter";
++            } else if (std::strcmp(method, "paired") == 0) {
++                profile_paired = true;
++            } else if (std::strcmp(method, "vectorized") != 0) {
++                std::fprintf(stderr, "unsupported profile method: %s\n", method);
++                return 2;
++            }
++        } else if (std::strcmp(argv[argument], "--layout") == 0 && argument + 1 < argc) {
++            const char * layout_name = argv[++argument];
++            if (std::strcmp(layout_name, "misaligned") == 0) {
++                profile_misaligned = true;
++            } else if (std::strcmp(layout_name, "aligned") != 0) {
++                std::fprintf(stderr, "unsupported profile layout: %s\n", layout_name);
++                return 2;
++            }
++        } else {
++            std::fprintf(stderr, "unsupported benchmark argument: %s\n", argv[argument]);
++            return 2;
++        }
++    }
++    if (profile &&
++            (profile_blocks != 1 && profile_blocks != 4 &&
++             profile_blocks != 16 && profile_blocks != 32)) {
++        std::fprintf(stderr, "--profile requires --blocks in {1,4,16,32}\n");
++        return 2;
++    }
++    if (profile && profile_repetitions < 1) {
++        std::fprintf(stderr, "--repetitions must be positive\n");
++        return 2;
++    }
++
 +    constexpr size_t capacity = 96;
 +    const server_kv_tensor_layout layout = {
 +        32, 8, 128, 16, server_kv_element_type::fp16,
@@ -1510,10 +1566,87 @@ index 0000000..fbddd88
 +    check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "create benchmark stream");
 +    check(cudaMalloc((void **) &k, plane_elements * sizeof(uint16_t)), "allocate K");
 +    check(cudaMalloc((void **) &v, plane_elements * sizeof(uint16_t)), "allocate V");
-+    check(cudaMalloc((void **) &staging, 64 * elements * sizeof(uint16_t)), "allocate staging");
++    check(cudaMalloc((void **) &staging,
++            (64 * elements + LLAMA_KV_REMAP_VECTOR_ELEMENTS) * sizeof(uint16_t)),
++            "allocate staging");
 +    check(cudaMalloc((void **) &device_copies, 64 * sizeof(llama_kv_remap_copy)), "allocate descriptors");
 +    check(cudaMemset(k, 0x2a, plane_elements * sizeof(uint16_t)), "initialize K");
 +    check(cudaMemset(v, 0x5c, plane_elements * sizeof(uint16_t)), "initialize V");
++
++    if (profile) {
++        std::vector<llama_kv_remap_copy> copies;
++        for (size_t i = 0; i < profile_blocks; ++i) {
++            const size_t source = i;
++            const size_t destination = 48 + i;
++            const size_t offset = profile_misaligned ? 1 : 0;
++            const size_t copied_elements = profile_misaligned ? elements - 1 : elements;
++            copies.push_back({ k + source * elements + offset,
++                    k + destination * elements + offset,
++                    2 * i * elements + offset, copied_elements });
++            copies.push_back({ v + source * elements + offset,
++                    v + destination * elements + offset,
++                    (2 * i + 1) * elements + offset, copied_elements });
++        }
++        // Warm-up is deliberately outside cudaProfilerStart/Stop so NCU/NSYS capture
++        // only the named mechanism sample. These replay-instrumented timings are not
++        // used as the no-profiler latency result.
++        if (profile_paired) {
++            (void) measure_batch(staging, device_copies, copies, elements, stream,
++                    llama_kv_remap_mode::scalar);
++            (void) measure_batch(staging, device_copies, copies, elements, stream,
++                    llama_kv_remap_mode::vectorized);
++        } else {
++            (void) measure_batch(staging, device_copies, copies, elements, stream, profile_mode);
++        }
++        check(cudaProfilerStart(), "start profiler capture range");
++        std::puts("phase,method,blocks,trial,order_in_pair,random_seed,host_enqueue_ms,gpu_ms,end_to_end_ms,bytes");
++        std::mt19937 profile_order_rng(20260806 + (unsigned) profile_blocks +
++                (profile_misaligned ? 1000u : 0u));
++        std::bernoulli_distribution profile_scalar_first(0.5);
++        for (int trial = 0; trial < profile_repetitions; ++trial) {
++            if (profile_paired) {
++                timings scalar{};
++                timings vectorized{};
++                const bool scalar_first = profile_scalar_first(profile_order_rng);
++                if (scalar_first) {
++                    scalar = measure_batch(staging, device_copies, copies, elements, stream,
++                            llama_kv_remap_mode::scalar);
++                    vectorized = measure_batch(staging, device_copies, copies, elements, stream,
++                            llama_kv_remap_mode::vectorized);
++                } else {
++                    vectorized = measure_batch(staging, device_copies, copies, elements, stream,
++                            llama_kv_remap_mode::vectorized);
++                    scalar = measure_batch(staging, device_copies, copies, elements, stream,
++                            llama_kv_remap_mode::scalar);
++                }
++                const size_t bytes = profile_blocks * layout.bytes_per_block() -
++                        (profile_misaligned ? 4 * profile_blocks : 0);
++                const unsigned random_seed = 20260806 + (unsigned) profile_blocks +
++                        (profile_misaligned ? 1000u : 0u);
++                std::printf("profile,scalar_gather_scatter,%zu,%d,%d,%u,%.6f,%.6f,%.6f,%zu\n",
++                        profile_blocks, trial, scalar_first ? 0 : 1, random_seed,
++                        scalar.host_enqueue_ms, scalar.gpu_ms, scalar.end_to_end_ms, bytes);
++                std::printf("profile,vectorized_gather_scatter,%zu,%d,%d,%u,%.6f,%.6f,%.6f,%zu\n",
++                        profile_blocks, trial, scalar_first ? 1 : 0, random_seed,
++                        vectorized.host_enqueue_ms, vectorized.gpu_ms,
++                        vectorized.end_to_end_ms, bytes);
++                continue;
++            }
++            const timings measured = measure_batch(
++                    staging, device_copies, copies, elements, stream, profile_mode);
++            std::printf("profile,%s,%zu,%d,0,20260806,%.6f,%.6f,%.6f,%zu\n",
++                    profile_method, profile_blocks, trial,
++                    measured.host_enqueue_ms, measured.gpu_ms, measured.end_to_end_ms,
++                    profile_blocks * layout.bytes_per_block());
++        }
++        check(cudaProfilerStop(), "stop profiler capture range");
++        cudaFree(device_copies);
++        cudaFree(staging);
++        cudaFree(v);
++        cudaFree(k);
++        cudaStreamDestroy(stream);
++        return 0;
++    }
 +
 +    std::mt19937 order_rng(20260806);
 +    std::bernoulli_distribution scalar_first_distribution(0.5);

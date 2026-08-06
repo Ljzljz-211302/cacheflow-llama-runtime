@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "protocol_version": "1.0.0",
+  "preregistered_at_utc": "2026-08-06T15:18:00Z",
+  "claim": "H2-copy-bottleneck",
+  "random_seed_base": 20260806,
+  "benchmark_binary": "build/patched-cuda-ninja3/bin/bench-kv-block-cuda.exe",
+  "no_profiler": {
+    "paired_trials_per_regime": 20,
+    "methods": ["scalar_gather_scatter", "vectorized_gather_scatter"],
+    "primary_timing": "synchronized_kernel_ms",
+    "end_to_end_timing": "end_to_end_ms",
+    "confidence_level": 0.95,
+    "bootstrap_resamples": 10000,
+    "material_improvement_percent": 10.0,
+    "maximum_regression_percent": 3.0
+  },
+  "profiler": {
+    "repetitions_per_regime": 5,
+    "kernel_patterns": {
+      "scalar": ["llama_kv_remap_gather_scalar", "llama_kv_remap_scatter_scalar"],
+      "vectorized": ["llama_kv_remap_gather_vector", "llama_kv_remap_scatter_vector"]
+    },
+    "nsys": {
+      "trace_linux": "cuda,nvtx,osrt",
+      "trace_windows": "cuda,nvtx",
+      "capture_range": "cudaProfilerApi",
+      "export": "sqlite"
+    },
+    "ncu": {
+      "replay_mode": "kernel",
+      "cache_control": "all",
+      "clock_control": "base",
+      "metrics": [
+        "gpu__time_duration.sum",
+        "dram__bytes_read.sum",
+        "dram__bytes_write.sum",
+        "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+        "lts__t_sector_hit_rate.pct",
+        "sm__warps_active.avg.pct_of_peak_sustained_active"
+      ],
+      "performance_counter_permission_required": true
+    }
+  },
+  "regimes": [
+    {
+      "id": "aligned-small",
+      "blocks": 1,
+      "layout": "aligned",
+      "role": "launch-and-fixed-work candidate"
+    },
+    {
+      "id": "aligned-transition",
+      "blocks": 16,
+      "layout": "aligned",
+      "role": "transition candidate"
+    },
+    {
+      "id": "aligned-large",
+      "blocks": 32,
+      "layout": "aligned",
+      "role": "neutral-or-bandwidth candidate"
+    },
+    {
+      "id": "misaligned-small",
+      "blocks": 1,
+      "layout": "misaligned",
+      "role": "layout counterexample candidate"
+    }
+  ],
+  "claim_rules": {
+    "profiler_latency_is_primary": false,
+    "memory_bound_requires_ncu_dram_metric": true,
+    "occupancy_claim_requires_ncu_occupancy_metric": true,
+    "layout_claim_requires_aligned_and_misaligned_no_profiler_pairs": true,
+    "every_mechanism_claim_requires_raw_trace_and_no_profiler_effect": true,
+    "negative_and_neutral_results_are_retained": true
+  }
+}

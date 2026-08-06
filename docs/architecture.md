@@ -1144,7 +1144,11 @@ CLI 支持 `--benefit-policy upstream|always|rule|learned` 及样本、探索、
 3. 自研 KV kernel launch/copy byte、CUDA Event 时间与 100 ms `nvidia-smi` busy/idle 样本确认 CUDA mediator；
 4. production Engine Chrome trace 与 SSE TTFT 确认系统结果。
 
-最终 always 相对 upstream 的配对中位差为 CacheFlow 决策 +13、prefill chunk +23、prefill token -354、自研 KV kernel launch +2、KV copy +20,066,300 B、CUDA Event +0.808 ms、GPU busy 与最大 idle gap中位差不变、Engine execute 汇总 -11,446 us、TTFT P95 +85.61 ms。总 execute 时间下降而请求尾延迟恶化，说明更多分块和不同批次/请求顺序会改变等待结构，不能由单一 kernel、copy 指标或 phase 汇总代替请求级结果；100 ms GPU busy 只是辅助信号。门禁要求存在调度干预、CUDA mediator 与至少 5 ms 的 material TTFT effect；完整 GPU samples、Engine events 和相关 Prometheus snapshot 保存在可提交的 `results/cuda_causal_profile_evidence.json`。当前机器未安装 Nsight Systems/Compute，因此不声称完整 kernel census、occupancy 或 roofline。
+最终 always 相对 upstream 的配对中位差为 CacheFlow 决策 +13、prefill chunk +23、prefill token -354、自研 KV kernel launch +2、KV copy +20,066,300 B、CUDA Event +0.808 ms、GPU busy 与最大 idle gap中位差不变、Engine execute 汇总 -11,446 us、TTFT P95 +85.61 ms。总 execute 时间下降而请求尾延迟恶化，说明更多分块和不同批次/请求顺序会改变等待结构，不能由单一 kernel、copy 指标或 phase 汇总代替请求级结果；100 ms GPU busy 只是辅助信号。门禁要求存在调度干预、CUDA mediator 与至少 5 ms 的 material TTFT effect；完整 GPU samples、Engine events 和相关 Prometheus snapshot 保存在可提交的 `results/cuda_causal_profile_evidence.json`。
+
+Issue #4 在这条服务因果链下新增 H2 算子机制切片。`bench-kv-block-cuda --profile` 把 warm-up 放在 `cudaProfilerStart/Stop` 之外，并支持 blocks、aligned/misaligned layout、scalar/vector/paired 和固定 repetitions；默认确认性 H1 输出完全不变。`run_cuda_profile_experiment.py` 对四个预注册 regime 先采 20 个无 profiler 随机化 pair，再采 5 个 profiler pair；NSYS native report 导出 SQLite，由 `cuda_profile_evidence.py` 解析 CUPTI kernel、memcpy 与 runtime synchronization。NCU raw CSV 解析器只接收自研 KV kernel 的锁定 metrics，replay wall time 永不进入 latency 主表。
+
+证据所有权分为三层：无 profiler trial 拥有效应量与 paired bootstrap CI；NSYS timeline 拥有 launch/copy/synchronization 因果顺序；NCU 只有在 DRAM/L2/occupancy metrics 全部实际采集后才拥有 hardware-counter 解释。本机 NSYS trace 可运行；当前 NCU 因 driver compatibility 与 `ERR_NVGPUCTRPERM` 不能取硬件计数器，因此正式 limited report 必须自动禁止 memory-bound、roofline、achieved occupancy 和 hardware DRAM byte 主张，而不是用逻辑 payload throughput 代替。完整边界与复现命令见 `docs/research/cuda-profiling-causal-chain.md`。
 
 ## 22. 生产生命周期切片：在线策略跨重启恢复
 
