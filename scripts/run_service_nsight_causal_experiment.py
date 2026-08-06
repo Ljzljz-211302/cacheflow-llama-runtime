@@ -67,12 +67,21 @@ def render_report(
     ]
     for trial, ttft, execute in zip(trial_ids, ttft_deltas, execute_deltas):
         lines.append(f"| {trial} | {ttft:+.3f} | {execute:+.0f} |")
+    median_execute = statistics.median(execute_deltas)
+    outcome_interpretation = (
+        "This run reproduces the sign-reversal counterexample: TTFT worsened even while "
+        "aggregate Engine execute time fell."
+        if median_execute < 0
+        else "In this run TTFT worsened together with aggregate Engine execute time; it "
+        "closes the scheduler/action/CUDA/request linkage but does not reproduce the earlier "
+        "execute-time sign reversal."
+    )
     lines.extend(
         [
             "",
             f"Paired median TTFT delta: {statistics.median(ttft_deltas):+.3f} ms; "
             f"observed range [{min(ttft_deltas):+.3f}, {max(ttft_deltas):+.3f}] ms. "
-            f"Paired median Engine execute delta: {statistics.median(execute_deltas):+.0f} us. "
+            f"Paired median Engine execute delta: {median_execute:+.0f} us. "
             "With only three pairs, the range is reported as uncertainty rather than a "
             "high-confidence population interval.",
             "",
@@ -89,10 +98,8 @@ def render_report(
             "For every process, PID-filtered NSYS custom-kernel counts exactly equal the "
             "runtime Prometheus counter. `causal-links.json` is the machine-readable join.",
             "",
-            "This evidence supports a bounded counterexample: changed scheduling and CUDA KV "
-            "work can worsen TTFT even when aggregate Engine execute time falls. It does not "
-            "establish a universal policy effect, and it does not provide NCU occupancy/DRAM "
-            "counters.",
+            outcome_interpretation + " The evidence does not establish a universal policy "
+            "effect, and it does not provide NCU occupancy/DRAM counters.",
             "",
         ]
     )
