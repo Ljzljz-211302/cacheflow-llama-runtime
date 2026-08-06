@@ -69,3 +69,9 @@ _Avoid_: 强化学习策略（当前实现不是 RL）。
 研究实验中预先固定的对照实现或机制，必须记录源码版本、许可、模型与 KV 布局、硬件假设、构建/运行入口和可比性边界。`quantitative` 仅表示可在当前锁定环境中进行单变量定量比较；`conditional-kernel` 需要先满足布局和正确性条件；`related-work` 只用于解释设计，不进入本项目的性能主表。
 
 _Avoid_: 把不同模型格式、运行时、调度器或硬件上的论文数字称为 baseline；把尚未在本机通过正确性门禁的外部实现称为 quantitative baseline。
+
+## Research Claim
+
+研究章程中可被实验推翻的主张。每条 Research Claim 必须显式记录自变量、因变量、混杂因素、Research Baseline、预期机制、证伪条件、证据来源、适用边界和负结果处理，并区分 `existing-evidence` 与 `prospective`。
+
+_Avoid_: objective（只表达目标而不要求可证伪）；把 prospective hypothesis 写成已经获得的 result。

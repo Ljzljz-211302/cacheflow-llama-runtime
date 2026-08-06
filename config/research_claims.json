@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "charter_version": "1.0.0",
+  "research_program": "Copy-aware Paged KV management and adaptive execution for commodity single-GPU llama.cpp serving",
+  "claims": [
+    {
+      "id": "H1-vector-remap",
+      "question": "When does 128-bit vectorization reduce the cost of snapshot-preserving KV Remap?",
+      "hypothesis": "With identical descriptors and snapshot semantics, uint4 Gather/Scatter reduces GPU time relative to scalar Remap for aligned FP16 KV, with the largest relative effect at small block counts and diminishing benefit as memory traffic dominates.",
+      "status": "existing-evidence",
+      "independent_variables": [
+        "scalar versus uint4 Remap",
+        "remapped block count: 1, 4, 16, 32",
+        "alignment and scalar-tail fraction"
+      ],
+      "dependent_metrics": [
+        "paired CUDA-event GPU milliseconds",
+        "paired end-to-end operation milliseconds",
+        "vectorized and scalar-fallback bytes",
+        "correctness and sanitizer failures"
+      ],
+      "confounders": [
+        "GPU clock, temperature, and WDDM scheduling",
+        "fixed execution order",
+        "different mappings or staging allocation",
+        "warm-up and synchronization placement"
+      ],
+      "baselines": ["scalar-remap", "vector-remap"],
+      "mechanism": "Each aligned thread moves eight FP16 elements through one uint4 load/store, reducing descriptor-loop and instruction overhead; as transfers grow, bandwidth and staging traffic bound the attainable gain.",
+      "falsification": [
+        "Any preregistered block count has paired median GPU regression above 3%.",
+        "No preregistered block count reaches 10% paired median GPU improvement.",
+        "The vector path changes output, violates snapshot semantics, or produces sanitizer errors.",
+        "Production application evidence records no vectorized bytes while claiming that the path is used."
+      ],
+      "evidence_sources": [
+        "results/cuda-kv-transport-summary.json",
+        "results/raw/cuda-kv-transport.csv",
+        "results/user-application-journey.json",
+        "docs/research/primary-source-foundations.md"
+      ],
+      "observed_results": [
+        "Twenty paired alternating-order trials measured 53.33%, 48.89%, 3.13%, and 1.87% median GPU improvement for 1, 4, 16, and 32 blocks.",
+        "The real application journey recorded 5,603,330 vectorized Remap bytes.",
+        "These results are operator-level evidence and do not establish end-to-end serving acceleration."
+      ],
+      "scope_limits": [
+        "RTX 4050 Laptop GPU, sm_89, Windows WDDM",
+        "FP16 KV with 32 layers, 8 KV heads, head dimension 128, 16-token blocks",
+        "KV movement operator only; not Paged Decode Attention"
+      ],
+      "negative_result_policy": "Retain regressions by block count, alignment, and fallback fraction; do not average them into a positive headline."
+    },
+    {
+      "id": "H2-copy-bottleneck",
+      "question": "Under which workload and layout regimes does explicit KV movement materially affect decode service outcomes?",
+      "hypothesis": "Explicit KV movement becomes material as moved bytes, fragmentation, shared-prefix COW, and memory pressure increase, but scheduler-induced queueing can dominate or reverse the operator-level effect.",
+      "status": "prospective",
+      "independent_variables": [
+        "context length and moved KV bytes",
+        "fragmentation and overlap class",
+        "prefix sharing and COW frequency",
+        "batch shape, arrival process, and memory pressure"
+      ],
+      "dependent_metrics": [
+        "KV kernel and copy time",
+        "launch count and effective bandwidth",
+        "TTFT, TPOT/TBT, queue latency, request P95, and throughput",
+        "resident sequence capacity and fallback count"
+      ],
+      "confounders": [
+        "prefill chunking and request order",
+        "model graph and non-KV kernels",
+        "GPU power, clock, and thermal state",
+        "process warm-up and CUDA synchronization"
+      ],
+      "baselines": ["upstream", "direct-copy", "scalar-remap", "vector-remap"],
+      "mechanism": "More explicit movement consumes device bandwidth and launches, while fragmentation and snapshot semantics determine whether Direct is legal; request scheduling can amplify or hide this cost through queue structure.",
+      "falsification": [
+        "Profiler evidence shows KV movement is immaterial in every preregistered high-copy or high-pressure regime.",
+        "Reducing movement does not change kernel time, admissible capacity, or request outcomes beyond uncertainty in any regime.",
+        "Apparent request gains occur without a corresponding scheduler or CUDA mediator."
+      ],
+      "evidence_sources": [
+        "docs/research/primary-source-foundations.md",
+        "results/cuda_causal_profile_evidence.json",
+        "https://docs.nvidia.com/nsight-compute/NsightCompute/index.html"
+      ],
+      "observed_results": [],
+      "scope_limits": [
+        "Single RTX 4050 Laptop GPU",
+        "Qwen2.5-0.5B-Instruct serving slice",
+        "No occupancy, roofline, or memory-bound claim until Nsight evidence exists"
+      ],
+      "negative_result_policy": "Publish regimes where non-KV compute or queueing dominates and narrow the research question instead of relabeling noise as a gain."
+    },
+    {
+      "id": "H3-paged-decode-frontier",
+      "question": "When is restricted Paged Decode Attention preferable to Direct or explicit KV Remap?",
+      "hypothesis": "Direct page-table reads can avoid materialization bytes and improve capacity or latency only beyond a context, fragmentation, or reuse frontier; indirect addressing and online-softmax overhead may make it slower for short or contiguous cases.",
+      "status": "prospective",
+      "independent_variables": [
+        "Direct, Remap, or Paged Decode action",
+        "context length, page size, and physical fragmentation",
+        "batch size and GQA shape",
+        "prefix reuse and resident sequence count"
+      ],
+      "dependent_metrics": [
+        "attention output error versus contiguous oracle",
+        "CUDA-event kernel time and device bytes",
+        "peak KV memory and admissible batch",
+        "TTFT, TPOT/TBT, request P95, and throughput"
+      ],
+      "confounders": [
+        "different attention math, masking, or precision",
+        "layout conversion outside the timed region",
+        "graph capture and kernel warm-up",
+        "scheduler and allocator differences"
+      ],
+      "baselines": ["direct-copy", "scalar-remap", "vector-remap"],
+      "mechanism": "Paged Decode removes full-cache materialization but adds block-table lookup, irregular memory access, masking, online softmax, and reduction costs; the winning action depends on avoided bytes and available concurrency.",
+      "falsification": [
+        "The restricted kernel fails the numerical oracle or memory-safety checks.",
+        "It is neither non-inferior in latency nor beneficial in resident capacity in every preregistered regime.",
+        "Any measured gain disappears when layout conversion and warm-up are controlled.",
+        "The implementation silently falls back while metrics claim Paged execution."
+      ],
+      "evidence_sources": [
+        "https://arxiv.org/abs/2309.06180",
+        "https://arxiv.org/abs/2205.14135",
+        "docs/research/primary-source-foundations.md"
+      ],
+      "observed_results": [],
+      "scope_limits": [
+        "Qwen2.5, FP16 KV, GQA, head dimension 128",
+        "Single-token decode and 16-token pages",
+        "Single consumer NVIDIA GPU; unsupported shapes must fall back"
+      ],
+      "negative_result_policy": "Report the losing regions and capacity/latency trade-off; a slower kernel with a measured capacity benefit is not rewritten as a latency win."
+    },
+    {
+      "id": "H4-adaptive-action-policy",
+      "question": "Can an explainable cost model safely select among KV execution actions better than a fixed rule?",
+      "hypothesis": "A model using measurable movement, fragmentation, reuse, memory-pressure, and compute features can reduce paired regret relative to the fixed rule while bounding wrong enables and decision overhead.",
+      "status": "prospective",
+      "independent_variables": [
+        "fixed rule versus analytical, table-driven, learned, or hybrid policy",
+        "workload distribution and distribution shift",
+        "available action set and safety thresholds"
+      ],
+      "dependent_metrics": [
+        "paired oracle regret",
+        "paired upstream regression",
+        "wrong-enable and fallback rates",
+        "policy decision overhead",
+        "TTFT, TPOT/TBT, request P95, throughput, and memory pressure"
+      ],
+      "confounders": [
+        "trace leakage between training and evaluation",
+        "exploration counted as exploitation",
+        "changing action availability",
+        "backend and context-bucket distribution"
+      ],
+      "baselines": ["fixed-rule", "upstream", "direct-copy", "vector-remap"],
+      "mechanism": "No single action minimizes cost across copy legality, bytes, fragmentation, memory pressure, and decode work; an uncertainty-aware policy should choose only when predicted benefit exceeds risk and overhead.",
+      "falsification": [
+        "The policy exceeds preregistered paired-regret or upstream-regression gates.",
+        "Decision overhead removes the selected action's benefit.",
+        "The policy continues harmful actions after a registered distribution shift.",
+        "A fixed rule matches or beats it across all held-out regimes within uncertainty."
+      ],
+      "evidence_sources": [
+        "results/benefit_gating_trials.csv",
+        "docs/experiment-limitations.md",
+        "docs/research/primary-source-foundations.md"
+      ],
+      "observed_results": [],
+      "scope_limits": [
+        "The present Ridge Benefit Gate selects scheduling plans, not the future five-action KV policy.",
+        "No reinforcement-learning claim",
+        "Held-out evaluation is restricted to the available single-GPU workload matrix"
+      ],
+      "negative_result_policy": "Keep the fixed rule when it is statistically indistinguishable or safer; publish misprediction regimes and fallback behavior."
+    },
+    {
+      "id": "H5-policy-causal-chain",
+      "question": "Can a scheduling decision change CUDA work yet harm request latency despite reducing aggregate engine execution time?",
+      "hypothesis": "Policy interventions affect request outcomes through scheduler shape and CUDA KV work, and phase aggregates are insufficient because changed batching and queue order can reverse TTFT.",
+      "status": "existing-evidence",
+      "independent_variables": [
+        "forced upstream versus forced CacheFlow policy",
+        "paired fresh-process trial order"
+      ],
+      "dependent_metrics": [
+        "policy decisions and prefill chunks/tokens",
+        "KV launches, copied bytes, and CUDA-event time",
+        "engine execute duration",
+        "request TTFT P95"
+      ],
+      "confounders": [
+        "unpaired process order",
+        "GPU activity sampling resolution",
+        "request order and batching",
+        "temperature and background load"
+      ],
+      "baselines": ["upstream", "fixed-rule", "vector-remap"],
+      "mechanism": "More chunks and changed batch order alter queue waiting while adding KV work; aggregate execute duration omits how work is distributed across requests.",
+      "falsification": [
+        "The intervention changes no scheduling decision.",
+        "Scheduling changes occur without a material CUDA mediator.",
+        "CUDA changes occur without a material request-level outcome.",
+        "The effect vanishes under paired trials and is attributable only to sampling noise."
+      ],
+      "evidence_sources": [
+        "results/cuda_causal_profile_evidence.json",
+        "results/cuda_causal_profile_summary.json",
+        "docs/acceptance-report.md"
+      ],
+      "observed_results": [
+        "Three paired Latin interventions recorded +13 CacheFlow decisions, +23 prefill chunks, -354 prefill tokens, +2 custom KV launches, +20,066,300 copied bytes, and +0.808 ms CUDA-event time.",
+        "Engine execute aggregate decreased by 11,446 us while TTFT P95 worsened by 85.61 ms.",
+        "The current 100 ms activity sampling is not an Nsight kernel census."
+      ],
+      "scope_limits": [
+        "Three paired trials on one laptop GPU",
+        "Causal chain for the tested forced-policy workload only",
+        "No occupancy, roofline, or universal scheduler conclusion"
+      ],
+      "negative_result_policy": "Treat harmful TTFT as a primary result and require future policies to explain or avoid it; never substitute phase aggregates for request metrics."
+    }
+  ]
+}
