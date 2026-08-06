@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "experiment_id": "h1-vector-remap",
+  "claim_id": "H1-vector-remap",
+  "protocol_version": "1.0.0",
+  "protocol_sha256": "607e7d337fa932836694a8c0fafcb9c29ebbacfca02b78ff8263339d5394962b",
+  "claims_sha256": "a72023b556983a0c36c61806fa0590771b3729533895029cf3b892a114537c9f",
+  "source_sha256": "dc6f1a2f034485d60aa9d2a1610891b4db65a56b06c2bc2cd239deda6d06e942",
+  "code_revision": "ad7673dedb2e8f0e35c73b44d84ffbb1904f2b84",
+  "vendor_revision": "6de5384712818bf855d60c83f3b721395d9d6a4c",
+  "upstream_revision": "acd79d603cb2e1c84c0886137b80f1ad649b6857",
+  "patch_sha256": "835503bd725d461b08ce95256f1c895c379a50e9f4b2bead1de15584271af040",
+  "repository_dirty_before_run": false,
+  "vendor_dirty_before_run": false,
+  "benchmark_binary_sha256": "4b41787c370476cec27000cbc52af897da970c4b7bb395809732e8e9f2fe0046",
+  "captured_at_utc": "2026-08-06T14:58:18.082791+00:00",
+  "execution_mode": "execute",
+  "invocation_command": [
+    "C:\\Users\\hp\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",
+    "scripts/run_research_experiment.py",
+    "--experiment",
+    "h1-vector-remap",
+    "--output-dir",
+    "results/research/h1-vector-remap-v1.0.0"
+  ],
+  "runner_command": [
+    "python",
+    "scripts/run_cuda_kv_benchmark.py"
+  ],
+  "source_path": "D:\\llama\\results\\raw\\cuda-kv-transport.csv",
+  "output_dir": "results\\research\\h1-vector-remap-v1.0.0",
+  "correctness_evidence": {
+    "command": [
+      "powershell",
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      "scripts/build_cuda_kv.ps1",
+      "-Sanitize"
+    ],
+    "exit_code": 0,
+    "passed": true,
+    "stdout_sha256": "75062bd1b17551e8a03f12cbe2c21dffa38b067a4e67e780f1a42291c6e53e0e",
+    "stderr_sha256": "12a98cb5a1f642fa455f7274afb221264cc83bc641f5a32c30ba309ba93f0998",
+    "checks": [
+      "CPU element-wise oracle for snapshot mappings",
+      "guard regions and randomized overlap/cycle mappings",
+      "Compute Sanitizer memcheck and racecheck",
+      "real Qwen tensor swap roundtrip state equality"
+    ]
+  },
+  "environment": {
+    "captured_at_utc": "2026-08-06T14:58:18.135849+00:00",
+    "platform": "Windows-11-10.0.22631-SP0",
+    "python": "3.13.13 (tags/v3.13.13:01104ce, Apr  7 2026, 19:25:48) [MSC v.1944 64 bit (AMD64)]",
+    "nvidia_smi": {
+      "command": [
+        "nvidia-smi",
+        "--query-gpu=uuid,pci.bus_id,name,driver_version,pstate,temperature.gpu,power.draw,power.limit,clocks.current.sm,clocks.current.memory",
+        "--format=csv,noheader,nounits"
+      ],
+      "exit_code": 0,
+      "stdout": "GPU-7a2e7a09-7746-30ff-7142-e810d1164ff5, 00000000:01:00.0, NVIDIA GeForce RTX 4050 Laptop GPU, 561.19, P3, 48, 12.33, [N/A], 2130, 7000",
+      "stderr": ""
+    },
+    "nvcc": {
+      "command": [
+        "D:\\llama\\runtime\\cuda-dev\\Library\\bin\\nvcc.exe",
+        "--version"
+      ],
+      "exit_code": 0,
+      "stdout": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2024 NVIDIA Corporation\nBuilt on Wed_Oct_30_01:18:48_Pacific_Daylight_Time_2024\nCuda compilation tools, release 12.6, V12.6.85\nBuild cuda_12.6.r12.6/compiler.35059454_0",
+      "stderr": ""
+    },
+    "cmake": {
+      "command": [
+        "cmake",
+        "--version"
+      ],
+      "exit_code": 0,
+      "stdout": "cmake version 3.28.2\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake).",
+      "stderr": ""
+    },
+    "controlled_environment": {
+      "CUDA_VISIBLE_DEVICES": null,
+      "CUDA_MODULE_LOADING": null
+    }
+  },
+  "raw_trial_count": 168,
+  "paired_summaries": [
+    {
+      "pairs": 20,
+      "median_improvement_percent": 54.545454545454554,
+      "ci_lower_percent": 52.55681818181819,
+      "ci_upper_percent": 55.029909849186964,
+      "blocks": 1
+    },
+    {
+      "pairs": 20,
+      "median_improvement_percent": 46.32404958169292,
+      "ci_lower_percent": 46.03426566135681,
+      "ci_upper_percent": 47.148970622253074,
+      "blocks": 4
+    },
+    {
+      "pairs": 20,
+      "median_improvement_percent": 5.0800802021640905,
+      "ci_lower_percent": 4.167509372533543,
+      "ci_upper_percent": 5.948778382901136,
+      "blocks": 16
+    },
+    {
+      "pairs": 20,
+      "median_improvement_percent": 2.322048995893615,
+      "ci_lower_percent": 1.959751941468268,
+      "ci_upper_percent": 2.8754233652738224,
+      "blocks": 32
+    }
+  ],
+  "acceptance": {
+    "correctness": true,
+    "non_regression": true,
+    "material_effect": true,
+    "non_increasing_trend": true,
+    "passed": true
+  },
+  "protocol_compliant": true,
+  "violations": []
+}
