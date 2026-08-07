@@ -89,7 +89,7 @@ def start(mode: str, port: int, log: object) -> subprocess.Popen[bytes]:
         "-c", "2048", "-np", "2", "-b", "512", "-ub", "512", "-t", "8", "-ngl", "99",
         "--no-kv-unified", "--cache-ram", "128", "--slot-prompt-similarity", "0.1",
         "--kv-block-runtime", "--kv-block-size", "16", "--kv-action-policy", "fixed",
-        "--metrics", "--no-warmup", "-lv", "2",
+        "--metrics", "--slots", "--no-warmup", "-lv", "2",
     ]
     if mode in {"device_swap", "host_swap"}:
         command.append("--cache-idle-slots")
