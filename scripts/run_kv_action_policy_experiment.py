@@ -276,7 +276,7 @@ def main() -> None:
                 for regime in regimes:
                     observation_order += 1
                     observation_prompt = prompt if regime != "preempted" else (
-                        trace_markers[(trace + 1) % len(trace_markers)] * 4 + prompt[4:]
+                        f"independent-recompute-{trace:02d} " + prompt
                     )
                     value = observe(
                         mode, MODES[mode], trace, observation_prompt, unrelated + " " + regime
