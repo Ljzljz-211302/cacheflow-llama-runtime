@@ -97,6 +97,16 @@ class KvActionEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "differ from runtime evidence"):
             validate_kv_action_rows(tampered, self.protocol)
 
+    def test_canonical_features_must_match_runtime_h0_anchor(self) -> None:
+        tampered = copy.deepcopy(rows())
+        baseline = next(row for row in tampered if row["snapshot_id"] == tampered[0]["snapshot_id"])
+        baseline["action_runtime_model_features"] = list(
+            baseline["action_runtime_model_features"]
+        )
+        baseline["action_runtime_model_features"][0] = 2.0
+        with self.assertRaisesRegex(ValueError, "runtime H0 anchor"):
+            validate_kv_action_rows(tampered, self.protocol)
+
     def test_policy_sync_audit_is_enforceable(self) -> None:
         source = Path("vendor/llama.cpp/tools/server/server-kv-action-policy.cpp")
         audit = audit_kv_action_policy_no_cuda_sync(source)

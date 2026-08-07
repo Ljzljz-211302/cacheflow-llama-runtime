@@ -60,7 +60,7 @@ flowchart LR
 
 服务现在用同一个 fail-closed 接口比较 Direct、CUDA-managed Swap、事务型 host Swap 与 Recompute；Remap/Paged 在缺少完整服务 adapter 时由 capability gate 禁止进入生产选择。策略包含固定 H0、解析 A1、分桶查表 T1 与带置信边界/H0 fallback 的 L1，并通过 Prometheus 分开记录推荐、实际执行和完整动作反馈。
 
-正式 H4 v1.2 replay 正在按收紧后的协议重新生成：生产实测九维特征直接作为反事实共享输入，采集顺序采用预注册的 seeded balanced Latin blocks，置信区间按完整 trace 聚类重采样，CUDA 同步由源码哈希绑定的静态审计门禁验证。v1.0.0 与 v1.1.0 均因后续审计发现的合同缺陷仅保留在 `results/research/superseded/`，不得引用其数值作为正式结果。
+正式 Qwen2.5-0.5B CUDA v1.2 replay 使用 40 个隔离 trace（20 train/20 evaluation），以生产实测九维特征作为共享反事实输入，按 seeded balanced Latin blocks 采集并按完整 trace 聚类 bootstrap。H0/A1/L1 的 median/P95/cumulative regret 均为 `0/1.488/8.986 ms`、harmful 0；L1 未满足置信切换。T1 为 `0/1.488/11.738 ms`、harmful 3/40（7.50%），paired trace-cluster mean-regret delta 95% CI `[-0.0127, 0.1681] ms`，未证明优于 H0。500 万次 choose 的最差 p99 0.600 us、decision/action ratio p99 0.0460%、零 allocation；源码哈希绑定审计确认策略模块零 CUDA sync，raw max 242.700 us 仅作 Windows 抢占诊断。v1.0.0 与 v1.1.0 均仅保留在 `results/research/superseded/`。
 
 ## 一键复现
 

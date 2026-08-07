@@ -201,17 +201,25 @@ def validate_kv_action_rows(rows: list[dict[str, Any]], protocol: dict[str, Any]
     if train_max >= eval_min:
         raise ValueError("KV action evaluation does not occur after training")
     for snapshot_id, group_rows in snapshots.items():
+        reference = group_rows[0]
         actions = [row["action"] for row in group_rows]
         if len(actions) != len(set(actions)) or len(actions) < 2:
             raise ValueError(f"snapshot {snapshot_id} lacks unique paired actions")
         baseline = {row["baseline_action"] for row in group_rows}
         if len(baseline) != 1 or next(iter(baseline)) not in actions:
             raise ValueError(f"snapshot {snapshot_id} has an invalid H0 baseline")
+        baseline_action = next(iter(baseline))
+        baseline_row = next(row for row in group_rows if row["action"] == baseline_action)
+        if [float(value) for value in reference["runtime_model_features"]] != [
+            float(value) for value in baseline_row["action_runtime_model_features"]
+        ]:
+            raise ValueError(
+                f"snapshot {snapshot_id} canonical features differ from its runtime H0 anchor"
+            )
         fixed = (
             "trace_id", "session_id", "prefix_family", "split", "timestamp_order",
             "regime", *FEATURES, *MODEL_FEATURES,
         )
-        reference = group_rows[0]
         if any(any(row[field] != reference[field] for field in fixed) for row in group_rows[1:]):
             raise ValueError(f"snapshot {snapshot_id} changes paired features")
     minimum_pairs = int(protocol["confirmatory"]["minimum_pairs_per_regime"])

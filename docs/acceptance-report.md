@@ -171,6 +171,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 - 算法：H0 固定安全规则、A1 解析模型、T1 分桶查表、L1 置信约束 Ridge 使用相同 snapshot 和完整动作边界；无效/OOD/冷启动/不确定性均 fail closed。
 - 数据隔离：20 个 trace group 按时间顺序切为 12 train / 8 evaluation，session、prefix family 与 trace 均无交叉；16 个 held-out resident/preempted snapshot 采用 paired action observation。
 - v1.0.0 因错误使用 HTTP 往返计时且 L1 合同与生产不一致而被否决，仅保留在 `results/research/superseded/`。v1.1.0 从干净提交 `32c8fe7` 重采集：40 trace 按时间切为 20 train/20 evaluation，resident/preempted 各 20 个 held-out pair。
-- v1.0.0 与 v1.1.0 均在后续审计中发现证据合同缺陷，已移入 superseded 且不得作为验收结果；v1.2.0 正式 CUDA replay 待按共享生产特征、trace-cluster bootstrap 和随机平衡采集协议重新生成。
-- 热路径验收同时要求 5 个 regime、500 万次 choose、零 allocation，并由源码哈希绑定的静态审计证明决策模块不存在 CUDA 同步调用；正式数值以待生成的 v1.2.0 artifact 为准。
+- v1.2.0 正式 CUDA replay 使用共享生产九维特征、seeded balanced Latin blocks 和 trace-cluster bootstrap。H0/A1/L1 的 median/P95/cumulative regret 均为 0/1.488/8.986 ms、harmful 0；L1 未切换。T1 为 0/1.488/11.738 ms、harmful 3/40，paired trace-cluster mean-regret delta 95% CI 为 [-0.0127, 0.1681] ms，未证明优于 H0。v1.0.0 与 v1.1.0 均仅作否决审计记录。
+- 热路径：5 个 regime、500 万次 choose、零 allocation，最差 p99 0.600 us，decision/action ratio p99 0.0460%；源码哈希绑定审计确认决策模块无 CUDA 同步符号或后端 include，raw Windows maximum 242.700 us 保留为 report-only 抢占诊断。
 - 证据所有权：artifact 精确绑定协议/模型哈希、外层实现提交、固定上游及 replay patch、完整文件树；validator 同时验证干净开发提交树或 bootstrap 已应用 patch 树，拒绝额外 vendor 改动，并从 raw rows 重算 H0/A1/T1/L1 与 overhead。

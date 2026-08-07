@@ -1230,6 +1230,6 @@ Remap/Paged 在生产快照中的 capability 为 false；正式 CUDA 证据要�
 
 ### 26.5 正式证据与边界
 
-协议固定 trace/session/prefix-family 分组、时间顺序切分、同 snapshot paired action、H0/A1/T1/L1 和开销门禁。v1.2.0 进一步要求实际服务九维特征作为同一 snapshot 的共享模型输入、预注册 seeded balanced Latin blocks 采集顺序、按 trace 聚类的 10,000 次 bootstrap，以及由源码哈希绑定审计证明决策路径不含 CUDA 同步。v1.0.0 与 v1.1.0 的历史结果均已移入 superseded，v1.2.0 正式结果生成前不引用旧数值。
+协议固定 trace/session/prefix-family 分组、时间顺序切分、同 snapshot paired action、H0/A1/T1/L1 和开销门禁。v1.2.0 使用实际服务九维特征作为同一 snapshot 的共享模型输入、预注册 seeded balanced Latin blocks 采集顺序、按 trace 聚类的 10,000 次 bootstrap，以及源码哈希绑定审计证明决策模块不含 CUDA 同步。40 trace 按时间切为 20 train/20 evaluation；H0/A1/L1 的 median/P95/cumulative regret 均为 0/1.488/8.986 ms、harmful 0，T1 为 0/1.488/11.738 ms、harmful 3/40，其 paired trace-cluster CI [-0.0127, 0.1681] ms 跨 0。L1 未切换，故仍执行 H0。v1.0.0 与 v1.1.0 均已移入 superseded。
 
 硬门禁为 choose p99 不超过 50 us、decision/action ratio p99 不超过 1%、热路径零 allocation、零 CUDA sync。Windows raw wall-clock maximum 原样保留为抢占诊断，不作硬门禁。artifact 绑定协议、模型 SHA-256、外层实现提交、固定上游与 replay patch、完整文件树及逐文件哈希；校验器接受与 patch 等价的干净开发提交树或 bootstrap 后的已应用 patch 工作树，拒绝任何额外 vendor 改动，并从原始 paired rows 重算分析和开销。

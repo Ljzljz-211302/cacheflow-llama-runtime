@@ -82,9 +82,9 @@ Issue #5 的 H3 v1.0.0 已得到受限混合结果：K1 直接分页 kernel 在�
 
 训练/调参 trace 与评估 trace 必须隔离；exploration 不得计作收敛。若固定规则在全部 held-out regime 内与模型无显著差异或更安全，则保留固定规则并报告复杂模型没有价值。
 
-Issue #6 的 v1.0.0 因使用 HTTP 往返计时且离线 Ridge 与生产模型不同而被否决；v1.1.0 又因合成模型输入、非 trace-cluster bootstrap、未预注册平衡采集顺序及不可验证的 CUDA-sync literal 被否决。两版均完整保留但不得引用。v1.2.0 将使用实际服务九维特征作为共享反事实输入，按完整 trace 聚类 bootstrap，并以 seeded balanced Latin blocks 和源码审计形成可复算证据。
+Issue #6 的 v1.0.0 因使用 HTTP 往返计时且离线 Ridge 与生产模型不同而被否决；v1.1.0 又因合成模型输入、非 trace-cluster bootstrap、未预注册平衡采集顺序及不可验证的 CUDA-sync literal 被否决。两版均完整保留但不得引用。v1.2.0 使用实际服务九维特征作为共享反事实输入，按完整 trace 聚类 bootstrap，并以 seeded balanced Latin blocks 和源码审计形成可复算证据。H0/A1/L1 的 median/P95/cumulative regret 均为 0/1.488/8.986 ms、harmful 0；T1 为 0/1.488/11.738 ms、harmful 3/40，paired trace-cluster CI [-0.0127, 0.1681] ms 跨 0。
 
-正式生产动作只包含 Direct、CUDA-managed Swap、transactional host Swap 与 Recompute；Remap/Paged 因缺少完整 adapter 被 capability mask。v1.2.0 的 hash-bound artifact 与正式数值尚待重新生成，生成前不作性能或策略优越性声明。
+正式生产动作只包含 Direct、CUDA-managed Swap、transactional host Swap 与 Recompute；Remap/Paged 因缺少完整 adapter 被 capability mask，Paged 生产 decision 为 0。500 万次 choose 的最差 p99 0.600 us、decision/action ratio p99 0.0460%、零 allocation；源码哈希绑定审计确认策略模块零 CUDA sync，raw max 242.700 us 只作抢占诊断。hash-bound artifact 位于 `results/research/h4-kv-action-v1.2.0/`。
 
 ## 7. H5：已观察到的反向因果链
 
