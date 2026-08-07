@@ -105,7 +105,12 @@ class KvActionEvidenceTests(unittest.TestCase):
             artifact = self._copy_formal_artifact(Path(temporary))
             rows_path = artifact / "paired-actions.jsonl"
             rows = [json.loads(line) for line in rows_path.read_text(encoding="utf-8").splitlines()]
-            rows[0]["observed_cost_ms"] = float(rows[0]["observed_cost_ms"]) + 1.0
+            evaluation_index = next(
+                index for index, row in enumerate(rows) if row["split"] == "evaluation"
+            )
+            rows[evaluation_index]["observed_cost_ms"] = (
+                float(rows[evaluation_index]["observed_cost_ms"]) + 1000.0
+            )
             rows_path.write_text(
                 "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
             )

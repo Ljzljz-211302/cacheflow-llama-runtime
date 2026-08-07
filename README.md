@@ -2,7 +2,7 @@
 
 CacheFlow Runtime 是一个直接重构 llama.cpp 推理热路径的单机 LLM Serving / AI Infra 项目。它不是 Python 包装层，也不把 `vendor/` 中的上游源码算作个人工作量：个人实现以固定上游 `acd79d603` 为基线，通过可重放 patch 进入真实 `llama-server -> llama_decode -> KV memory -> CUDA` 调用链。
 
-当前 fork 相对固定上游涉及 59 个文件，新增 8,445 行、删除 99 行 C/C++/CUDA；最终以可重放 patch 的 `git diff --stat` 为准。外层 Python 仅负责固定实验、故障注入和报告。
+当前 fork 相对固定上游涉及 69 个文件，新增 10,980 行、删除 99 行 C/C++/CUDA；最终以可重放 patch 的 `git diff --stat` 为准。外层 Python 仅负责固定实验、故障注入和报告。
 
 ## 实现了什么
 
@@ -60,7 +60,7 @@ flowchart LR
 
 服务现在用同一个 fail-closed 接口比较 Direct、CUDA-managed Swap、事务型 host Swap 与 Recompute；Remap/Paged 在缺少完整服务 adapter 时由 capability gate 禁止进入生产选择。策略包含固定 H0、解析 A1、分桶查表 T1 与带置信边界/H0 fallback 的 L1，并通过 Prometheus 分开记录推荐、实际执行和完整动作反馈。
 
-正式 Qwen2.5-0.5B CUDA paired replay 使用 20 个 trace group，按时间切成 12 train / 8 evaluation。16 个 held-out snapshot 上，L1 没有满足切换置信条件，因而与 H0 完全一致；T1 产生 25% harmful decision。项目将它报告为“安全回退有效、学习收益尚未成立”，而不是把零切换包装成 learned 加速。choose 热路径 5 个 regime 共执行 500 万次，零 heap allocation，p99 低于 50 us；Windows raw maximum 仅作抢占诊断。完整证据在 `results/research/h4-kv-action-v1.0.0/`。
+正式 Qwen2.5-0.5B CUDA paired replay 使用 20 个 trace group，按时间切成 12 train / 8 evaluation。16 个 held-out snapshot 上，L1 没有满足切换置信条件，因而与 H0 完全一致；T1 虽把 cumulative regret 从 18.5436 ms 降到 12.6092 ms，却产生 1/16（6.25%）harmful decision。项目将它报告为混合结果和“L1 安全回退有效、learned 收益尚未成立”，而不是把零切换包装成 learned 加速。choose 热路径 5 个 regime 共执行 500 万次，零 heap allocation，最差 p99 0.800 us；Windows raw maximum 481.000 us 仅作抢占诊断。完整证据在 `results/research/h4-kv-action-v1.0.0/`。
 
 ## 一键复现
 
