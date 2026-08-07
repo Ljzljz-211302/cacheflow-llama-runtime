@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import subprocess
 import sys
@@ -18,11 +17,16 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from llama_lab.kv_action_evidence import evaluate_kv_action_models, load_kv_action_protocol
+from llama_lab.kv_action_evidence import (
+    audit_kv_action_policy_no_cuda_sync,
+    evaluate_kv_action_models,
+    load_kv_action_protocol,
+    make_balanced_action_orders,
+)
 from llama_lab.server_bench import wait_until_ready
 
 
-ARTIFACT = ROOT / "results/research/h4-kv-action-v1.1.0"
+ARTIFACT = ROOT / "results/research/h4-kv-action-v1.2.0"
 PROTOCOL_PATH = ROOT / "config/kv_action_policy_protocol.json"
 SERVER = ROOT / "build/patched-cuda-ninja3/bin/llama-server.exe"
 MODEL = ROOT / "models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
@@ -192,26 +196,6 @@ def analytical(action: str, tokens: int, kv_bytes: int, pressure: float) -> floa
     raise ValueError(action)
 
 
-def normalized_model_features(
-    tokens: int, kv_bytes: int, pages: int, contiguous_pages: int,
-    reuse_distance: int, pressure: float,
-) -> list[float]:
-    fragmented = (pages - min(pages, contiguous_pages)) / pages if pages else 0.0
-    bound = lambda value: min(4.0, max(0.0, value))
-    host_transfer_ms = kv_bytes / (12.0 * 1024 * 1024)
-    return [
-        1.0,
-        bound(tokens / 4096.0),
-        bound(1.0 / 512.0),
-        bound(kv_bytes / (1024.0**3)),
-        fragmented,
-        bound(math.log1p(reuse_distance) / 20.0),
-        pressure,
-        0.3,
-        bound(host_transfer_ms / 100.0),
-    ]
-
-
 def main() -> None:
     if not SERVER.is_file() or not MODEL.is_file():
         raise FileNotFoundError("CUDA server and Qwen model are required")
@@ -254,6 +238,7 @@ def main() -> None:
     ARTIFACT.mkdir(parents=True, exist_ok=True)
     raw = ARTIFACT / "raw"
     raw.mkdir(exist_ok=True)
+    protocol = load_kv_action_protocol(PROTOCOL_PATH)
     logs: dict[str, object] = {}
     processes: dict[str, subprocess.Popen[bytes]] = {}
     try:
@@ -265,6 +250,9 @@ def main() -> None:
         rows: list[dict[str, Any]] = []
         repeats = (24, 48, 96, 128)
         trace_markers = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉天地玄黄宇宙洪荒日月盈昃寒来暑往秋收冬藏"
+        action_orders = make_balanced_action_orders(
+            MODES, 40, int(protocol["confirmatory"]["order_seed"])
+        )
         order = 0
         for trace in range(40):
             order += 1
@@ -274,11 +262,10 @@ def main() -> None:
             )
             unrelated = f"unrelated-{trace:02d} " + ("eviction control token " * 32)
             observed: dict[str, dict[str, float | int]] = {}
-            action_order = list(MODES)
-            shift = trace % len(action_order)
-            action_order = action_order[shift:] + action_order[:shift]
-            for mode in action_order:
+            action_order = action_orders[trace]
+            for collection_order, mode in enumerate(action_order):
                 observed[mode] = observe(mode, MODES[mode], trace, prompt, unrelated)
+                observed[mode]["collection_order"] = collection_order
             tokens = max(int(value["prompt_tokens"]) for value in observed.values())
             kv_bytes = tokens * 24 * 2 * 64 * 2 * 2
             split = "train" if trace < 20 else "evaluation"
@@ -303,11 +290,8 @@ def main() -> None:
                  max(1, (tokens + 15) // 16)),
             ):
                 snapshot_id = f"trace-{trace:02d}-{snapshot_kind}"
-                model_features = normalized_model_features(
-                    tokens, kv_bytes, max(1, (tokens + 15) // 16),
-                    max(1, (tokens + 15) // 16) if snapshot_kind == "resident" else 0,
-                    reuse_distance, pressure,
-                )
+                canonical_action = "direct" if snapshot_kind == "resident" else "device_swap"
+                model_features = observed[canonical_action]["runtime_model_features"]
                 for action in actions:
                     rows.append({
                         **base,
@@ -319,7 +303,9 @@ def main() -> None:
                         "analytical_cost_ms": analytical(action, tokens, kv_bytes, pressure),
                         "observed_cost_ms": observed[action]["observed_cost_ms"],
                         "http_elapsed_ms": observed[action]["http_elapsed_ms"],
-                        "runtime_model_features": observed[action]["runtime_model_features"],
+                        "runtime_model_features": model_features,
+                        "action_runtime_model_features": observed[action]["runtime_model_features"],
+                        "collection_order": observed[action]["collection_order"],
                         **{
                             f"model_feature_{index}": value
                             for index, value in enumerate(model_features)
@@ -339,7 +325,6 @@ def main() -> None:
 
     trials = ARTIFACT / "paired-actions.jsonl"
     trials.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
-    protocol = load_kv_action_protocol(PROTOCOL_PATH)
     analysis = evaluate_kv_action_models(rows, protocol)
     benchmark = ROOT / "build/patched-cpu-noui/bin/Release/bench-kv-action-policy.exe"
     overhead_lines = subprocess.check_output([str(benchmark)], cwd=ROOT, text=True).splitlines()
@@ -349,6 +334,12 @@ def main() -> None:
     (ARTIFACT / "overhead.jsonl").write_text(
         "".join(json.dumps(row, sort_keys=True) + "\n" for row in overhead), encoding="utf-8"
     )
+    sync_audit = audit_kv_action_policy_no_cuda_sync(
+        ROOT / "vendor/llama.cpp/tools/server/server-kv-action-policy.cpp"
+    )
+    (ARTIFACT / "sync-audit.json").write_text(
+        json.dumps(sync_audit, indent=2) + "\n", encoding="utf-8"
+    )
     ratios = sorted(float(row["decision_to_action_ratio"]) for row in rows)
     ratio_p99 = ratios[int(0.99 * (len(ratios) - 1))]
     overhead_gates = protocol["overhead_gates"]
@@ -356,7 +347,7 @@ def main() -> None:
         "p99_choose_microseconds": max(float(row["p99_ns"]) for row in overhead) / 1000.0,
         "measured_max_choose_microseconds": max(float(row["max_ns"]) for row in overhead) / 1000.0,
         "hot_loop_allocations": sum(int(row["allocations"]) for row in overhead),
-        "cuda_synchronizations": sum(int(row["cuda_sync_calls"]) for row in overhead),
+        "cuda_synchronizations": len(sync_audit["matches"]),
         "scheduler_cpu_ratio_p99": ratio_p99,
     }
     overhead_result["passed"] = (
@@ -419,8 +410,8 @@ def main() -> None:
         f"hot-loop allocations {overhead_result['hot_loop_allocations']}; "
         f"CUDA synchronizations {overhead_result['cuda_synchronizations']}.",
         "",
-        "Each model's JSON summary includes a 10,000-resample paired bootstrap 95% CI for "
-        "mean regret delta versus H0.",
+        "Each model's JSON summary includes a 10,000-resample paired trace-cluster bootstrap "
+        "95% CI for mean regret delta versus H0.",
         "",
         "The observed maximum is a Windows wall-clock measurement and includes thread preemption. "
         "It is reported without trimming.",
@@ -429,7 +420,7 @@ def main() -> None:
     (ARTIFACT / "report.md").write_text(report_markdown, encoding="utf-8")
     manifest = {
         "schema_version": 1,
-        "artifact_version": "h4-kv-action-v1.1.0",
+        "artifact_version": "h4-kv-action-v1.2.0",
         "protocol_sha256": sha256(PROTOCOL_PATH),
         "model_path": MODEL.relative_to(ROOT).as_posix(),
         "model_sha256": sha256(MODEL),

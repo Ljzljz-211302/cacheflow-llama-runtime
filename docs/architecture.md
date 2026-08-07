@@ -989,7 +989,7 @@ sequenceDiagram
 
 - 一键构建、测试、Sanitizer 和 benchmark 已纳入 `verify.ps1 -Full`，2026-08-01 最终提交版本整链 1395.4 秒通过；
 - 架构图、生产 Engine trace 火焰图、mixed workload 原始 trial 和自动报告已生成；
-- 当前个人贡献统计为相对固定上游 69 files、+11031/-99；patch 可逆性由全量入口检查；
+- 当前个人贡献统计为相对固定上游 69 files、+11030/-99；patch 可逆性由全量入口检查；
 - 三分钟演示、算法/状态/失败模式/实验限制深挖手册已完成。
 
 ## 16. 当前代码到目标 Module 的映射
@@ -1230,6 +1230,6 @@ Remap/Paged 在生产快照中的 capability 为 false；正式 CUDA 证据要�
 
 ### 26.5 正式证据与边界
 
-协议固定 trace/session/prefix-family 分组、时间顺序切分、同 snapshot paired action、H0/A1/T1/L1 和开销门禁。v1.1.0 的 40 trace 按时间切为 20 train/20 evaluation，resident/preempted 各 20 个 held-out pair。内部完整动作计时下，H0/A1/L1 的 median/P95/cumulative regret 均为 0/0.264/2.345 ms、harmful 0；T1 为 0/0.727/4.169 ms、harmful 3/40，其 paired mean-regret delta 10,000-bootstrap 95% CI 跨 0。L1 未满足切换置信条件，因此仍执行 H0。v1.0.0 因违反计时与模型合同已移入 superseded。
+协议固定 trace/session/prefix-family 分组、时间顺序切分、同 snapshot paired action、H0/A1/T1/L1 和开销门禁。v1.2.0 进一步要求实际服务九维特征作为同一 snapshot 的共享模型输入、预注册 seeded balanced Latin blocks 采集顺序、按 trace 聚类的 10,000 次 bootstrap，以及由源码哈希绑定审计证明决策路径不含 CUDA 同步。v1.0.0 与 v1.1.0 的历史结果均已移入 superseded，v1.2.0 正式结果生成前不引用旧数值。
 
 硬门禁为 choose p99 不超过 50 us、decision/action ratio p99 不超过 1%、热路径零 allocation、零 CUDA sync。Windows raw wall-clock maximum 原样保留为抢占诊断，不作硬门禁。artifact 绑定协议、模型 SHA-256、外层实现提交、固定上游与 replay patch、完整文件树及逐文件哈希；校验器接受与 patch 等价的干净开发提交树或 bootstrap 后的已应用 patch 工作树，拒绝任何额外 vendor 改动，并从原始 paired rows 重算分析和开销。

@@ -9,8 +9,10 @@ import unittest
 from pathlib import Path
 
 from llama_lab.kv_action_evidence import (
+    audit_kv_action_policy_no_cuda_sync,
     evaluate_kv_action_models,
     load_kv_action_protocol,
+    make_balanced_action_orders,
     validate_kv_action_rows,
     validate_kv_action_artifact,
 )
@@ -29,6 +31,9 @@ def rows() -> list[dict[str, object]]:
                     ("device_swap", 8.0, 5.0),
                     ("recompute", 2.0, 10.0),
                 ):
+                    model_features = [
+                        1.0, 0.25, 1.0 / 512.0, 0.03125, 0.75, 0.05, 0.85, 0.3, 0.026
+                    ]
                     output.append({
                         "snapshot_id": snapshot,
                         "trace_id": trace_id,
@@ -48,8 +53,10 @@ def rows() -> list[dict[str, object]]:
                         "reuse_distance": 3,
                         "analytical_cost_ms": analytical,
                         "observed_cost_ms": observed,
+                        "runtime_model_features": model_features,
+                        "action_runtime_model_features": model_features,
                         **{f"model_feature_{index}": value for index, value in enumerate(
-                            (1.0, 0.25, 1.0 / 512.0, 0.03125, 0.75, 0.05, 0.85, 0.3, 0.026)
+                            model_features
                         )},
                     })
     return output
@@ -68,7 +75,7 @@ class KvActionEvidenceTests(unittest.TestCase):
         self.assertEqual(report["models"]["T1"]["median_regret_ms"], 0.0)
         self.assertEqual(report["models"]["L1"]["median_regret_ms"], 0.0)
         self.assertEqual(
-            report["models"]["L1"]["paired_mean_regret_delta_vs_h0_ci95_ms"],
+            report["models"]["L1"]["paired_trace_cluster_mean_regret_delta_vs_h0_ci95_ms"],
             [-6.0, -6.0],
         )
 
@@ -84,8 +91,40 @@ class KvActionEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "changes paired features"):
             validate_kv_action_rows(tampered, self.protocol)
 
+    def test_runtime_model_feature_drift_is_rejected(self) -> None:
+        tampered = copy.deepcopy(rows())
+        tampered[0]["runtime_model_features"][0] = 2.0
+        with self.assertRaisesRegex(ValueError, "differ from runtime evidence"):
+            validate_kv_action_rows(tampered, self.protocol)
+
+    def test_policy_sync_audit_is_enforceable(self) -> None:
+        source = Path("vendor/llama.cpp/tools/server/server-kv-action-policy.cpp")
+        audit = audit_kv_action_policy_no_cuda_sync(source)
+        self.assertTrue(audit["passed"])
+        self.assertEqual(audit["matches"], [])
+
+    def test_collection_orders_are_seeded_and_position_balanced(self) -> None:
+        actions = self.protocol["production_actions"]
+        orders = make_balanced_action_orders(
+            actions, 40, self.protocol["confirmatory"]["order_seed"]
+        )
+        self.assertEqual(orders, make_balanced_action_orders(actions, 40, 6042027))
+        for position in range(len(actions)):
+            self.assertEqual(
+                {action: sum(order[position] == action for order in orders) for action in actions},
+                {action: 10 for action in actions},
+            )
+
+    def test_bootstrap_decisions_retain_trace_cluster_identity(self) -> None:
+        report = evaluate_kv_action_models(rows(), self.protocol)
+        for decisions in report["decisions"].values():
+            grouped: dict[str, set[str]] = {}
+            for decision in decisions:
+                grouped.setdefault(decision["trace_id"], set()).add(decision["regime"])
+            self.assertTrue(all(regimes == {"resident", "preempted"} for regimes in grouped.values()))
+
     def test_formal_artifact_recomputes_from_hashed_trials(self) -> None:
-        artifact = Path("results/research/h4-kv-action-v1.1.0")
+        artifact = Path("results/research/h4-kv-action-v1.2.0")
         if not (artifact / "manifest.json").exists():
             self.skipTest("formal H4 artifact has not been generated")
         report = validate_kv_action_artifact(
@@ -94,7 +133,7 @@ class KvActionEvidenceTests(unittest.TestCase):
         self.assertTrue(report["overhead"]["passed"])
 
     def _copy_formal_artifact(self, destination: Path) -> Path:
-        source = Path("results/research/h4-kv-action-v1.1.0")
+        source = Path("results/research/h4-kv-action-v1.2.0")
         if not (source / "manifest.json").exists():
             self.skipTest("formal H4 artifact has not been generated")
         artifact = destination / source.name
@@ -139,6 +178,32 @@ class KvActionEvidenceTests(unittest.TestCase):
             )
             self._rehash(artifact, "overhead.jsonl")
             with self.assertRaisesRegex(ValueError, "overhead gates differ"):
+                validate_kv_action_artifact(artifact, Path("config/kv_action_policy_protocol.json"))
+
+    def test_formal_artifact_rejects_rehashed_collection_order_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = self._copy_formal_artifact(Path(temporary))
+            rows_path = artifact / "paired-actions.jsonl"
+            action_rows = [
+                json.loads(line) for line in rows_path.read_text(encoding="utf-8").splitlines()
+            ]
+            action_rows[0]["collection_order"] = 99
+            rows_path.write_text(
+                "\n".join(json.dumps(row) for row in action_rows) + "\n", encoding="utf-8"
+            )
+            self._rehash(artifact, "paired-actions.jsonl")
+            with self.assertRaisesRegex(ValueError, "collection order"):
+                validate_kv_action_artifact(artifact, Path("config/kv_action_policy_protocol.json"))
+
+    def test_formal_artifact_rejects_rehashed_sync_audit_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = self._copy_formal_artifact(Path(temporary))
+            audit_path = artifact / "sync-audit.json"
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            audit["source_sha256"] = "0" * 64
+            audit_path.write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
+            self._rehash(artifact, "sync-audit.json")
+            with self.assertRaisesRegex(ValueError, "synchronization audit differs"):
                 validate_kv_action_artifact(artifact, Path("config/kv_action_policy_protocol.json"))
 
     def test_formal_artifact_rejects_unmanifested_file(self) -> None:

@@ -6,6 +6,7 @@ import json
 import hashlib
 import math
 import random
+import re
 import statistics
 import subprocess
 from collections import defaultdict
@@ -18,6 +19,21 @@ FEATURES = (
     "context_tokens", "batch", "page_runs", "kv_pressure", "kv_bytes", "reuse_distance"
 )
 MODEL_FEATURES = tuple(f"model_feature_{index}" for index in range(9))
+POLICY_ALLOWED_INCLUDES = {
+    "server-kv-action-policy.cpp": (
+        '"server-kv-action-policy.h"', "<algorithm>", "<chrono>", "<cmath>",
+    ),
+    "server-kv-action-policy.h": ("<array>", "<cstddef>", "<cstdint>", "<limits>"),
+}
+POLICY_PROHIBITED_SYMBOLS = (
+    "cudaDeviceSynchronize",
+    "cudaStreamSynchronize",
+    "cudaEventSynchronize",
+    "cuCtxSynchronize",
+    "ggml_backend_synchronize",
+    "cuda_runtime",
+    "ggml-cuda",
+)
 
 
 def load_kv_action_protocol(path: Path) -> dict[str, Any]:
@@ -34,9 +50,93 @@ def load_kv_action_protocol(path: Path) -> dict[str, Any]:
         raise ValueError("KV action protocol requires at least 20 pairs per regime")
     if int(protocol.get("confirmatory", {}).get("bootstrap_samples", 0)) != 10000:
         raise ValueError("KV action protocol requires 10,000 bootstrap resamples")
+    if protocol.get("confirmatory", {}).get("bootstrap_unit") != "trace_id":
+        raise ValueError("KV action protocol bootstrap unit must be trace_id")
+    if protocol.get("confirmatory", {}).get("order_randomization") != "seeded balanced Latin blocks":
+        raise ValueError("KV action protocol requires seeded balanced Latin blocks")
+    if not isinstance(protocol.get("confirmatory", {}).get("order_seed"), int):
+        raise ValueError("KV action protocol requires an integer collection-order seed")
     if protocol.get("overhead_gates", {}).get("cuda_synchronizations") != 0:
         raise ValueError("KV action policy must prohibit CUDA synchronization")
     return protocol
+
+
+def make_balanced_action_orders(
+    actions: Iterable[str], trace_count: int, seed: int
+) -> list[list[str]]:
+    action_list = list(actions)
+    if not action_list or trace_count % len(action_list) != 0:
+        raise ValueError("balanced action orders require complete Latin blocks")
+    generator = random.Random(seed)
+    result: list[list[str]] = []
+    for _ in range(trace_count // len(action_list)):
+        base = action_list.copy()
+        generator.shuffle(base)
+        block = [base[offset:] + base[:offset] for offset in range(len(base))]
+        generator.shuffle(block)
+        result.extend(block)
+    return result
+
+
+def audit_kv_action_policy_no_cuda_sync(path: Path) -> dict[str, Any]:
+    paths = (path, path.with_suffix(".h"))
+    sources = {candidate.name: candidate.read_text(encoding="utf-8") for candidate in paths}
+    includes = {
+        name: re.findall(r"^\s*#\s*include\s+([^\s]+)", source, flags=re.MULTILINE)
+        for name, source in sources.items()
+    }
+    unexpected = {
+        name: [include for include in observed if include not in POLICY_ALLOWED_INCLUDES[name]]
+        for name, observed in includes.items()
+        if any(include not in POLICY_ALLOWED_INCLUDES[name] for include in observed)
+    }
+    matches = [
+        {"file": name, "symbol": symbol}
+        for name, source in sources.items()
+        for symbol in POLICY_PROHIBITED_SYMBOLS
+        if symbol in source
+    ]
+    return {
+        "source_files": {candidate.name: _sha256(candidate) for candidate in paths},
+        "allowed_includes": {
+            name: list(allowed) for name, allowed in POLICY_ALLOWED_INCLUDES.items()
+        },
+        "observed_includes": includes,
+        "unexpected_includes": unexpected,
+        "prohibited_symbols": list(POLICY_PROHIBITED_SYMBOLS),
+        "matches": matches,
+        "passed": not unexpected and not matches,
+    }
+
+
+def validate_kv_action_collection_order(
+    rows: list[dict[str, Any]], protocol: dict[str, Any]
+) -> None:
+    actions = list(protocol["production_actions"])
+    trace_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        trace_rows[str(row["trace_id"])].append(row)
+    ordered_traces = sorted(
+        trace_rows, key=lambda trace: int(trace_rows[trace][0]["timestamp_order"])
+    )
+    expected = make_balanced_action_orders(
+        actions, len(ordered_traces), int(protocol["confirmatory"]["order_seed"])
+    )
+    for trace, expected_order in zip(ordered_traces, expected):
+        actual_by_action: dict[str, int] = {}
+        for row in trace_rows[trace]:
+            action = str(row["action"])
+            order = row.get("collection_order")
+            if action not in actions or not isinstance(order, int):
+                raise ValueError("KV action collection order is missing or invalid")
+            prior = actual_by_action.setdefault(action, order)
+            if prior != order:
+                raise ValueError("KV action collection order differs across paired snapshots")
+        if set(actual_by_action) != set(actions):
+            raise ValueError("KV action collection order lacks a production action")
+        actual_order = [action for action, _ in sorted(actual_by_action.items(), key=lambda item: item[1])]
+        if actual_order != expected_order or set(actual_by_action.values()) != set(range(len(actions))):
+            raise ValueError("KV action collection order differs from preregistered balance")
 
 
 def _finite(value: object) -> bool:
@@ -65,6 +165,20 @@ def validate_kv_action_rows(rows: list[dict[str, Any]], protocol: dict[str, Any]
         for field in (*FEATURES, *MODEL_FEATURES, "analytical_cost_ms", "observed_cost_ms"):
             if not _finite(row[field]) or float(row[field]) < 0:
                 raise ValueError(f"KV action row has invalid {field}")
+        runtime_features = row.get("runtime_model_features")
+        action_features = row.get("action_runtime_model_features")
+        if not isinstance(runtime_features, list) or len(runtime_features) != 9 or not all(
+            _finite(value) for value in runtime_features
+        ):
+            raise ValueError("KV action canonical runtime feature vector is invalid")
+        if not isinstance(action_features, list) or len(action_features) != 9 or not all(
+            _finite(value) for value in action_features
+        ):
+            raise ValueError("KV action per-action runtime feature vector is invalid")
+        if [float(row[field]) for field in MODEL_FEATURES] != [
+            float(value) for value in runtime_features
+        ]:
+            raise ValueError("KV action model features differ from runtime evidence")
         trace = str(row["trace_id"])
         prior = split_by_trace.setdefault(trace, row["split"])
         if prior != row["split"]:
@@ -259,6 +373,8 @@ def evaluate_kv_action_models(
             cost = float(by_action[action]["observed_cost_ms"])
             results[model].append({
                 "snapshot_id": snapshot_id,
+                "trace_id": snapshot[0]["trace_id"],
+                "regime": snapshot[0]["regime"],
                 "chosen": action,
                 "oracle": oracle["action"],
                 "cost_ms": cost,
@@ -266,15 +382,26 @@ def evaluate_kv_action_models(
                 "harmful": cost > baseline_cost * (1.0 + harm_ratio),
             })
     summary: dict[str, Any] = {}
-    h0_regrets = [float(row["regret_ms"]) for row in results["H0"]]
+    h0_by_snapshot = {
+        str(row["snapshot_id"]): float(row["regret_ms"]) for row in results["H0"]
+    }
     bootstrap_samples = int(protocol["confirmatory"]["bootstrap_samples"])
     bootstrap_seed = int(protocol["confirmatory"]["bootstrap_seed"])
     for model, decisions in results.items():
         regrets = [float(row["regret_ms"]) for row in decisions]
-        deltas = [left - right for left, right in zip(regrets, h0_regrets)]
+        deltas_by_trace: dict[str, list[float]] = defaultdict(list)
+        for decision in decisions:
+            deltas_by_trace[str(decision["trace_id"])].append(
+                float(decision["regret_ms"]) - h0_by_snapshot[str(decision["snapshot_id"])]
+            )
+        trace_ids = sorted(deltas_by_trace)
         generator = random.Random(bootstrap_seed)
         bootstrapped = [
-            statistics.fmean(deltas[generator.randrange(len(deltas))] for _ in deltas)
+            statistics.fmean(
+                delta
+                for _ in trace_ids
+                for delta in deltas_by_trace[trace_ids[generator.randrange(len(trace_ids))]]
+            )
             for _ in range(bootstrap_samples)
         ]
         summary[model] = {
@@ -287,7 +414,7 @@ def evaluate_kv_action_models(
             "cumulative_regret_ms": sum(regrets),
             "harmful_decisions": sum(bool(row["harmful"]) for row in decisions),
             "harmful_rate": statistics.fmean(bool(row["harmful"]) for row in decisions),
-            "paired_mean_regret_delta_vs_h0_ci95_ms": [
+            "paired_trace_cluster_mean_regret_delta_vs_h0_ci95_ms": [
                 _percentile(bootstrapped, 0.025), _percentile(bootstrapped, 0.975)
             ],
             "choices": {action: sum(row["chosen"] == action for row in decisions) for action in ACTIONS},
@@ -313,7 +440,7 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
     protocol = load_kv_action_protocol(protocol_path)
     manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
     report = json.loads((artifact / "report.json").read_text(encoding="utf-8"))
-    if manifest.get("artifact_version") != "h4-kv-action-v1.1.0":
+    if manifest.get("artifact_version") != "h4-kv-action-v1.2.0":
         raise ValueError("KV action artifact version differs")
     if manifest.get("protocol_sha256") != _sha256(protocol_path):
         raise ValueError("KV action protocol hash differs")
@@ -404,6 +531,7 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
             encoding="utf-8"
         ).splitlines() if line
     ]
+    validate_kv_action_collection_order(rows, protocol)
     for row in rows:
         if row.get("selected_delta") != 1 or row.get("observation_delta") != 1:
             raise ValueError("KV action runtime decision/observation linkage differs")
@@ -411,11 +539,6 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
             raise ValueError("Paged action crossed the formal production evidence gate")
         if row.get("invalid_features") != 0:
             raise ValueError("KV action formal run contains invalid feature fallbacks")
-        runtime_features = row.get("runtime_model_features")
-        if not isinstance(runtime_features, list) or len(runtime_features) != 9 or not all(
-            _finite(value) for value in runtime_features
-        ):
-            raise ValueError("KV action runtime feature evidence differs")
         if not _finite(row.get("http_elapsed_ms")) or float(row["http_elapsed_ms"]) <= 0:
             raise ValueError("KV action HTTP diagnostic timing differs")
         expected_ratio = float(row["decision_cpu_ms"]) / float(row["observed_cost_ms"])
@@ -433,13 +556,18 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
     ]
     if len(overhead_rows) != 5:
         raise ValueError("KV action overhead regime coverage differs")
+    policy_source = project_root / "vendor/llama.cpp/tools/server/server-kv-action-policy.cpp"
+    sync_audit = json.loads((artifact / "sync-audit.json").read_text(encoding="utf-8"))
+    expected_sync_audit = audit_kv_action_policy_no_cuda_sync(policy_source)
+    if sync_audit != expected_sync_audit or not expected_sync_audit["passed"]:
+        raise ValueError("KV action CUDA synchronization audit differs or did not pass")
     gates = protocol["overhead_gates"]
     ratios = sorted(float(row["decision_to_action_ratio"]) for row in rows)
     expected_overhead = {
         "p99_choose_microseconds": max(float(row["p99_ns"]) for row in overhead_rows) / 1000.0,
         "measured_max_choose_microseconds": max(float(row["max_ns"]) for row in overhead_rows) / 1000.0,
         "hot_loop_allocations": sum(int(row["allocations"]) for row in overhead_rows),
-        "cuda_synchronizations": sum(int(row["cuda_sync_calls"]) for row in overhead_rows),
+        "cuda_synchronizations": len(expected_sync_audit["matches"]),
         "scheduler_cpu_ratio_p99": ratios[int(0.99 * (len(ratios) - 1))],
     }
     expected_overhead["passed"] = (
