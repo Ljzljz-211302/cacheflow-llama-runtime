@@ -73,14 +73,18 @@ def build_nsys_command(
 
 
 def build_ncu_command(
-    executable: Path, output_prefix: Path, target_command: list[str]
+    executable: Path,
+    output_prefix: Path,
+    target_command: list[str],
+    *,
+    kernel_name_regex: str = "llama_kv_remap_.*",
 ) -> list[str]:
     return [
         str(executable),
         "--target-processes=all",
         "--profile-from-start=off",
         "--kernel-name-base=demangled",
-        "--kernel-name=regex:llama_kv_remap_.*",
+        f"--kernel-name=regex:{kernel_name_regex}",
         "--replay-mode=kernel",
         "--cache-control=all",
         "--clock-control=base",

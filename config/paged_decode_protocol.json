@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "protocol_version": "1.0.0",
+  "preregistered_at_utc": "2026-08-07T00:00:00Z",
+  "claim": "H3-paged-decode-frontier",
+  "random_seed_base": 20260807,
+  "benchmark_binary": "build/patched-cuda-ninja3/bin/bench-paged-decode-cuda.exe",
+  "contract": {
+    "operation": "single-token causal decode attention",
+    "query_dtype": "fp16",
+    "kv_dtype": "fp16",
+    "output_accumulator_dtype": "fp32",
+    "page_size_tokens": 16,
+    "head_dimensions": [64, 128],
+    "layouts": {
+      "query": "[batch, query_heads, head_dim]",
+      "paged_kv": "[physical_page, page_token, kv_head, head_dim]",
+      "block_table": "[batch, logical_page] -> physical_page"
+    },
+    "causal_semantics": "context length exposes only past and current KV; unused tail entries are never read",
+    "unsupported_behavior": "plan creation returns cudaErrorInvalidValue; no silent kernel fallback"
+  },
+  "shapes": {
+    "qwen2.5-0.5b": {
+      "query_heads": 14,
+      "kv_heads": 2,
+      "head_dim": 64,
+      "gqa_ratio": 7,
+      "role": "model-faithful shape for the local real model"
+    },
+    "qwen2.5-7b-shape": {
+      "query_heads": 28,
+      "kv_heads": 4,
+      "head_dim": 128,
+      "gqa_ratio": 7,
+      "role": "model-faithful kernel shape only; not a local end-to-end 7B serving claim"
+    }
+  },
+  "correctness": {
+    "oracle": "independent CPU contiguous attention with FP32 softmax",
+    "absolute_tolerance": 0.001,
+    "relative_tolerance": 0.001,
+    "required_cases": [
+      "context lengths 1,15,16,17,31,32",
+      "identity and fragmented physical pages",
+      "random FP16 Q/K/V",
+      "GQA ratio 7 for D64 and D128",
+      "poisoned unused pages and output guards",
+      "invalid block IDs, context lengths, page sizes, head dimensions, and GQA shapes"
+    ]
+  },
+  "no_profiler": {
+    "paired_trials_per_regime": 20,
+    "methods": ["contiguous", "paged"],
+    "primary_timing": "gpu_ms",
+    "secondary_timing": "end_to_end_ms",
+    "confidence_level": 0.95,
+    "bootstrap_resamples": 10000,
+    "material_improvement_percent": 10.0,
+    "maximum_regression_percent": 3.0,
+    "no_outcome_based_deletion": true
+  },
+  "profiler": {
+    "repetitions_per_method": 5,
+    "regime_ids": ["q05-long-b1-fragmented", "q7-long-b1-fragmented"],
+    "kernel_patterns": {
+      "contiguous": ["paged_decode_attention<false>"],
+      "paged": ["paged_decode_attention<true>"]
+    },
+    "nsys": {
+      "capture_range": "cudaProfilerApi",
+      "export": "sqlite",
+      "profiler_timing_is_not_primary": true
+    },
+    "ncu": {
+      "required_before_memory_or_occupancy_claims": true,
+      "permission_or_driver_failure_must_be_retained": true
+    }
+  },
+  "regimes": [
+    {"id": "q05-boundary-16-identity", "shape": "qwen2.5-0.5b", "context": 16, "batch": 1, "layout": "identity", "role": "one full page"},
+    {"id": "q05-boundary-17-fragmented", "shape": "qwen2.5-0.5b", "context": 17, "batch": 1, "layout": "fragmented", "role": "first cross-page tail"},
+    {"id": "q05-medium-b1-fragmented", "shape": "qwen2.5-0.5b", "context": 256, "batch": 1, "layout": "fragmented", "role": "model-faithful medium context"},
+    {"id": "q05-long-b1-fragmented", "shape": "qwen2.5-0.5b", "context": 1024, "batch": 1, "layout": "fragmented", "role": "low-concurrency long context"},
+    {"id": "q05-long-b4-fragmented", "shape": "qwen2.5-0.5b", "context": 1024, "batch": 4, "layout": "fragmented", "role": "higher-concurrency long context"},
+    {"id": "q7-boundary-17-fragmented", "shape": "qwen2.5-7b-shape", "context": 17, "batch": 1, "layout": "fragmented", "role": "D128 first cross-page tail"},
+    {"id": "q7-medium-b1-fragmented", "shape": "qwen2.5-7b-shape", "context": 256, "batch": 1, "layout": "fragmented", "role": "D128 medium context"},
+    {"id": "q7-long-b1-fragmented", "shape": "qwen2.5-7b-shape", "context": 1024, "batch": 1, "layout": "fragmented", "role": "D128 low-concurrency long context"},
+    {"id": "q7-long-b4-fragmented", "shape": "qwen2.5-7b-shape", "context": 1024, "batch": 4, "layout": "fragmented", "role": "D128 higher-concurrency long context"}
+  ],
+  "next_kernel_decision": {
+    "split_k_if": "long-context batch-1 paged regression exceeds batch-4 regression by at least 5 percentage points",
+    "gqa_reuse_if": "otherwise any long-context ratio-7 paged regression is at least 3 percent",
+    "retain_k1_if": "neither condition holds",
+    "decisions_are_hypotheses_until_the_selected_variant_is_implemented_and_profiled": true
+  },
+  "claim_rules": {
+    "prototype_is_not_production_integration": true,
+    "paged_means_no_contiguous_kv_materialization_in_timed_region": true,
+    "every_performance_claim_requires_paired_no_profiler_trials": true,
+    "profiler_latency_is_primary": false,
+    "memory_bound_requires_ncu_dram_metric": true,
+    "occupancy_claim_requires_ncu_occupancy_metric": true,
+    "negative_and_neutral_results_are_retained": true,
+    "qwen7b_shape_is_not_end_to_end_7b_evidence": true
+  }
+}

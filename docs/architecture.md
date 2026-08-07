@@ -1185,3 +1185,11 @@ Issue #4 在这条服务因果链下新增 H2 算子机制切片。`bench-kv-blo
 `llama-kv-remap-cuda.cuh` 定义 descriptor-driven Gather/Scatter seam。算子以 staging 建立 snapshot 边界，保证源/目的重叠时仍先完整读取源数据，再写回目的数据。对齐路径由每个 CUDA thread 处理一个 `uint4`，即 128 bit / 8 个 FP16 元素；非对齐地址和尾部由同一 kernel 的标量分支处理。Host launch 在进入 CUDA 前拒绝超出 `grid.y` 或 `grid.x` 表示范围的 workload。
 
 真实 `llama_kv_cache::copy_streams_paged_cuda` 直接调用该 seam；`cuda_kv_remap_vectorized_bytes_total` 与 `cuda_kv_remap_scalar_bytes_total` 分别记录完整向量路径和安全回退字节。正确性由独立 CPU oracle、守卫区、非法 grid、Compute Sanitizer 和真实 Qwen cold-output 对照共同验证。性能报告只比较 scalar/vectorized remap，不推导端到端 Serving 加速。
+
+## 25. 受限 Paged Decode Attention 原型
+
+`llama-paged-decode-cuda.cuh` 定义单层、单 token decode 的实验 seam。Host `plan_create` 固定并上传页表与 context length；paged launch 直接按 `[physical_page, page_token, kv_head, head_dim]` 读取 FP16 K/V，不先生成连续 KV；contiguous launch 只提供相同数学路径的 CUDA 对照。K1 kernel 为每个 `(sequence, query_head)` 一个 CTA，用 FP32 online softmax 直接产生 FP32 attention output。
+
+原型只接受 page size 16、D64/D128 和整除 GQA；当前模型忠实 shape 是 Qwen2.5-0.5B 的 `14/2/64`，`28/4/128` 仅是 Qwen2.5-7B 的 kernel geometry，不代表本机已经完成 7B 服务。无效 shape、空 context、已使用的越界物理页和空指针全部 fail closed；生产 fallback 与 dtype adapter 不属于该 seam。
+
+验证分成三层：独立 CPU FP32 oracle 检查跨页、ragged GQA、边界、poison 和 guard；20-pair无 profiler CUDA-event 实验给出 D64/D128、短/中/长 context 和 batch 1/4 的效应与 bootstrap 区间；方法隔离的 NSYS replay 只绑定 kernel identity/launch count。NCU counter 缺失时禁止 memory-bound、occupancy 和 DRAM-byte 归因。预注册规则只选择下一候选 K2（GQA KV reuse）、K3（split-KV）或保留 K1，不把候选选择写成已实现加速。生产 dispatch、真实 llama attention tensor adapter 和用户请求 A/B 由后续 Issue 单独验收。
