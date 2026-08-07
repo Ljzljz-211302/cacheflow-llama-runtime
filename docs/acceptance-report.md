@@ -97,7 +97,7 @@ Nsight Compute 已实际执行，但当前 driver/tool compatibility 检查和 `
 
 K1 CUDA 原型直接按 block table 从非连续物理页读取 K/V 并输出 attention，不在 timed path materialize contiguous KV。独立 CPU FP32 oracle 与相同数学的 contiguous CUDA 路径共同覆盖 `14/2/D64`、`28/4/D128`、ratio-7 GQA、context `1/15/16/17/31/32`、ragged batch、fragmented pages、unused-page poison、output guards 和 invalid shape/page table fail closed。
 
-正式实验保存 9 个 regime × 20 pairs × 2 methods = 360 条无 profiler observations。Paged K1 的 GPU-event 中位数在全部 regime 均比 contiguous 对照慢 9.41%–13.22%；0.5B shape 的 context 1024/batch 1 回退 13.05%（95% CI 12.97%–13.06%），7B shape 回退 11.46%（11.42%–11.60%）。4 份 NSYS trace 各精确包含 5 次对应方法 launch。batch-1 与 batch-4 的长 context 回退差只有 0.88/1.59 个百分点，未触发 K3 split-K；因长 context 回退超过 3%，预注册规则选择 K2 GQA reuse 作为下一待验证假设。
+正式实验保存 9 个 regime × 20 pairs × 2 methods = 360 条无 profiler observations；每个 regime 计时前的独立 CPU FP32 oracle 最大绝对误差为 `3.6e-8`。Paged K1 的 GPU-event 中位数在全部 regime 均比 contiguous 对照慢 6.46%–13.07%；0.5B shape 的 context 1024/batch 1 回退 13.07%（95% CI 12.91%–13.32%），7B shape 回退 11.54%（11.32%–11.68%）。4 份 NSYS trace 各精确包含 5 次对应方法 launch。batch-1 与 batch-4 的长 context 回退差只有 1.38/1.69 个百分点，未触发 K3 split-K；因长 context 回退超过 3%，预注册规则选择 K2 GQA reuse 作为下一待验证假设。
 
 本验收只证明受限算法正确、负结果可复现并能给出下一内核决策，不证明生产可用或端到端加速。NCU 仍报告 driver incompatibility 与 `ERR_NVGPUCTRPERM`，因此 memory-bound、occupancy 和 hardware DRAM-byte 解释继续禁止。完整 hash-bound artifact 位于 `results/research/h3-paged-decode-v1.0.0/`。
 

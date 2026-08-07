@@ -74,7 +74,7 @@ Issue #4 现有 4 个预注册 regime、160 条无 profiler paired observations 
 
 Paged 路径省去 materialization，却增加 page-table lookup、不规则访存、mask、softmax 和归约。它可能只改善容量、不改善 batch-1 latency；这仍是有效结果，但必须明确属于哪一层收益。若所有预注册场景既没有延迟 non-inferiority 也没有容量收益，则否定当前受限实现，而不是更换 workload 追正结果。
 
-Issue #5 的 H3 v1.0.0 已得到受限负结果：K1 直接分页 kernel 通过 D64/D128 correctness gate，但相对相同数学的 contiguous CUDA 对照，9 个预注册 regime 的 GPU-event 中位数全部回退 9.41%–13.22%。0.5B/7B-shape 在 context 1024、batch 1 分别回退 13.05% 与 11.46%；对应 batch-1/batch-4 差只有 0.88/1.59 个百分点，不支持优先做 split-K。预注册规则因此选择 K2 GQA KV reuse 作为下一可证伪假设。4 个方法隔离 NSYS capture 各有 5 次目标 launch；NCU 不完整，禁止 memory/occupancy 机制归因。该结果不表示 K2 已实现，也不表示 0.5B 生产请求已经接入。
+Issue #5 的 H3 v1.0.0 已得到受限负结果：K1 直接分页 kernel 在每个 regime 计时前通过独立 CPU FP32 oracle，最大绝对误差 `3.6e-8`；相对相同数学的 contiguous CUDA 对照，9 个预注册 regime 的 GPU-event 中位数全部回退 6.46%–13.07%。0.5B/7B-shape 在 context 1024、batch 1 分别回退 13.07% 与 11.54%；对应 batch-1/batch-4 差只有 1.38/1.69 个百分点，不支持优先做 split-K。预注册规则因此选择 K2 GQA KV reuse 作为下一可证伪假设。4 个方法隔离 NSYS capture 各有 5 次目标 launch；NCU 不完整，禁止 memory/occupancy 机制归因。该结果不表示 K2 已实现，也不表示 0.5B 生产请求已经接入。
 
 ## 6. H4：自适应动作策略
 
