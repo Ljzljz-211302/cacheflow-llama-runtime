@@ -74,6 +74,65 @@ def cuda_environment() -> dict[str, str]:
     return environment
 
 
+def capture_device_environment(protocol: dict[str, Any]) -> dict[str, Any]:
+    query = [
+        "nvidia-smi",
+        "--query-gpu=name,compute_cap,memory.total,memory.free,driver_version",
+        "--format=csv,noheader,nounits",
+    ]
+    completed = run(query, environment=cuda_environment())
+    if completed.returncode:
+        raise RuntimeError(f"nvidia-smi device query failed: {completed.stderr}")
+    rows = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    if len(rows) != 1:
+        raise RuntimeError("formal paged-decode experiment requires exactly one visible GPU")
+    fields = [field.strip() for field in rows[0].split(",")]
+    if len(fields) != 5:
+        raise RuntimeError("unexpected nvidia-smi device query output")
+    expected = protocol["performance_device"]
+    device = {
+        "name": fields[0], "compute_capability": fields[1],
+        "total_memory_mib": int(fields[2]), "free_memory_mib_before_run": int(fields[3]),
+        "driver_version": fields[4], "query_command": query,
+    }
+    if device["name"] != expected["name"] or device["compute_capability"] != expected["compute_capability"]:
+        raise RuntimeError("visible GPU identity differs from preregistered device")
+    if device["total_memory_mib"] < int(expected["minimum_total_memory_mib"]):
+        raise RuntimeError("visible GPU memory is below the preregistered device floor")
+    nvcc = ROOT / "runtime/cuda-dev/Library/bin/nvcc.exe"
+    version = run([str(nvcc), "--version"], environment=cuda_environment())
+    if version.returncode:
+        raise RuntimeError("CUDA toolkit version query failed")
+    device["cuda_toolkit_version_output"] = version.stdout.strip()
+    return device
+
+
+def allocation_evidence(regime: dict[str, Any], protocol: dict[str, Any]) -> dict[str, Any]:
+    shape = protocol["shapes"][regime["shape"]]
+    batch = int(regime["batch"]); context = int(regime["context"])
+    query_heads = int(shape["query_heads"]); kv_heads = int(shape["kv_heads"])
+    head_dim = int(shape["head_dim"]); page_size = int(protocol["contract"]["page_size_tokens"])
+    pages = (context + page_size - 1) // page_size
+    query_bytes = batch * query_heads * head_dim * 2
+    one_kv_plane_bytes = batch * pages * page_size * kv_heads * head_dim * 2
+    output_bytes = batch * query_heads * head_dim * 4
+    plan_metadata_bytes = batch * pages * 4 + batch * 4
+    peak = query_bytes + 4 * one_kv_plane_bytes + output_bytes + plan_metadata_bytes
+    return {
+        "regime_id": regime["id"],
+        "input_bytes": {
+            "query": query_bytes, "paged_k": one_kv_plane_bytes,
+            "paged_v": one_kv_plane_bytes, "contiguous_k": one_kv_plane_bytes,
+            "contiguous_v": one_kv_plane_bytes, "plan_metadata": plan_metadata_bytes,
+        },
+        "output_bytes": output_bytes,
+        "global_workspace_bytes": 0,
+        "static_shared_bytes_per_cta": head_dim * 4 + 4 * 4,
+        "benchmark_peak_device_allocation_bytes": peak,
+        "resource_gate_passed": True,
+    }
+
+
 def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="")
 
@@ -191,6 +250,12 @@ def markdown(report: dict[str, Any], manifest_stub: dict[str, Any]) -> str:
         "Every regime validates both CUDA arms against an independent CPU FP32 paged-attention "
         f"oracle before timing; maximum absolute error was "
         f"{report['analysis']['correctness']['maximum_absolute_error']:.9f}.", "",
+        f"Device: {report['device_environment']['name']} (sm_"
+        f"{report['device_environment']['compute_capability'].replace('.', '')}), "
+        f"{report['device_environment']['total_memory_mib']} MiB total and "
+        f"{report['device_environment']['free_memory_mib_before_run']} MiB free before run. "
+        "Per-regime input/output/workspace and peak device-allocation accounting is retained "
+        "in `report.json`; every resource gate passed.", "",
         "## No-profiler paired results", "",
         "| Regime | GPU improvement median [95% CI] | End-to-end improvement median [95% CI] | Class |",
         "|---|---:|---:|---|",
@@ -240,6 +305,7 @@ def main() -> None:
     if nsys is None:
         raise SystemExit("Nsight Systems CLI not found")
     ncu = discover("ncu")
+    environment_evidence = capture_device_environment(protocol)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = args.output_dir / "raw"
     profiles_root = args.output_dir / "profiles"
@@ -306,8 +372,21 @@ def main() -> None:
             "memory-bound classification", "occupancy explanation", "DRAM byte attribution"
         ],
         "claim_boundary": "prototype only; not production dispatch or end-to-end serving evidence",
+        "device_environment": environment_evidence,
+        "allocation_evidence": [
+            allocation_evidence(regime, protocol) for regime in protocol["regimes"]
+        ],
     }
+    free_bytes = int(environment_evidence["free_memory_mib_before_run"]) * 1024 * 1024
+    for item in report["allocation_evidence"]:
+        item["resource_gate_passed"] = (
+            int(item["benchmark_peak_device_allocation_bytes"]) <= free_bytes
+        )
+    if not all(item["resource_gate_passed"] for item in report["allocation_evidence"]):
+        raise RuntimeError("a preregistered regime exceeds free device memory")
     report_path = args.output_dir / "report.json"
+    environment_path = args.output_dir / "environment.json"
+    write_json(environment_path, environment_evidence)
     write_json(report_path, report)
     manifest_stub = {"profiles": profiles}
     report_md = args.output_dir / "report.md"
@@ -325,6 +404,7 @@ def main() -> None:
         "vendor_revision": git_output(vendor, "rev-parse", "HEAD"),
         "repository_dirty_before_run": False, "vendor_dirty_before_run": False,
         "binary_sha256": file_sha256(binary),
+        "environment": environment_evidence,
         "captured_at_utc": datetime.now(timezone.utc).isoformat(),
         "invocation": [sys.executable, *sys.argv], "raw_trial_count": len(rows),
         "commands": commands, "profiles": profiles, "ncu": ncu_statuses,

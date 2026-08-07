@@ -68,6 +68,33 @@ def _parse_raw_csv(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _allocation_evidence(
+    regime: dict[str, Any], protocol: dict[str, Any], free_memory_mib: int
+) -> dict[str, Any]:
+    shape = protocol["shapes"][regime["shape"]]
+    batch = int(regime["batch"]); context = int(regime["context"])
+    query_heads = int(shape["query_heads"]); kv_heads = int(shape["kv_heads"])
+    head_dim = int(shape["head_dim"]); page_size = int(protocol["contract"]["page_size_tokens"])
+    pages = (context + page_size - 1) // page_size
+    query_bytes = batch * query_heads * head_dim * 2
+    one_kv_plane_bytes = batch * pages * page_size * kv_heads * head_dim * 2
+    output_bytes = batch * query_heads * head_dim * 4
+    metadata_bytes = batch * pages * 4 + batch * 4
+    peak = query_bytes + 4 * one_kv_plane_bytes + output_bytes + metadata_bytes
+    return {
+        "regime_id": regime["id"],
+        "input_bytes": {
+            "query": query_bytes, "paged_k": one_kv_plane_bytes,
+            "paged_v": one_kv_plane_bytes, "contiguous_k": one_kv_plane_bytes,
+            "contiguous_v": one_kv_plane_bytes, "plan_metadata": metadata_bytes,
+        },
+        "output_bytes": output_bytes, "global_workspace_bytes": 0,
+        "static_shared_bytes_per_cta": head_dim * 4 + 4 * 4,
+        "benchmark_peak_device_allocation_bytes": peak,
+        "resource_gate_passed": peak <= free_memory_mib * 1024 * 1024,
+    }
+
+
 def _validate_and_group(
     rows: list[dict[str, Any]], protocol: dict[str, Any]
 ) -> dict[str, dict[int, dict[str, dict[str, Any]]]]:
@@ -223,6 +250,9 @@ def validate_paged_decode_artifact(
     protocol = load_paged_decode_protocol(protocol_path)
     manifest = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))
     report = json.loads((artifact_dir / "report.json").read_text(encoding="utf-8"))
+    environment = json.loads(
+        (artifact_dir / "environment.json").read_text(encoding="utf-8")
+    )
     trials_path = artifact_dir / "trials.jsonl"
     rows = [json.loads(line) for line in trials_path.read_text(encoding="utf-8").splitlines() if line]
     if manifest.get("protocol_sha256") != file_sha256(protocol_path):
@@ -241,6 +271,28 @@ def validate_paged_decode_artifact(
     recomputed = analyze_paged_decode_trials(rows, protocol)
     if report.get("analysis") != recomputed:
         raise ValueError("paged decode report analysis differs from raw trials")
+    if report.get("device_environment") != environment or manifest.get("environment") != environment:
+        raise ValueError("paged decode device environment linkage differs")
+    expected_device = protocol["performance_device"]
+    if (
+        environment.get("name") != expected_device["name"]
+        or environment.get("compute_capability") != expected_device["compute_capability"]
+        or int(environment.get("total_memory_mib", 0))
+        < int(expected_device["minimum_total_memory_mib"])
+        or not environment.get("driver_version")
+        or "release" not in environment.get("cuda_toolkit_version_output", "")
+    ):
+        raise ValueError("paged decode device environment differs from protocol")
+    expected_allocations = [
+        _allocation_evidence(
+            regime, protocol, int(environment["free_memory_mib_before_run"])
+        )
+        for regime in protocol["regimes"]
+    ]
+    if report.get("allocation_evidence") != expected_allocations:
+        raise ValueError("paged decode allocation evidence differs from protocol")
+    if not all(item["resource_gate_passed"] for item in expected_allocations):
+        raise ValueError("paged decode resource gate did not pass")
     expected_rows = len(protocol["regimes"]) * int(
         protocol["no_profiler"]["paired_trials_per_regime"]
     ) * 2
