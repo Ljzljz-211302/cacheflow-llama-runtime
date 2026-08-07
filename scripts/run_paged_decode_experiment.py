@@ -161,6 +161,8 @@ def capture_ncu(
     write_text(profile_dir / "ncu.stderr.txt", completed.stderr)
     csv_path = prefix.with_suffix(".csv")
     failure_text = completed.stdout + completed.stderr
+    if csv_path.is_file():
+        failure_text += csv_path.read_text(encoding="utf-8", errors="replace")
     status = {
         "available": True, "command": command, "exit_code": completed.returncode,
         "permission_denied": "ERR_NVGPUCTRPERM" in failure_text,
@@ -202,8 +204,10 @@ def markdown(report: dict[str, Any], manifest_stub: dict[str, Any]) -> str:
         "This is a mechanism hypothesis, not a demonstrated speedup; the selected variant must "
         "still be implemented and profiled.", "", "## Evidence boundaries", "",
         f"- NSYS coverage is complete for {len(manifest_stub['profiles'])} method-specific captures.",
-        "- NCU hardware counters are incomplete, so memory-bound classification, occupancy "
-        "explanation, and DRAM byte attribution are prohibited.",
+        "- NCU hardware counters are incomplete (" + ", ".join(
+            report["ncu_failure_reasons"] or ["capture failure"]
+        ) + "), so memory-bound classification, occupancy explanation, and DRAM byte "
+        "attribution are prohibited.",
         "- The D64 shape matches the local Qwen2.5-0.5B geometry. D128 matches the Qwen2.5-7B "
         "kernel geometry only and is not end-to-end 7B serving evidence.",
         "- Negative, neutral, and uncertain regimes are retained without outcome-based deletion.", "",
@@ -275,9 +279,20 @@ def main() -> None:
             )
             ncu_statuses[profile_id] = {"parsed": ncu_parsed, "status": ncu_status}
             ncu_complete = ncu_complete and ncu_parsed is not None
+    ncu_failure_reasons = sorted({
+        reason
+        for item in ncu_statuses.values()
+        for reason, present in (
+            ("ERR_NVGPUCTRPERM", item["status"].get("permission_denied", False)),
+            ("driver incompatibility", item["status"].get("driver_incompatible", False)),
+            ("CLI unavailable", not item["status"].get("available", False)),
+        )
+        if present
+    })
     report = {
         "schema_version": 1, "analysis": analysis,
         "ncu_hardware_counters_complete": ncu_complete,
+        "ncu_failure_reasons": ncu_failure_reasons,
         "prohibited_claims": [] if ncu_complete else [
             "memory-bound classification", "occupancy explanation", "DRAM byte attribution"
         ],
@@ -289,11 +304,10 @@ def main() -> None:
     report_md = args.output_dir / "report.md"
     write_text(report_md, markdown(report, manifest_stub))
     artifact_hashes = {
-        "trials.jsonl": file_sha256(trials_path),
-        "report.json": file_sha256(report_path), "report.md": file_sha256(report_md),
+        path.relative_to(args.output_dir).as_posix(): file_sha256(path)
+        for path in sorted(args.output_dir.rglob("*"))
+        if path.is_file() and path.name != "manifest.json"
     }
-    for path in sorted(raw_dir.iterdir()):
-        artifact_hashes[str(path.relative_to(args.output_dir)).replace("\\", "/")] = file_sha256(path)
     manifest = {
         "schema_version": 1, "experiment_id": "h3-paged-decode",
         "protocol_version": protocol["protocol_version"],

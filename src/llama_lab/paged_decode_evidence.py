@@ -203,6 +203,13 @@ def validate_paged_decode_artifact(
     rows = [json.loads(line) for line in trials_path.read_text(encoding="utf-8").splitlines() if line]
     if manifest.get("protocol_sha256") != file_sha256(protocol_path):
         raise ValueError("paged decode protocol hash differs")
+    expected_tree = {
+        path.relative_to(artifact_dir).as_posix()
+        for path in artifact_dir.rglob("*")
+        if path.is_file() and path.name != "manifest.json"
+    }
+    if set(manifest.get("artifact_hashes", {})) != expected_tree:
+        raise ValueError("paged decode artifact file tree differs from manifest")
     for relative, expected_hash in manifest.get("artifact_hashes", {}).items():
         path = artifact_dir / relative
         if not path.is_file() or file_sha256(path) != expected_hash:
@@ -244,4 +251,20 @@ def validate_paged_decode_artifact(
         required = {"memory-bound classification", "occupancy explanation", "DRAM byte attribution"}
         if not required <= prohibited:
             raise ValueError("paged decode incomplete NCU does not prohibit counter claims")
+        ncu = manifest.get("ncu", {})
+        if set(ncu) != expected_profile_ids:
+            raise ValueError("paged decode NCU failure coverage differs")
+        for profile_id, evidence in ncu.items():
+            status = evidence.get("status", {})
+            if evidence.get("parsed") is not None or status.get("exit_code") == 0:
+                raise ValueError(f"paged decode incomplete NCU status is inconsistent: {profile_id}")
+            if status.get("available") and not (
+                status.get("permission_denied") or status.get("driver_incompatible")
+            ):
+                raise ValueError(f"paged decode NCU failure reason is not auditable: {profile_id}")
+        reasons = set(report.get("ncu_failure_reasons", []))
+        if not reasons or not reasons <= {
+            "ERR_NVGPUCTRPERM", "driver incompatibility", "CLI unavailable"
+        }:
+            raise ValueError("paged decode NCU failure reasons differ")
     return {"manifest": manifest, "report": report, "rows": rows}
