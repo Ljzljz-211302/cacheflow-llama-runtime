@@ -19,33 +19,39 @@ from llama_lab.kv_action_evidence import (
 def rows() -> list[dict[str, object]]:
     output: list[dict[str, object]] = []
     order = 0
-    for split, count in (("train", 8), ("evaluation", 4)):
+    for split, count in (("train", 20), ("evaluation", 20)):
         for trace in range(count):
             order += 1
-            snapshot = f"{split}-{trace}"
-            for action, observed, analytical in (
-                ("device_swap", 8.0, 5.0),
-                ("recompute", 2.0, 10.0),
-            ):
-                output.append({
-                    "snapshot_id": snapshot,
-                    "trace_id": snapshot,
-                    "session_id": f"session-{snapshot}",
-                    "prefix_family": f"family-{snapshot}",
-                    "split": split,
-                    "timestamp_order": order,
-                    "backend": "cuda",
-                    "action": action,
-                    "baseline_action": "device_swap",
-                    "context_tokens": 1024,
-                    "batch": 1,
-                    "page_runs": 64,
-                    "kv_pressure": 0.85,
-                    "kv_bytes": 32 * 1024 * 1024,
-                    "reuse_distance": 3,
-                    "analytical_cost_ms": analytical,
-                    "observed_cost_ms": observed,
-                })
+            trace_id = f"{split}-{trace}"
+            for regime in ("resident", "preempted"):
+                snapshot = f"{trace_id}-{regime}"
+                for action, observed, analytical in (
+                    ("device_swap", 8.0, 5.0),
+                    ("recompute", 2.0, 10.0),
+                ):
+                    output.append({
+                        "snapshot_id": snapshot,
+                        "trace_id": trace_id,
+                        "session_id": f"session-{trace_id}",
+                        "prefix_family": f"family-{trace_id}",
+                        "split": split,
+                        "timestamp_order": order,
+                        "backend": "cuda",
+                        "regime": regime,
+                        "action": action,
+                        "baseline_action": "device_swap",
+                        "context_tokens": 1024,
+                        "batch": 1,
+                        "page_runs": 64,
+                        "kv_pressure": 0.85,
+                        "kv_bytes": 32 * 1024 * 1024,
+                        "reuse_distance": 3,
+                        "analytical_cost_ms": analytical,
+                        "observed_cost_ms": observed,
+                        **{f"model_feature_{index}": value for index, value in enumerate(
+                            (1.0, 0.25, 1.0 / 512.0, 0.03125, 0.75, 0.05, 0.85, 0.3, 0.026)
+                        )},
+                    })
     return output
 
 
@@ -55,12 +61,16 @@ class KvActionEvidenceTests(unittest.TestCase):
 
     def test_same_protocol_distinguishes_model_regret(self) -> None:
         report = evaluate_kv_action_models(rows(), self.protocol)
-        self.assertEqual(report["train_traces"], 8)
-        self.assertEqual(report["evaluation_traces"], 4)
+        self.assertEqual(report["train_traces"], 20)
+        self.assertEqual(report["evaluation_traces"], 20)
         self.assertEqual(report["models"]["H0"]["median_regret_ms"], 6.0)
         self.assertEqual(report["models"]["A1"]["median_regret_ms"], 6.0)
         self.assertEqual(report["models"]["T1"]["median_regret_ms"], 0.0)
         self.assertEqual(report["models"]["L1"]["median_regret_ms"], 0.0)
+        self.assertEqual(
+            report["models"]["L1"]["paired_mean_regret_delta_vs_h0_ci95_ms"],
+            [-6.0, -6.0],
+        )
 
     def test_trace_leakage_is_rejected(self) -> None:
         tampered = copy.deepcopy(rows())
@@ -75,7 +85,7 @@ class KvActionEvidenceTests(unittest.TestCase):
             validate_kv_action_rows(tampered, self.protocol)
 
     def test_formal_artifact_recomputes_from_hashed_trials(self) -> None:
-        artifact = Path("results/research/h4-kv-action-v1.0.0")
+        artifact = Path("results/research/h4-kv-action-v1.1.0")
         if not (artifact / "manifest.json").exists():
             self.skipTest("formal H4 artifact has not been generated")
         report = validate_kv_action_artifact(
@@ -84,7 +94,7 @@ class KvActionEvidenceTests(unittest.TestCase):
         self.assertTrue(report["overhead"]["passed"])
 
     def _copy_formal_artifact(self, destination: Path) -> Path:
-        source = Path("results/research/h4-kv-action-v1.0.0")
+        source = Path("results/research/h4-kv-action-v1.1.0")
         if not (source / "manifest.json").exists():
             self.skipTest("formal H4 artifact has not been generated")
         artifact = destination / source.name
@@ -138,14 +148,14 @@ class KvActionEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "file tree differs"):
                 validate_kv_action_artifact(artifact, Path("config/kv_action_policy_protocol.json"))
 
-    def test_formal_artifact_rejects_unbound_source_commit(self) -> None:
+    def test_formal_artifact_rejects_unbound_replay_patch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             artifact = self._copy_formal_artifact(Path(temporary))
             manifest_path = artifact / "manifest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            manifest["vendor_commit"] = "0" * 40
+            manifest["patch_sha256"] = "0" * 64
             manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "source commit is unavailable"):
+            with self.assertRaisesRegex(ValueError, "replay-patch hash differs"):
                 validate_kv_action_artifact(artifact, Path("config/kv_action_policy_protocol.json"))
 
 

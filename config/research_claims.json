@@ -200,16 +200,13 @@
         "docs/experiment-limitations.md",
         "docs/research/primary-source-foundations.md",
         "docs/research/unified-action-cost-model.md",
-        "results/research/h4-kv-action-v1.0.0/manifest.json",
-        "results/research/h4-kv-action-v1.0.0/report.json"
+        "results/research/h4-kv-action-v1.1.0/manifest.json",
+        "results/research/h4-kv-action-v1.1.0/report.json"
       ],
       "observed_results": [
-        "A real Qwen2.5-0.5B CUDA replay collected 20 trace-grouped paired action sets, split chronologically into 12 training and 8 evaluation traces with zero session or prefix-family overlap.",
-        "Sixteen held-out resident/preempted snapshots compared H0, analytical A1, table T1, and per-action Ridge L1 against the same observed complete-action costs.",
-        "L1 made no confidence-bound switch and exactly matched H0: median regret 0 ms, P95 regret 7.2053 ms, cumulative regret 18.5436 ms, and zero decisions more than 3% worse than H0. This is a safe fallback result, not a learned-policy win.",
-        "T1 selected host swap in two preempted snapshots and reduced cumulative regret to 12.6092 ms and P95 regret to 3.0783 ms, but produced one harmful decision (6.25%). This is a mixed result, not a safe production win.",
-        "The hot-path benchmark performed five million choices across 1/2/4/6-action and OOD regimes with zero heap allocations; the worst p99 was 0.800 us. The raw Windows wall-clock maximum was 481.000 us and is retained without trimming as a report-only preemption diagnostic.",
-        "Every real action row independently recorded exactly one selected-action delta and one completed-observation delta; Paged recorded zero production decisions and remains evidence-gated."
+        "The v1.0.0 replay is superseded because it used client HTTP round-trip latency instead of the registered internal complete-action boundary and evaluated a different Ridge contract.",
+        "Protocol v1.1.0 requires 20 held-out pairs in each resident/preempted regime, chronological trace isolation, the production nine-feature online Ridge replay, 10,000 paired bootstrap resamples, and an explicit zero-CUDA-sync gate.",
+        "Corrected v1.1.0 numerical results are published only after regeneration from a clean implementation commit; v1.0.0 numbers are retained solely under results/research/superseded for audit."
       ],
       "scope_limits": [
         "The unified policy currently executes H0 and runs per-action Ridge in shadow; the held-out run did not justify active L1 selection.",

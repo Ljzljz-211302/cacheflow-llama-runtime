@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "protocol_version": "1.0.0",
+  "protocol_version": "1.1.0",
   "claim_id": "H4-adaptive-action-policy",
   "cost_boundary": "scheduler snapshot ready through next useful decode runnable",
   "production_actions": ["direct", "device_swap", "host_swap", "recompute"],
@@ -13,8 +13,8 @@
     "unit": "trace_id",
     "group_fields": ["session_id", "prefix_family"],
     "ordering": "training traces precede evaluation traces",
-    "minimum_train_traces": 8,
-    "minimum_evaluation_traces": 4,
+    "minimum_train_traces": 20,
+    "minimum_evaluation_traces": 20,
     "row_randomization_prohibited": true
   },
   "features": [
@@ -48,6 +48,7 @@
     "cuda_synchronizations": 0
   },
   "confirmatory": {
+    "regimes": ["resident", "preempted"],
     "minimum_pairs_per_regime": 20,
     "bootstrap_samples": 10000,
     "bootstrap_seed": 6042026,

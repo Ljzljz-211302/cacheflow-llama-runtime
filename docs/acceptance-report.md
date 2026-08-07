@@ -131,7 +131,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 
 ## 个人贡献边界
 
-固定上游提供 GGUF/模型 graph、GGML 通用算子、既有 backend、HTTP 基础设施和 sampling。个人差异是 Engine 拆分、Scheduler、KV 资源/块/事务 Swap、真实 CUDA KV Adapter 与 kernels、自适应/收益门控、在线策略持久化、metrics、fault injection 和复现实验。当前相对固定上游为 69 files、+10980/-99。代码量只统计该 patch；不得把 `vendor/llama.cpp` 原有代码算作个人实现，也不得声称“重写了 llama.cpp”。
+固定上游提供 GGUF/模型 graph、GGML 通用算子、既有 backend、HTTP 基础设施和 sampling。个人差异是 Engine 拆分、Scheduler、KV 资源/块/事务 Swap、真实 CUDA KV Adapter 与 kernels、自适应/收益门控、在线策略持久化、metrics、fault injection 和复现实验。当前相对固定上游为 69 files、+11031/-99。代码量只统计该 patch；不得把 `vendor/llama.cpp` 原有代码算作个人实现，也不得声称“重写了 llama.cpp”。
 
 ### 生产重启与状态损坏
 
@@ -170,6 +170,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 - 能力门禁：Remap/Paged 没有完整 `llama_decode` adapter，因此正式生产 capability 为 false；Paged decision 为 0，不把 H3 microbenchmark 冒充生产 dispatch。
 - 算法：H0 固定安全规则、A1 解析模型、T1 分桶查表、L1 置信约束 Ridge 使用相同 snapshot 和完整动作边界；无效/OOD/冷启动/不确定性均 fail closed。
 - 数据隔离：20 个 trace group 按时间顺序切为 12 train / 8 evaluation，session、prefix family 与 trace 均无交叉；16 个 held-out resident/preempted snapshot 采用 paired action observation。
-- 受限结果：L1 没有置信切换，精确匹配 H0（median regret 0 ms、P95 7.2053 ms、cumulative 18.5436 ms、harmful 0）；T1 把 P95/cumulative regret 降到 3.0783/12.6092 ms，但 harmful 为 1/16（6.25%）。这是混合结果；安全回退成立，但不能声称 learned policy 已优于 H0。
-- 热路径：5 个 action/OOD regime、500 万次 choose、零 allocation，最差 p99 0.800 us，decision/action ratio p99 0.0345%；raw Windows maximum 481.000 us 保留为 report-only 抢占诊断。
-- 证据所有权：artifact 精确绑定协议/模型哈希、外层实现提交、vendor 提交及固定上游 replay patch、完整文件树；validator 从 raw rows 重算 H0/A1/T1/L1 与 overhead，并有重哈希 trial/overhead、额外文件和伪提交测试。
+- v1.0.0 的数值因错误使用 HTTP 往返计时且 L1 合同与生产不一致而被否决，仅保留在 `results/research/superseded/`。v1.1.0 必须从干净实现提交重采集后才允许填写正式数值。
+- v1.1.0 硬门禁：resident/preempted 各 20 个 held-out pair、10,000 次 paired bootstrap、内部完整动作 counter、生产同构 9 维在线 Ridge、5 个 overhead regime、零 allocation、零 CUDA sync、p99 不超过 50 us、decision/action ratio p99 不超过 1%。
+- 证据所有权：artifact 精确绑定协议/模型哈希、外层实现提交、固定上游及 replay patch、完整文件树；validator 同时验证干净开发提交树或 bootstrap 已应用 patch 树，拒绝额外 vendor 改动，并从 raw rows 重算 H0/A1/T1/L1 与 overhead。

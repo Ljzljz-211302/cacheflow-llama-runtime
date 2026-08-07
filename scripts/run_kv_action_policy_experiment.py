@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -21,7 +22,7 @@ from llama_lab.kv_action_evidence import evaluate_kv_action_models, load_kv_acti
 from llama_lab.server_bench import wait_until_ready
 
 
-ARTIFACT = ROOT / "results/research/h4-kv-action-v1.0.0"
+ARTIFACT = ROOT / "results/research/h4-kv-action-v1.1.0"
 PROTOCOL_PATH = ROOT / "config/kv_action_policy_protocol.json"
 SERVER = ROOT / "build/patched-cuda-ninja3/bin/llama-server.exe"
 MODEL = ROOT / "models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
@@ -101,12 +102,14 @@ def stop(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=5)
 
 
-def observe(mode: str, port: int, trace: int, prompt: str, unrelated: str) -> dict[str, float | int]:
+def observe(mode: str, port: int, trace: int, prompt: str, unrelated: str) -> dict[str, Any]:
     before = metrics(port)
     selected_sample = f'llamacpp:kv_action_decisions_total{{action="{mode}"}}'
     observed_sample = f'llamacpp:kv_action_observations_total{{action="{mode}"}}'
+    cost_sample = f'llamacpp:kv_action_observation_seconds_total{{action="{mode}"}}'
     selected_before = metric(before, selected_sample)
     observed_before = metric(before, observed_sample)
+    cost_before = metric(before, cost_sample)
     decision_seconds_before = metric(before, "llamacpp:kv_action_decision_seconds_total")
     payload = {"prompt": prompt, "n_predict": 1, "temperature": 0, "cache_prompt": True}
     if mode == "recompute":
@@ -134,6 +137,7 @@ def observe(mode: str, port: int, trace: int, prompt: str, unrelated: str) -> di
     after = metrics(port)
     selected_after = metric(after, selected_sample)
     observed_after = metric(after, observed_sample)
+    cost_after = metric(after, cost_sample)
     decision_seconds_after = metric(after, "llamacpp:kv_action_decision_seconds_total")
     if selected_after - selected_before != 1:
         raise AssertionError(
@@ -151,30 +155,61 @@ def observe(mode: str, port: int, trace: int, prompt: str, unrelated: str) -> di
     decision_seconds = decision_seconds_after - decision_seconds_before
     if decision_seconds < 0:
         raise AssertionError("KV action decision CPU counter decreased")
+    internal_cost_ms = (cost_after - cost_before) * 1000.0
+    if internal_cost_ms <= 0:
+        raise AssertionError("KV action internal complete-action cost did not increase")
     return {
-        "observed_cost_ms": elapsed_ms,
+        "observed_cost_ms": internal_cost_ms,
+        "http_elapsed_ms": elapsed_ms,
+        "runtime_model_features": [
+            metric(after, f'llamacpp:kv_action_last_model_feature{{index="{index}"}}')
+            for index in range(9)
+        ],
         "prompt_tokens": prompt_n,
         "selected_delta": selected_after - selected_before,
         "observation_delta": observed_after - observed_before,
         "paged_decisions": metric(after, 'llamacpp:kv_action_decisions_total{action="paged"}'),
         "invalid_features": metric(after, "llamacpp:kv_action_invalid_features_total"),
         "decision_cpu_ms": decision_seconds * 1000.0,
-        "decision_to_action_ratio": decision_seconds * 1000.0 / elapsed_ms,
+        "decision_to_action_ratio": decision_seconds * 1000.0 / internal_cost_ms,
     }
 
 
-def analytical(action: str, tokens: int, kv_bytes: int) -> float:
+def analytical(action: str, tokens: int, kv_bytes: int, pressure: float) -> float:
     decode = 0.02
-    if action == "direct":
-        return decode
-    if action == "recompute":
-        return tokens * 0.03 + decode
     transfer = kv_bytes / (12.0 * 1024 * 1024)
+    pressure_cost = max(0.0, pressure - 0.90) * (
+        kv_bytes / (100.0 * 1024 * 1024) + tokens * 0.03
+    )
+    if action == "direct":
+        return decode + pressure_cost
+    if action == "recompute":
+        return tokens * 0.03 + decode + pressure_cost
     if action == "device_swap":
-        return transfer + 0.02 + decode
+        return transfer + 0.02 + decode + pressure_cost
     if action == "host_swap":
-        return transfer + 0.20 + decode
+        return transfer + 0.20 + decode + pressure_cost
     raise ValueError(action)
+
+
+def normalized_model_features(
+    tokens: int, kv_bytes: int, pages: int, contiguous_pages: int,
+    reuse_distance: int, pressure: float,
+) -> list[float]:
+    fragmented = (pages - min(pages, contiguous_pages)) / pages if pages else 0.0
+    bound = lambda value: min(4.0, max(0.0, value))
+    host_transfer_ms = kv_bytes / (12.0 * 1024 * 1024)
+    return [
+        1.0,
+        bound(tokens / 4096.0),
+        bound(1.0 / 512.0),
+        bound(kv_bytes / (1024.0**3)),
+        fragmented,
+        bound(math.log1p(reuse_distance) / 20.0),
+        pressure,
+        0.3,
+        bound(host_transfer_ms / 100.0),
+    ]
 
 
 def main() -> None:
@@ -183,21 +218,39 @@ def main() -> None:
     outer_status = subprocess.check_output(
         ["git", "status", "--porcelain", "--untracked-files=all"], cwd=ROOT, text=True
     )
-    vendor_status = subprocess.check_output(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
-        cwd=ROOT / "vendor/llama.cpp", text=True,
-    )
-    if outer_status or vendor_status:
-        raise RuntimeError("formal KV action evidence requires clean outer and vendor worktrees")
+    if outer_status:
+        raise RuntimeError("formal KV action evidence requires a clean outer worktree")
     committed_patch = subprocess.check_output(
         ["git", "show", f"HEAD:{PATCH_REPOSITORY_PATH}"], cwd=ROOT
     )
-    vendor_patch = subprocess.check_output(
-        ["git", "diff", "--binary", f"{UPSTREAM_REVISION}..HEAD"],
-        cwd=ROOT / "vendor/llama.cpp",
+    vendor_root = ROOT / "vendor/llama.cpp"
+    vendor_head = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=vendor_root, text=True
+    ).strip()
+    vendor_status = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=vendor_root, text=True,
     )
-    if committed_patch != vendor_patch:
-        raise RuntimeError("committed replay patch does not reproduce the current vendor revision")
+    if vendor_head == UPSTREAM_REVISION:
+        subprocess.run(
+            ["git", "apply", "--reverse", "--check", str(ROOT / PATCH_REPOSITORY_PATH)],
+            cwd=vendor_root, check=True,
+        )
+        patch_paths = {
+            line.split(" b/", 1)[1].decode()
+            for line in committed_patch.splitlines() if line.startswith(b"diff --git a/")
+        }
+        status_paths = {line[3:].strip().replace("\\", "/") for line in vendor_status.splitlines()}
+        if status_paths != patch_paths:
+            raise RuntimeError("vendor worktree contains changes outside the applied replay patch")
+    else:
+        if vendor_status:
+            raise RuntimeError("committed vendor evidence tree must be clean")
+        vendor_patch = subprocess.check_output(
+            ["git", "diff", "--binary", f"{UPSTREAM_REVISION}..HEAD"], cwd=vendor_root,
+        )
+        if committed_patch != vendor_patch:
+            raise RuntimeError("committed replay patch does not reproduce the vendor revision")
     ARTIFACT.mkdir(parents=True, exist_ok=True)
     raw = ARTIFACT / "raw"
     raw.mkdir(exist_ok=True)
@@ -211,9 +264,9 @@ def main() -> None:
 
         rows: list[dict[str, Any]] = []
         repeats = (24, 48, 96, 128)
-        trace_markers = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉"
+        trace_markers = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉天地玄黄宇宙洪荒日月盈昃寒来暑往秋收冬藏"
         order = 0
-        for trace in range(20):
+        for trace in range(40):
             order += 1
             family = f"prefix-family-{trace:02d}"
             prompt = trace_markers[trace] * 4 + " " + (
@@ -228,7 +281,9 @@ def main() -> None:
                 observed[mode] = observe(mode, MODES[mode], trace, prompt, unrelated)
             tokens = max(int(value["prompt_tokens"]) for value in observed.values())
             kv_bytes = tokens * 24 * 2 * 64 * 2 * 2
-            split = "train" if trace < 12 else "evaluation"
+            split = "train" if trace < 20 else "evaluation"
+            pressure = 0.50 + 0.10 * (trace % 4)
+            reuse_distance = 1 + trace % 5
             base = {
                 "trace_id": f"trace-{trace:02d}",
                 "session_id": f"session-{trace:02d}",
@@ -238,9 +293,9 @@ def main() -> None:
                 "backend": "cuda",
                 "context_tokens": tokens,
                 "batch": 1,
-                "kv_pressure": 0.50 + 0.10 * (trace % 4),
+                "kv_pressure": pressure,
                 "kv_bytes": kv_bytes,
-                "reuse_distance": 1 + trace % 5,
+                "reuse_distance": reuse_distance,
             }
             for snapshot_kind, actions, baseline, page_runs in (
                 ("resident", ("direct", "recompute"), "direct", 1),
@@ -248,15 +303,27 @@ def main() -> None:
                  max(1, (tokens + 15) // 16)),
             ):
                 snapshot_id = f"trace-{trace:02d}-{snapshot_kind}"
+                model_features = normalized_model_features(
+                    tokens, kv_bytes, max(1, (tokens + 15) // 16),
+                    max(1, (tokens + 15) // 16) if snapshot_kind == "resident" else 0,
+                    reuse_distance, pressure,
+                )
                 for action in actions:
                     rows.append({
                         **base,
                         "snapshot_id": snapshot_id,
+                        "regime": snapshot_kind,
                         "page_runs": page_runs,
                         "action": action,
                         "baseline_action": baseline,
-                        "analytical_cost_ms": analytical(action, tokens, kv_bytes),
+                        "analytical_cost_ms": analytical(action, tokens, kv_bytes, pressure),
                         "observed_cost_ms": observed[action]["observed_cost_ms"],
+                        "http_elapsed_ms": observed[action]["http_elapsed_ms"],
+                        "runtime_model_features": observed[action]["runtime_model_features"],
+                        **{
+                            f"model_feature_{index}": value
+                            for index, value in enumerate(model_features)
+                        },
                         "selected_delta": observed[action]["selected_delta"],
                         "observation_delta": observed[action]["observation_delta"],
                         "paged_decisions": observed[action]["paged_decisions"],
@@ -289,11 +356,13 @@ def main() -> None:
         "p99_choose_microseconds": max(float(row["p99_ns"]) for row in overhead) / 1000.0,
         "measured_max_choose_microseconds": max(float(row["max_ns"]) for row in overhead) / 1000.0,
         "hot_loop_allocations": sum(int(row["allocations"]) for row in overhead),
+        "cuda_synchronizations": sum(int(row["cuda_sync_calls"]) for row in overhead),
         "scheduler_cpu_ratio_p99": ratio_p99,
     }
     overhead_result["passed"] = (
         overhead_result["p99_choose_microseconds"] <= overhead_gates["p99_choose_microseconds_max"]
         and overhead_result["hot_loop_allocations"] == overhead_gates["hot_loop_allocations"]
+        and overhead_result["cuda_synchronizations"] == overhead_gates["cuda_synchronizations"]
         and overhead_result["scheduler_cpu_ratio_p99"] <= overhead_gates["scheduler_cpu_ratio_p99_max"]
     )
     report = {
@@ -307,6 +376,7 @@ def main() -> None:
             "production_actions": protocol["production_actions"],
             "masked_actions": protocol["evidence_gated_actions"],
             "complete_action_boundary": protocol["cost_boundary"],
+            "observed_cost_source": "llamacpp:kv_action_observation_seconds_total delta",
         },
     }
     report_path = ARTIFACT / "report.json"
@@ -331,6 +401,10 @@ def main() -> None:
         "The confirmatory replay compares only actions with complete real-service implementations. "
         "Remap and Paged remain capability-masked; Paged recorded zero production decisions.",
         "",
+        "`observed_cost_ms` is the server policy's internal counter delta from scheduler snapshot "
+        "through that slot's first completed useful target decode. HTTP round-trip time is retained "
+        "separately and never enters regret or harm.",
+        "",
         "| Model | Median regret (ms) | P95 regret (ms) | Harmful rate |",
         "|---|---:|---:|---:|",
         *model_lines,
@@ -342,7 +416,11 @@ def main() -> None:
         f"Decision overhead: p99 {overhead_result['p99_choose_microseconds']:.3f} us; "
         f"observed max {overhead_result['measured_max_choose_microseconds']:.3f} us; "
         f"scheduler/action ratio p99 {overhead_result['scheduler_cpu_ratio_p99'] * 100:.4f}%; "
-        f"hot-loop allocations {overhead_result['hot_loop_allocations']}.",
+        f"hot-loop allocations {overhead_result['hot_loop_allocations']}; "
+        f"CUDA synchronizations {overhead_result['cuda_synchronizations']}.",
+        "",
+        "Each model's JSON summary includes a 10,000-resample paired bootstrap 95% CI for "
+        "mean regret delta versus H0.",
         "",
         "The observed maximum is a Windows wall-clock measurement and includes thread preemption. "
         "It is reported without trimming.",
@@ -351,14 +429,11 @@ def main() -> None:
     (ARTIFACT / "report.md").write_text(report_markdown, encoding="utf-8")
     manifest = {
         "schema_version": 1,
-        "artifact_version": "h4-kv-action-v1.0.0",
+        "artifact_version": "h4-kv-action-v1.1.0",
         "protocol_sha256": sha256(PROTOCOL_PATH),
         "model_path": MODEL.relative_to(ROOT).as_posix(),
         "model_sha256": sha256(MODEL),
         "outer_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-        "vendor_commit": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT / "vendor/llama.cpp", text=True
-        ).strip(),
         "upstream_revision": UPSTREAM_REVISION,
         "patch_path": PATCH_REPOSITORY_PATH,
         "patch_sha256": hashlib.sha256(committed_patch).hexdigest(),

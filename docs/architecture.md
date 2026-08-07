@@ -989,7 +989,7 @@ sequenceDiagram
 
 - 一键构建、测试、Sanitizer 和 benchmark 已纳入 `verify.ps1 -Full`，2026-08-01 最终提交版本整链 1395.4 秒通过；
 - 架构图、生产 Engine trace 火焰图、mixed workload 原始 trial 和自动报告已生成；
-- 当前个人贡献统计为相对固定上游 69 files、+10980/-99；patch 可逆性由全量入口检查；
+- 当前个人贡献统计为相对固定上游 69 files、+11031/-99；patch 可逆性由全量入口检查；
 - 三分钟演示、算法/状态/失败模式/实验限制深挖手册已完成。
 
 ## 16. 当前代码到目标 Module 的映射
@@ -1230,6 +1230,6 @@ Remap/Paged 在生产快照中的 capability 为 false；正式 CUDA 证据要�
 
 ### 26.5 正式证据与边界
 
-协议固定 trace/session/prefix-family 分组、时间顺序切分、同 snapshot paired action、H0/A1/T1/L1 和开销门禁。正式 artifact 使用真实 Qwen2.5-0.5B CUDA server 收集 20 个 trace group，前 12 个训练、后 8 个评估，共 16 个 held-out resident/preempted snapshot。当前 L1 因置信界不足没有切换，与 H0 完全一致；T1 查表降低了 cumulative regret，但在稀疏 held-out bucket 上产生 1/16（6.25%）harmful decision。这是混合结果和安全回退有效的证据，不是 learned policy 已经加速的证据。
+协议固定 trace/session/prefix-family 分组、时间顺序切分、同 snapshot paired action、H0/A1/T1/L1 和开销门禁。v1.1.0 要求 resident/preempted 各 20 个 held-out pair、服务内部完整动作计时、生产同构 9 维在线 Ridge、10,000 次 paired bootstrap 和零 CUDA-sync。v1.0.0 因违反计时与模型合同已被移入 superseded；不得继续引用其数值。
 
-硬门禁为 choose p99 不超过 50 us、decision/action ratio p99 不超过 1%、热路径零 allocation、零 CUDA sync。Windows raw wall-clock maximum 原样保留为抢占诊断，不作硬门禁。artifact 绑定协议、模型 SHA-256、外层实现提交、vendor 提交、固定上游到 vendor 的 replay patch、完整文件树与逐文件哈希；校验器从原始 paired rows 重算分析和开销，并拒绝重新计算文件哈希后的语义篡改。
+硬门禁为 choose p99 不超过 50 us、decision/action ratio p99 不超过 1%、热路径零 allocation、零 CUDA sync。Windows raw wall-clock maximum 原样保留为抢占诊断，不作硬门禁。artifact 绑定协议、模型 SHA-256、外层实现提交、固定上游与 replay patch、完整文件树及逐文件哈希；校验器接受与 patch 等价的干净开发提交树或 bootstrap 后的已应用 patch 工作树，拒绝任何额外 vendor 改动，并从原始 paired rows 重算分析和开销。

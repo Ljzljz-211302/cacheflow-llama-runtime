@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+import random
 import statistics
 import subprocess
 from collections import defaultdict
@@ -16,6 +17,7 @@ ACTIONS = ("direct", "remap", "paged", "device_swap", "host_swap", "recompute")
 FEATURES = (
     "context_tokens", "batch", "page_runs", "kv_pressure", "kv_bytes", "reuse_distance"
 )
+MODEL_FEATURES = tuple(f"model_feature_{index}" for index in range(9))
 
 
 def load_kv_action_protocol(path: Path) -> dict[str, Any]:
@@ -28,6 +30,12 @@ def load_kv_action_protocol(path: Path) -> dict[str, Any]:
         raise ValueError("KV action protocol split unit must be trace_id")
     if not protocol.get("split", {}).get("row_randomization_prohibited"):
         raise ValueError("KV action protocol must prohibit row randomization")
+    if int(protocol.get("confirmatory", {}).get("minimum_pairs_per_regime", 0)) < 20:
+        raise ValueError("KV action protocol requires at least 20 pairs per regime")
+    if int(protocol.get("confirmatory", {}).get("bootstrap_samples", 0)) != 10000:
+        raise ValueError("KV action protocol requires 10,000 bootstrap resamples")
+    if protocol.get("overhead_gates", {}).get("cuda_synchronizations") != 0:
+        raise ValueError("KV action policy must prohibit CUDA synchronization")
     return protocol
 
 
@@ -39,13 +47,12 @@ def validate_kv_action_rows(rows: list[dict[str, Any]], protocol: dict[str, Any]
     required = {
         "snapshot_id", "trace_id", "session_id", "prefix_family", "split",
         "timestamp_order", "backend", "action", "baseline_action",
-        "analytical_cost_ms", "observed_cost_ms", *FEATURES,
+        "regime", "analytical_cost_ms", "observed_cost_ms", *FEATURES, *MODEL_FEATURES,
     }
     if not rows:
         raise ValueError("KV action evaluation rows are empty")
     split_by_trace: dict[str, str] = {}
     split_by_group: dict[tuple[str, str], str] = {}
-    timestamp_by_trace: dict[str, set[int]] = defaultdict(set)
     snapshots: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         missing = required - row.keys()
@@ -55,7 +62,7 @@ def validate_kv_action_rows(rows: list[dict[str, Any]], protocol: dict[str, Any]
             raise ValueError("KV action row split must be train or evaluation")
         if row["action"] not in ACTIONS or row["baseline_action"] not in ACTIONS:
             raise ValueError("KV action row contains an unknown action")
-        for field in (*FEATURES, "analytical_cost_ms", "observed_cost_ms"):
+        for field in (*FEATURES, *MODEL_FEATURES, "analytical_cost_ms", "observed_cost_ms"):
             if not _finite(row[field]) or float(row[field]) < 0:
                 raise ValueError(f"KV action row has invalid {field}")
         trace = str(row["trace_id"])
@@ -67,7 +74,6 @@ def validate_kv_action_rows(rows: list[dict[str, Any]], protocol: dict[str, Any]
         if prior_group != row["split"]:
             raise ValueError("session/prefix family leaks across train/evaluation")
         order = int(row["timestamp_order"])
-        timestamp_by_trace[trace].add(order)
         snapshots[str(row["snapshot_id"])].append(row)
     train_traces = {trace for trace, split in split_by_trace.items() if split == "train"}
     eval_traces = {trace for trace, split in split_by_trace.items() if split == "evaluation"}
@@ -87,10 +93,24 @@ def validate_kv_action_rows(rows: list[dict[str, Any]], protocol: dict[str, Any]
         baseline = {row["baseline_action"] for row in group_rows}
         if len(baseline) != 1 or next(iter(baseline)) not in actions:
             raise ValueError(f"snapshot {snapshot_id} has an invalid H0 baseline")
-        fixed = ("trace_id", "session_id", "prefix_family", "split", "timestamp_order", *FEATURES)
+        fixed = (
+            "trace_id", "session_id", "prefix_family", "split", "timestamp_order",
+            "regime", *FEATURES, *MODEL_FEATURES,
+        )
         reference = group_rows[0]
         if any(any(row[field] != reference[field] for field in fixed) for row in group_rows[1:]):
             raise ValueError(f"snapshot {snapshot_id} changes paired features")
+    minimum_pairs = int(protocol["confirmatory"]["minimum_pairs_per_regime"])
+    evaluation_pairs: dict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        if row["split"] == "evaluation":
+            evaluation_pairs[str(row["regime"])].add(str(row["snapshot_id"]))
+    if set(evaluation_pairs) != set(protocol["confirmatory"]["regimes"]):
+        raise ValueError("KV action evaluation regime coverage differs from protocol")
+    if any(
+        len(pairs) < minimum_pairs for pairs in evaluation_pairs.values()
+    ):
+        raise ValueError("KV action evaluation pairs per regime are below protocol")
 
 
 def _bucket(value: float, edges: Iterable[float]) -> int:
@@ -111,61 +131,60 @@ def _table_key(row: dict[str, Any], protocol: dict[str, Any]) -> tuple[Any, ...]
     )
 
 
-def _scaled_features(row: dict[str, Any]) -> list[float]:
-    return [
-        1.0,
-        min(4.0, float(row["context_tokens"]) / 4096.0),
-        min(4.0, float(row["batch"]) / 4.0),
-        min(4.0, float(row["page_runs"]) / 64.0),
-        float(row["kv_pressure"]),
-        min(4.0, float(row["kv_bytes"]) / (1024.0**3)),
-        min(4.0, math.log1p(float(row["reuse_distance"])) / 20.0),
-    ]
+def _model_features(row: dict[str, Any]) -> list[float]:
+    return [float(row[field]) for field in MODEL_FEATURES]
 
 
-def _solve(matrix: list[list[float]], rhs: list[float]) -> list[float]:
-    augmented = [row[:] + [rhs[index]] for index, row in enumerate(matrix)]
-    size = len(rhs)
-    for column in range(size):
-        pivot = max(range(column, size), key=lambda row: abs(augmented[row][column]))
-        augmented[column], augmented[pivot] = augmented[pivot], augmented[column]
-        divisor = augmented[column][column]
-        if abs(divisor) < 1e-12:
-            continue
-        augmented[column] = [value / divisor for value in augmented[column]]
-        for row in range(size):
-            if row == column:
-                continue
-            factor = augmented[row][column]
-            augmented[row] = [
-                left - factor * right
-                for left, right in zip(augmented[row], augmented[column])
-            ]
-    return [augmented[index][-1] for index in range(size)]
+class _OnlineRidge:
+    """Exact Python replay of server_kv_action_policy::ridge_model."""
 
+    def __init__(self, ridge_lambda: float) -> None:
+        self.inverse = [
+            [1.0 / ridge_lambda if row == column else 0.0 for column in range(9)]
+            for row in range(9)
+        ]
+        self.rhs = [0.0] * 9
+        self.observations = 0
+        self.residual_variance_ewma = 0.0
 
-def _fit_ridge(rows: list[dict[str, Any]], ridge_lambda: float) -> tuple[list[float], float]:
-    width = len(_scaled_features(rows[0]))
-    normal = [[0.0] * width for _ in range(width)]
-    rhs = [0.0] * width
-    for row in rows:
-        features = _scaled_features(row)
-        cost = float(row["observed_cost_ms"])
-        for left in range(width):
-            rhs[left] += features[left] * cost
-            for right in range(width):
-                normal[left][right] += features[left] * features[right]
-    for index in range(width):
-        normal[index][index] += ridge_lambda
-    weights = _solve(normal, rhs)
-    residuals = [
-        float(row["observed_cost_ms"]) - sum(
-            weight * feature for weight, feature in zip(weights, _scaled_features(row))
+    def predict(self, features: list[float]) -> float:
+        result = 0.0
+        for row in range(9):
+            theta = sum(
+                self.inverse[row][column] * self.rhs[column] for column in range(9)
+            )
+            result += theta * features[row]
+        return max(0.0, result)
+
+    def radius(self, features: list[float], beta: float) -> float:
+        quadratic = sum(
+            features[row] * self.inverse[row][column] * features[column]
+            for row in range(9) for column in range(9)
         )
-        for row in rows
-    ]
-    rmse = math.sqrt(sum(value * value for value in residuals) / len(residuals))
-    return weights, rmse
+        sigma = math.sqrt(max(1e-9, self.residual_variance_ewma))
+        return beta * sigma * math.sqrt(max(0.0, quadratic))
+
+    def observe(self, features: list[float], cost: float) -> None:
+        previous = self.predict(features)
+        inverse_x = [
+            sum(self.inverse[row][column] * features[column] for column in range(9))
+            for row in range(9)
+        ]
+        denominator = 1.0 + sum(
+            features[row] * inverse_x[row] for row in range(9)
+        )
+        for row in range(9):
+            for column in range(9):
+                self.inverse[row][column] -= (
+                    inverse_x[row] * inverse_x[column] / denominator
+                )
+            self.rhs[row] += features[row] * cost
+        residual = cost - previous
+        self.residual_variance_ewma = (
+            residual * residual if self.observations == 0
+            else 0.1 * residual * residual + 0.9 * self.residual_variance_ewma
+        )
+        self.observations += 1
 
 
 def _percentile(values: list[float], quantile: float) -> float:
@@ -183,14 +202,17 @@ def evaluate_kv_action_models(
     for row in train:
         table_values[_table_key(row, protocol)].append(float(row["observed_cost_ms"]))
     table = {key: statistics.median(values) for key, values in table_values.items()}
-    learned_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in train:
-        learned_rows[row["action"]].append(row)
-    minimum = int(protocol["learned"]["minimum_action_observations"])
     learned = {
-        action: _fit_ridge(action_rows, float(protocol["learned"]["ridge_lambda"]))
-        for action, action_rows in learned_rows.items() if len(action_rows) >= minimum
+        action: _OnlineRidge(float(protocol["learned"]["ridge_lambda"]))
+        for action in ACTIONS
     }
+    for row in sorted(
+        train, key=lambda value: (int(value["timestamp_order"]), str(value["snapshot_id"]))
+    ):
+        learned[str(row["action"])].observe(
+            _model_features(row), float(row["observed_cost_ms"])
+        )
+    minimum = int(protocol["learned"]["minimum_action_observations"])
     snapshots: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in evaluation:
         snapshots[str(row["snapshot_id"])].append(row)
@@ -210,23 +232,22 @@ def evaluate_kv_action_models(
         choices["T1"] = min(
             table_candidates, key=lambda row: table[_table_key(row, protocol)]
         )["action"] if table_candidates else baseline
-        baseline_model = learned.get(baseline)
+        baseline_model = learned[baseline]
         learned_choice = baseline
-        if baseline_model:
-            features = _scaled_features(snapshot[0])
-            baseline_prediction = max(0.0, sum(
-                weight * feature for weight, feature in zip(baseline_model[0], features)
-            ))
-            baseline_lower = max(0.0, baseline_prediction - beta * baseline_model[1])
+        if baseline_model.observations >= minimum:
+            features = _model_features(snapshot[0])
+            baseline_prediction = baseline_model.predict(features)
+            baseline_lower = max(
+                0.0, baseline_prediction - baseline_model.radius(features, beta)
+            )
             candidates: list[tuple[float, str]] = []
             for action in by_action:
-                model = learned.get(action)
-                if not model:
+                model = learned[action]
+                if model.observations < minimum:
                     continue
-                prediction = max(0.0, sum(
-                    weight * feature for weight, feature in zip(model[0], features)
-                ))
-                candidates.append((prediction + beta * model[1], action))
+                candidates.append(
+                    (model.predict(features) + model.radius(features, beta), action)
+                )
             if candidates:
                 upper, candidate = min(candidates)
                 if candidate != baseline and upper + margin < baseline_lower:
@@ -245,8 +266,17 @@ def evaluate_kv_action_models(
                 "harmful": cost > baseline_cost * (1.0 + harm_ratio),
             })
     summary: dict[str, Any] = {}
+    h0_regrets = [float(row["regret_ms"]) for row in results["H0"]]
+    bootstrap_samples = int(protocol["confirmatory"]["bootstrap_samples"])
+    bootstrap_seed = int(protocol["confirmatory"]["bootstrap_seed"])
     for model, decisions in results.items():
         regrets = [float(row["regret_ms"]) for row in decisions]
+        deltas = [left - right for left, right in zip(regrets, h0_regrets)]
+        generator = random.Random(bootstrap_seed)
+        bootstrapped = [
+            statistics.fmean(deltas[generator.randrange(len(deltas))] for _ in deltas)
+            for _ in range(bootstrap_samples)
+        ]
         summary[model] = {
             "decisions": len(decisions),
             "mean_regret_ms": statistics.fmean(regrets),
@@ -257,6 +287,9 @@ def evaluate_kv_action_models(
             "cumulative_regret_ms": sum(regrets),
             "harmful_decisions": sum(bool(row["harmful"]) for row in decisions),
             "harmful_rate": statistics.fmean(bool(row["harmful"]) for row in decisions),
+            "paired_mean_regret_delta_vs_h0_ci95_ms": [
+                _percentile(bootstrapped, 0.025), _percentile(bootstrapped, 0.975)
+            ],
             "choices": {action: sum(row["chosen"] == action for row in decisions) for action in ACTIONS},
         }
     return {
@@ -280,7 +313,7 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
     protocol = load_kv_action_protocol(protocol_path)
     manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
     report = json.loads((artifact / "report.json").read_text(encoding="utf-8"))
-    if manifest.get("artifact_version") != "h4-kv-action-v1.0.0":
+    if manifest.get("artifact_version") != "h4-kv-action-v1.1.0":
         raise ValueError("KV action artifact version differs")
     if manifest.get("protocol_sha256") != _sha256(protocol_path):
         raise ValueError("KV action protocol hash differs")
@@ -303,18 +336,12 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
     if manifest.get("runs") != expected_runs:
         raise ValueError("KV action service run configuration differs")
     outer_commit = manifest.get("outer_commit")
-    vendor_commit = manifest.get("vendor_commit")
-    if not isinstance(outer_commit, str) or not isinstance(vendor_commit, str):
+    if not isinstance(outer_commit, str):
         raise ValueError("KV action source provenance is missing")
     try:
         subprocess.run(
             ["git", "cat-file", "-e", f"{outer_commit}^{{commit}}"], cwd=project_root,
             check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            ["git", "cat-file", "-e", f"{vendor_commit}^{{commit}}"],
-            cwd=project_root / "vendor/llama.cpp", check=True,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         patch_path = manifest.get("patch_path")
         upstream_revision = manifest.get("upstream_revision")
@@ -323,16 +350,45 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
         committed_patch = subprocess.check_output(
             ["git", "show", f"{outer_commit}:{patch_path}"], cwd=project_root,
         )
-        vendor_patch = subprocess.check_output(
-            ["git", "diff", "--binary", f"{upstream_revision}..{vendor_commit}"],
-            cwd=project_root / "vendor/llama.cpp",
-        )
     except (OSError, subprocess.CalledProcessError) as error:
         raise ValueError("KV action source commit is unavailable") from error
     if manifest.get("patch_sha256") != hashlib.sha256(committed_patch).hexdigest():
         raise ValueError("KV action committed replay-patch hash differs")
-    if committed_patch != vendor_patch:
-        raise ValueError("KV action replay patch does not bind the vendor commit")
+    vendor_root = project_root / "vendor/llama.cpp"
+    if vendor_root.is_dir():
+        try:
+            vendor_head = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=vendor_root, text=True,
+            ).strip()
+            vendor_status = subprocess.check_output(
+                ["git", "status", "--porcelain", "--untracked-files=all"],
+                cwd=vendor_root, text=True,
+            )
+            if vendor_head == upstream_revision:
+                subprocess.run(
+                    ["git", "apply", "--reverse", "--check", str(project_root / patch_path)],
+                    cwd=vendor_root, check=True, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                patch_paths = {
+                    line.split(" b/", 1)[1].decode()
+                    for line in committed_patch.splitlines() if line.startswith(b"diff --git a/")
+                }
+                status_paths = {
+                    line[3:].strip().replace("\\", "/") for line in vendor_status.splitlines()
+                }
+                if status_paths != patch_paths:
+                    raise ValueError("KV action vendor worktree differs from the replay patch")
+            else:
+                if vendor_status:
+                    raise ValueError("KV action committed vendor tree is dirty")
+                vendor_patch = subprocess.check_output(
+                    ["git", "diff", "--binary", f"{upstream_revision}..HEAD"], cwd=vendor_root,
+                )
+                if committed_patch != vendor_patch:
+                    raise ValueError("KV action vendor tree differs from the replay patch")
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise ValueError("KV action vendor replay state is unavailable") from error
     expected_files = set(manifest.get("files", {}))
     actual_files = {
         path.relative_to(artifact).as_posix()
@@ -355,6 +411,18 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
             raise ValueError("Paged action crossed the formal production evidence gate")
         if row.get("invalid_features") != 0:
             raise ValueError("KV action formal run contains invalid feature fallbacks")
+        runtime_features = row.get("runtime_model_features")
+        if not isinstance(runtime_features, list) or len(runtime_features) != 9 or not all(
+            _finite(value) for value in runtime_features
+        ):
+            raise ValueError("KV action runtime feature evidence differs")
+        if not _finite(row.get("http_elapsed_ms")) or float(row["http_elapsed_ms"]) <= 0:
+            raise ValueError("KV action HTTP diagnostic timing differs")
+        expected_ratio = float(row["decision_cpu_ms"]) / float(row["observed_cost_ms"])
+        if not math.isclose(
+            float(row["decision_to_action_ratio"]), expected_ratio, rel_tol=1e-12, abs_tol=1e-12
+        ):
+            raise ValueError("KV action decision/action ratio differs from internal cost")
     recomputed = evaluate_kv_action_models(rows, protocol)
     if report.get("analysis") != recomputed:
         raise ValueError("KV action report analysis differs from paired trials")
@@ -371,15 +439,15 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
         "p99_choose_microseconds": max(float(row["p99_ns"]) for row in overhead_rows) / 1000.0,
         "measured_max_choose_microseconds": max(float(row["max_ns"]) for row in overhead_rows) / 1000.0,
         "hot_loop_allocations": sum(int(row["allocations"]) for row in overhead_rows),
+        "cuda_synchronizations": sum(int(row["cuda_sync_calls"]) for row in overhead_rows),
         "scheduler_cpu_ratio_p99": ratios[int(0.99 * (len(ratios) - 1))],
     }
     expected_overhead["passed"] = (
         expected_overhead["p99_choose_microseconds"] <= gates["p99_choose_microseconds_max"]
         and expected_overhead["hot_loop_allocations"] == gates["hot_loop_allocations"]
+        and expected_overhead["cuda_synchronizations"] == gates["cuda_synchronizations"]
         and expected_overhead["scheduler_cpu_ratio_p99"] <= gates["scheduler_cpu_ratio_p99_max"]
     )
     if report.get("overhead") != expected_overhead or not expected_overhead["passed"]:
         raise ValueError("KV action overhead gates differ or did not pass")
-    if recomputed["models"]["L1"] != recomputed["models"]["H0"]:
-        raise ValueError("formal selection requires L1 to fail closed exactly to H0")
     return report
