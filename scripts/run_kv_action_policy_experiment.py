@@ -116,7 +116,10 @@ def observe(mode: str, port: int, trace: int, prompt: str, unrelated: str) -> di
     observed_before = metric(before, observed_sample)
     cost_before = metric(before, cost_sample)
     decision_seconds_before = metric(before, "llamacpp:kv_action_decision_seconds_total")
-    payload = {"prompt": prompt, "n_predict": 1, "temperature": 0, "cache_prompt": True}
+    payload = {
+        "prompt": prompt, "n_predict": 1, "temperature": 0,
+        "cache_prompt": mode != "recompute",
+    }
     if mode == "recompute":
         started = time.perf_counter_ns()
         response = post(port, payload)
@@ -275,9 +278,7 @@ def main() -> None:
                 regimes = ("resident", "preempted") if mode == "recompute" else ("single",)
                 for regime in regimes:
                     observation_order += 1
-                    observation_prompt = prompt if regime != "preempted" else (
-                        f"independent-recompute-{trace:02d} " + prompt
-                    )
+                    observation_prompt = prompt
                     value = observe(
                         mode, MODES[mode], trace, observation_prompt, unrelated + " " + regime
                     )
