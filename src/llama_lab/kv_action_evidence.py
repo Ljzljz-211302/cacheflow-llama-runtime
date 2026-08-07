@@ -316,15 +316,23 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
             cwd=project_root / "vendor/llama.cpp", check=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        tree_row = subprocess.check_output(
-            ["git", "ls-tree", outer_commit, "vendor/llama.cpp"],
-            cwd=project_root, text=True,
+        patch_path = manifest.get("patch_path")
+        upstream_revision = manifest.get("upstream_revision")
+        if not isinstance(patch_path, str) or not isinstance(upstream_revision, str):
+            raise ValueError("KV action replay-patch provenance is missing")
+        committed_patch = subprocess.check_output(
+            ["git", "show", f"{outer_commit}:{patch_path}"], cwd=project_root,
+        )
+        vendor_patch = subprocess.check_output(
+            ["git", "diff", "--binary", f"{upstream_revision}..{vendor_commit}"],
+            cwd=project_root / "vendor/llama.cpp",
         )
     except (OSError, subprocess.CalledProcessError) as error:
         raise ValueError("KV action source commit is unavailable") from error
-    tree_fields = tree_row.split()
-    if len(tree_fields) < 3 or tree_fields[1] != "commit" or tree_fields[2] != vendor_commit:
-        raise ValueError("KV action outer commit does not bind the vendor commit")
+    if manifest.get("patch_sha256") != hashlib.sha256(committed_patch).hexdigest():
+        raise ValueError("KV action committed replay-patch hash differs")
+    if committed_patch != vendor_patch:
+        raise ValueError("KV action replay patch does not bind the vendor commit")
     expected_files = set(manifest.get("files", {}))
     actual_files = {
         path.relative_to(artifact).as_posix()

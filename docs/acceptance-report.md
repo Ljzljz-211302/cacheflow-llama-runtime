@@ -172,4 +172,4 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 - 数据隔离：20 个 trace group 按时间顺序切为 12 train / 8 evaluation，session、prefix family 与 trace 均无交叉；16 个 held-out resident/preempted snapshot 采用 paired action observation。
 - 受限结果：L1 没有置信切换，精确匹配 H0（median regret 0 ms、P95 9.9865 ms、cumulative 51.4836 ms、harmful 0）；T1 median regret 0.6154 ms、cumulative 60.5061 ms、harmful 4/16。结论是安全回退成立，不能声称 learned policy 已优于 H0。
 - 热路径：5 个 action/OOD regime、500 万次 choose、零 allocation，最差 p99 低于 50 us，decision/action ratio p99 低于 1%；raw Windows maximum 保留为 report-only 抢占诊断。
-- 证据所有权：artifact 精确绑定协议/模型哈希、实现提交、vendor gitlink、完整文件树；validator 从 raw rows 重算 H0/A1/T1/L1 与 overhead，并有重哈希 trial/overhead、额外文件和伪提交测试。
+- 证据所有权：artifact 精确绑定协议/模型哈希、外层实现提交、vendor 提交及固定上游 replay patch、完整文件树；validator 从 raw rows 重算 H0/A1/T1/L1 与 overhead，并有重哈希 trial/overhead、额外文件和伪提交测试。

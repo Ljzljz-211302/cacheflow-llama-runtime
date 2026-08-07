@@ -25,6 +25,8 @@ ARTIFACT = ROOT / "results/research/h4-kv-action-v1.0.0"
 PROTOCOL_PATH = ROOT / "config/kv_action_policy_protocol.json"
 SERVER = ROOT / "build/patched-cuda-ninja3/bin/llama-server.exe"
 MODEL = ROOT / "models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+UPSTREAM_REVISION = "acd79d603cb2e1c84c0886137b80f1ad649b6857"
+PATCH_REPOSITORY_PATH = "patches/0001-cache-aware-slot-scheduler.patch"
 MODES = {
     "direct": 19840,
     "device_swap": 19841,
@@ -187,14 +189,15 @@ def main() -> None:
     )
     if outer_status or vendor_status:
         raise RuntimeError("formal KV action evidence requires clean outer and vendor worktrees")
-    bound_vendor = subprocess.check_output(
-        ["git", "rev-parse", "HEAD:vendor/llama.cpp"], cwd=ROOT, text=True
-    ).strip()
-    current_vendor = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=ROOT / "vendor/llama.cpp", text=True
-    ).strip()
-    if bound_vendor != current_vendor:
-        raise RuntimeError("outer implementation commit does not bind the current vendor revision")
+    committed_patch = subprocess.check_output(
+        ["git", "show", f"HEAD:{PATCH_REPOSITORY_PATH}"], cwd=ROOT
+    )
+    vendor_patch = subprocess.check_output(
+        ["git", "diff", "--binary", f"{UPSTREAM_REVISION}..HEAD"],
+        cwd=ROOT / "vendor/llama.cpp",
+    )
+    if committed_patch != vendor_patch:
+        raise RuntimeError("committed replay patch does not reproduce the current vendor revision")
     ARTIFACT.mkdir(parents=True, exist_ok=True)
     raw = ARTIFACT / "raw"
     raw.mkdir(exist_ok=True)
@@ -356,6 +359,9 @@ def main() -> None:
         "vendor_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT / "vendor/llama.cpp", text=True
         ).strip(),
+        "upstream_revision": UPSTREAM_REVISION,
+        "patch_path": PATCH_REPOSITORY_PATH,
+        "patch_sha256": hashlib.sha256(committed_patch).hexdigest(),
         "runs": {
             "direct": {"port": 19840, "kv_action_policy": "fixed", "cache_idle_slots": False},
             "device_swap": {"port": 19841, "kv_action_policy": "fixed", "cache_idle_slots": True},

@@ -1232,4 +1232,4 @@ Remap/Paged 在生产快照中的 capability 为 false；正式 CUDA 证据要�
 
 协议固定 trace/session/prefix-family 分组、时间顺序切分、同 snapshot paired action、H0/A1/T1/L1 和开销门禁。正式 artifact 使用真实 Qwen2.5-0.5B CUDA server 收集 20 个 trace group，前 12 个训练、后 8 个评估，共 16 个 held-out resident/preempted snapshot。当前 L1 因置信界不足没有切换，与 H0 完全一致；T1 查表在稀疏 held-out bucket 上产生 25% harmful decision。这是安全回退有效的证据，不是 learned policy 已经加速的证据。
 
-硬门禁为 choose p99 不超过 50 us、decision/action ratio p99 不超过 1%、热路径零 allocation、零 CUDA sync。Windows raw wall-clock maximum 原样保留为抢占诊断，不作硬门禁。artifact 绑定协议、模型 SHA-256、外层实现提交、vendor gitlink、完整文件树与逐文件哈希；校验器从原始 paired rows 重算分析和开销，并拒绝重新计算文件哈希后的语义篡改。
+硬门禁为 choose p99 不超过 50 us、decision/action ratio p99 不超过 1%、热路径零 allocation、零 CUDA sync。Windows raw wall-clock maximum 原样保留为抢占诊断，不作硬门禁。artifact 绑定协议、模型 SHA-256、外层实现提交、vendor 提交、固定上游到 vendor 的 replay patch、完整文件树与逐文件哈希；校验器从原始 paired rows 重算分析和开销，并拒绝重新计算文件哈希后的语义篡改。
