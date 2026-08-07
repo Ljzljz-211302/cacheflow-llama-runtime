@@ -275,7 +275,9 @@ def main() -> None:
                 regimes = ("resident", "preempted") if mode == "recompute" else ("single",)
                 for regime in regimes:
                     observation_order += 1
-                    observation_prompt = prompt if regime != "preempted" else prompt + " preempted"
+                    observation_prompt = prompt if regime != "preempted" else (
+                        trace_markers[(trace + 1) % len(trace_markers)] * 4 + prompt[4:]
+                    )
                     value = observe(
                         mode, MODES[mode], trace, observation_prompt, unrelated + " " + regime
                     )
