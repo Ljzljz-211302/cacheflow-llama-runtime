@@ -60,7 +60,7 @@ flowchart LR
 
 服务现在用同一个 fail-closed 接口比较 Direct、CUDA-managed Swap、事务型 host Swap 与 Recompute；Remap/Paged 在缺少完整服务 adapter 时由 capability gate 禁止进入生产选择。策略包含固定 H0、解析 A1、分桶查表 T1 与带置信边界/H0 fallback 的 L1，并通过 Prometheus 分开记录推荐、实际执行和完整动作反馈。
 
-正式 Qwen2.5-0.5B CUDA paired replay 的正式证据升级至 v1.1.0；每个 resident/preempted regime 至少 20 个 held-out pair，使用服务内部完整动作计时、生产同构 9 维在线 Ridge、10,000 次 paired bootstrap 与显式 CUDA-sync gate。结果数字以 `results/research/h4-kv-action-v1.1.0/` 为准；v1.0.0 因计时边界与模型合同错误仅保留在 `results/research/superseded/` 供审计。
+正式 Qwen2.5-0.5B CUDA v1.1 replay 使用 40 个隔离 trace（20 train/20 evaluation），resident/preempted 各 20 个 held-out pair。服务内部完整动作计时下，H0/A1/L1 均为 median/P95/cumulative regret `0/0.264/2.345 ms` 且零 harmful；L1 未满足置信切换。T1 为 `0/0.727/4.169 ms`，产生 3/40（7.50%）harmful，paired mean-regret delta 95% CI `[-0.0711, 0.1752] ms`，未证明优于 H0。500 万次 choose 的最差 p99 0.900 us、decision/action ratio p99 0.0960%、零 allocation/零 CUDA sync；raw max 2321.700 us 仅作 Windows 抢占诊断。v1.0.0 因计时与模型合同错误仅保留在 `results/research/superseded/`。
 
 ## 一键复现
 

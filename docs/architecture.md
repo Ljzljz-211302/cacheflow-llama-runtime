@@ -1230,6 +1230,6 @@ Remap/Paged 在生产快照中的 capability 为 false；正式 CUDA 证据要�
 
 ### 26.5 正式证据与边界
 
-协议固定 trace/session/prefix-family 分组、时间顺序切分、同 snapshot paired action、H0/A1/T1/L1 和开销门禁。v1.1.0 要求 resident/preempted 各 20 个 held-out pair、服务内部完整动作计时、生产同构 9 维在线 Ridge、10,000 次 paired bootstrap 和零 CUDA-sync。v1.0.0 因违反计时与模型合同已被移入 superseded；不得继续引用其数值。
+协议固定 trace/session/prefix-family 分组、时间顺序切分、同 snapshot paired action、H0/A1/T1/L1 和开销门禁。v1.1.0 的 40 trace 按时间切为 20 train/20 evaluation，resident/preempted 各 20 个 held-out pair。内部完整动作计时下，H0/A1/L1 的 median/P95/cumulative regret 均为 0/0.264/2.345 ms、harmful 0；T1 为 0/0.727/4.169 ms、harmful 3/40，其 paired mean-regret delta 10,000-bootstrap 95% CI 跨 0。L1 未满足切换置信条件，因此仍执行 H0。v1.0.0 因违反计时与模型合同已移入 superseded。
 
 硬门禁为 choose p99 不超过 50 us、decision/action ratio p99 不超过 1%、热路径零 allocation、零 CUDA sync。Windows raw wall-clock maximum 原样保留为抢占诊断，不作硬门禁。artifact 绑定协议、模型 SHA-256、外层实现提交、固定上游与 replay patch、完整文件树及逐文件哈希；校验器接受与 patch 等价的干净开发提交树或 bootstrap 后的已应用 patch 工作树，拒绝任何额外 vendor 改动，并从原始 paired rows 重算分析和开销。

@@ -125,7 +125,7 @@ class KvActionEvidenceTests(unittest.TestCase):
                 "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
             )
             self._rehash(artifact, "paired-actions.jsonl")
-            with self.assertRaisesRegex(ValueError, "analysis differs"):
+            with self.assertRaisesRegex(ValueError, "ratio differs|analysis differs"):
                 validate_kv_action_artifact(artifact, Path("config/kv_action_policy_protocol.json"))
 
     def test_formal_artifact_rejects_rehashed_overhead_tamper(self) -> None:

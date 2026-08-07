@@ -170,6 +170,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 - 能力门禁：Remap/Paged 没有完整 `llama_decode` adapter，因此正式生产 capability 为 false；Paged decision 为 0，不把 H3 microbenchmark 冒充生产 dispatch。
 - 算法：H0 固定安全规则、A1 解析模型、T1 分桶查表、L1 置信约束 Ridge 使用相同 snapshot 和完整动作边界；无效/OOD/冷启动/不确定性均 fail closed。
 - 数据隔离：20 个 trace group 按时间顺序切为 12 train / 8 evaluation，session、prefix family 与 trace 均无交叉；16 个 held-out resident/preempted snapshot 采用 paired action observation。
-- v1.0.0 的数值因错误使用 HTTP 往返计时且 L1 合同与生产不一致而被否决，仅保留在 `results/research/superseded/`。v1.1.0 必须从干净实现提交重采集后才允许填写正式数值。
-- v1.1.0 硬门禁：resident/preempted 各 20 个 held-out pair、10,000 次 paired bootstrap、内部完整动作 counter、生产同构 9 维在线 Ridge、5 个 overhead regime、零 allocation、零 CUDA sync、p99 不超过 50 us、decision/action ratio p99 不超过 1%。
+- v1.0.0 因错误使用 HTTP 往返计时且 L1 合同与生产不一致而被否决，仅保留在 `results/research/superseded/`。v1.1.0 从干净提交 `32c8fe7` 重采集：40 trace 按时间切为 20 train/20 evaluation，resident/preempted 各 20 个 held-out pair。
+- 内部完整动作计时结果：H0/A1/L1 的 median/P95/cumulative regret 均为 0/0.264/2.345 ms、harmful 0；L1 未切换。T1 为 0/0.727/4.169 ms、harmful 3/40，paired mean-regret delta 10,000-bootstrap 95% CI 为 [-0.0711, 0.1752] ms，未证明优于 H0。
+- 热路径：5 个 regime、500 万次 choose、零 allocation、零 CUDA sync，最差 p99 0.900 us，decision/action ratio p99 0.0960%；raw Windows maximum 2321.700 us 保留为 report-only 抢占诊断。
 - 证据所有权：artifact 精确绑定协议/模型哈希、外层实现提交、固定上游及 replay patch、完整文件树；validator 同时验证干净开发提交树或 bootstrap 已应用 patch 树，拒绝额外 vendor 改动，并从 raw rows 重算 H0/A1/T1/L1 与 overhead。

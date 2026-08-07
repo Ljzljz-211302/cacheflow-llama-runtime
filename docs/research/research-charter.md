@@ -82,9 +82,9 @@ Issue #5 的 H3 v1.0.0 已得到受限混合结果：K1 直接分页 kernel 在�
 
 训练/调参 trace 与评估 trace 必须隔离；exploration 不得计作收敛。若固定规则在全部 held-out regime 内与模型无显著差异或更安全，则保留固定规则并报告复杂模型没有价值。
 
-Issue #6 的 v1.0.0 实验因最终审查发现计时边界和 L1 合同错误而被否决：它使用客户端 HTTP 往返而非服务内部完整动作时间，且离线 Ridge 与生产 9 维在线模型不同。旧数据完整保留但不再支持任何 H4 数值主张。v1.1.0 只有在 resident/preempted 各 20 个 held-out pair、10,000 次 paired bootstrap、内部 counter 和零 CUDA-sync gate 全部通过后才可形成新结论。
+Issue #6 的 v1.0.0 因使用 HTTP 往返计时且离线 Ridge 与生产模型不同而被否决并完整保留。纠正后的 v1.1.0 使用 40 个隔离 trace（20 train/20 evaluation），resident/preempted 各 20 个 held-out pair；成本来自同一 slot 的原生完整动作 counter。H0/A1/L1 的 median/P95/cumulative regret 均为 0/0.264/2.345 ms、harmful 0，L1 未切换；T1 为 0/0.727/4.169 ms、harmful 3/40，paired mean-regret delta 的 10,000-bootstrap 95% CI [-0.0711, 0.1752] ms 跨 0。结论仍是保留 H0 + L1 shadow，不声称 learned 加速。
 
-正式生产动作只包含 Direct、CUDA-managed Swap、transactional host Swap 与 Recompute；Remap/Paged 因缺少完整 adapter 被 capability mask，Paged 生产 decision 为 0。v1.1.0 强制内部完整动作计时、每 regime 20 个 held-out pair、10,000 次 paired bootstrap 和 CUDA-sync gate；hash-bound artifact 位于 `results/research/h4-kv-action-v1.1.0/`，v1.0.0 仅作为已否决审计记录保留。
+正式生产动作只包含 Direct、CUDA-managed Swap、transactional host Swap 与 Recompute；Remap/Paged 因缺少完整 adapter 被 capability mask，Paged 生产 decision 为 0。500 万次 choose 的最差 p99 0.900 us、decision/action ratio p99 0.0960%、零 allocation/零 CUDA sync；raw max 2321.700 us 只作抢占诊断。hash-bound artifact 位于 `results/research/h4-kv-action-v1.1.0/`。
 
 ## 7. H5：已观察到的反向因果链
 
