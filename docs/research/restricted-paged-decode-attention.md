@@ -91,27 +91,24 @@ offset(page, token, kv_head, dim) =
 ```
 
 这是“physical page outermost、page 内 NHD”。它保留现有整 block Copy/COW/Swap 的连续性，同时使
-固定 layer 内相邻 FP16 head_dim 元素连续。K/V plane 起址和每个 head row 必须至少 16-byte aligned，
-从而每条 128-dim FP16 row 可由 32 个线程协作读取 16-byte vector；未满足对齐时不进入 fast path。
+固定 layer 内相邻 FP16 head_dim 元素连续。K1 每个线程使用标量 FP16 load，不声明 16-byte vector
+fast path，也不把额外 alignment 作为支持条件；向量化或 shared staging 必须作为后续独立候选测量。
 7B shape 每层每页 K+V 为 `2*16*4*128*2 = 32768` bytes；0.5B shape 为 4096 bytes。原型只分配
 单层输入；生产接入必须另行记录实际层数和总分配，防止把单层 footprint 当成端到端显存需求。
 
-页表采用以下显式接口，不能从未初始化页槽推断长度：
+原型采用矩形页表与显式 context length，不能从未初始化页槽推断长度：
 
 ```text
-page_indptr:     int32 [batch + 1], page_indptr[0] == 0
-page_indices:    int32 [page_indptr[batch]]
-last_page_len:   int32 [batch], 1 <= value <= 16
-context_len[b] = 16 * (page_indptr[b+1] - page_indptr[b] - 1)
-                 + last_page_len[b]
-physical_page = page_indices[page_indptr[b] + logical_token / 16]
+page_table:      uint32 [batch][max_pages_per_sequence]
+context_lengths:uint32 [batch], 1 <= value <= 16 * max_pages_per_sequence
+physical_page = page_table[b][logical_token / 16]
 token_in_page = logical_token % 16
 ```
 
-这些语义与 FlashInfer 固定 layout 文档和 `paged_kv_t::get_length` 一致。`page_indptr` 必须单调，
-每个 request 至少一页，所有 physical page id 小于 capacity。不同 request 可指向同一只读 prefix
-page；这正是共享能力。空 context、负索引、越界页、零长度最后页、超过 16 的最后页都必须在
-host dispatch 前拒绝，不能让 kernel “保护性地”读 page 0 后继续算。
+只有 `ceil(context_lengths[b]/16)` 个已使用槽参与验证；这些槽的 physical page id 必须小于 capacity，
+未使用槽可以保留 sentinel。不同 request 可指向同一只读 prefix page。空 context、超过矩形容量的
+context 与已使用的越界页必须在 host plan 创建时拒绝，不能让 kernel “保护性地”读 page 0 后继续算。
+CSR-like `indptr/indices/last_page_len` 是 FlashInfer 的参考布局，不是本原型已实现接口。
 
 ### 3.3 causal 与位置语义
 
@@ -205,22 +202,22 @@ kernel B 做 stable softmax × V。它仍直接读取 paged K/V，因此是合�
 
 ## 6. fail-closed 与 fallback
 
-dispatch 必须先校验所有条件，返回结构化 reason，并增加按 reason 的 counter。建议原因集合固定为：
+原型的 `llama_paged_decode_supported` 返回布尔值与静态 reason 文本；`plan_create`/launch 返回 CUDA
+error。当前明确拒绝的条件为：
 
 ```text
-unsupported_device
-unsupported_phase
-unsupported_dtype
+zero_batch_or_page_capacity
 unsupported_head_dim
 unsupported_page_size
-unsupported_gqa_shape
-unsupported_mask_or_position_mode
-misaligned_storage
-invalid_page_table
-context_out_of_range
-insufficient_workspace
-cuda_launch_or_runtime_error
+non_divisible_gqa_shape
+invalid_attention_scale
+invalid_context_length
+invalid_used_page_id
+null_plan_or_tensor
 ```
+
+设备、dtype、phase、RoPE/mask mode 属于此 C++ seam 的静态调用合同，而不是可在裸指针 API 中动态识别
+的字段；生产接入若需要可观测 fallback counter，必须在拥有这些语义的 runtime adapter 中实现。
 
 原型 benchmark 中默认行为是 **fail closed**：返回 non-zero，不产生未初始化 output。未来服务接入才
 允许 fallback，且 fallback 必须是现有已验证的 contiguous attention 路径：必要时先按页表 Remap，

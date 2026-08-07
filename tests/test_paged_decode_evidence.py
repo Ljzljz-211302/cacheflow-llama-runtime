@@ -34,7 +34,7 @@ class PagedDecodeEvidenceTests(unittest.TestCase):
                         "shape": regime["shape"], "context": regime["context"],
                         "batch": regime["batch"], "layout": regime["layout"],
                         "trial": trial, "order_in_pair": order,
-                        "random_seed": 20260807 + regime["context"] * 17 + regime["batch"] * 101
+                        "random_seed": protocol["random_seed_base"] + regime["context"] * 17 + regime["batch"] * 101
                             + (1009 if regime["layout"] == "fragmented" else 0)
                             + (10007 if regime["shape"] == "qwen2.5-7b-shape" else 0),
                         "host_enqueue_ms": value, "gpu_ms": value,

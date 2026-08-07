@@ -25,7 +25,7 @@
 |---|---|---|---|---|
 | H1 | 128-bit 向量化何时降低 snapshot-preserving Remap 成本？ | existing-evidence | 锁定环境中 1/4/16/32 blocks 的配对改善非递增 | 趋势不再非递增、任一规模回归超过 3%、没有规模改善至少 10%，或正确性失败 |
 | H2 | KV 搬运何时成为请求级瓶颈？ | limited evidence | 对齐小搬运中向量化材料性获益，规模增大后收益低于门槛；错位 layout 明确反转 | 所有预注册高搬运场景中 KV 均不 material，或没有 CUDA mediator |
-| H3 | Paged Decode Attention 何时优于 Direct/Remap？ | prospective | 只在上下文、碎片、复用或容量 frontier 之后可能占优 | 所有场景既无延迟 non-inferiority 也无容量收益，或数值不正确 |
+| H3 | Paged Decode Attention 何时优于 Direct/Remap？ | limited evidence | K1 相对同数学 contiguous comparator 在已测 regime 全部回退；下一步验证 GQA reuse | 所有场景既无延迟 non-inferiority 也无容量收益，或数值不正确 |
 | H4 | 可解释代价模型能否安全优于固定规则？ | prospective | 在 held-out workload 上降低 regret，且不错误启用有害动作 | regret/回归超门槛、开销吃掉收益、分布切换后仍持续错误启用 |
 | H5 | 调度能否改变 CUDA 工作却在 execute 汇总下降时恶化 TTFT？ | existing-evidence | 请求排队结构可使 phase aggregate 与请求 SLO 反向 | 决策、CUDA mediator、请求结果三段因果链任一不存在 |
 

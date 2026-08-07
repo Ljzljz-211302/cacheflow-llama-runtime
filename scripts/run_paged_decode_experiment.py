@@ -82,11 +82,15 @@ def write_json(path: Path, value: Any) -> None:
     write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
 
 
-def target(binary: Path, regime: dict[str, Any], method: str, repetitions: int, profile: bool) -> list[str]:
+def target(
+    binary: Path, regime: dict[str, Any], method: str, repetitions: int,
+    profile: bool, seed_base: int
+) -> list[str]:
     command = [
         str(binary), "--shape", str(regime["shape"]), "--context", str(regime["context"]),
         "--batch", str(regime["batch"]), "--layout", str(regime["layout"]),
         "--method", method, "--repetitions", str(repetitions),
+        "--seed-base", str(seed_base),
     ]
     if profile:
         command.append("--profile")
@@ -106,11 +110,11 @@ def parse_trial(row: dict[str, str]) -> dict[str, Any]:
 
 def capture_nsys(
     nsys: Path, binary: Path, regime: dict[str, Any], method: str,
-    repetitions: int, profile_dir: Path, patterns: list[str]
+    repetitions: int, profile_dir: Path, patterns: list[str], seed_base: int
 ) -> dict[str, Any]:
     prefix = profile_dir / "nsys"
     command = build_nsys_command(
-        nsys, prefix, target(binary, regime, method, repetitions, True)
+        nsys, prefix, target(binary, regime, method, repetitions, True, seed_base)
     )
     completed = run(command, environment=cuda_environment())
     write_text(profile_dir / "nsys.stdout.txt", completed.stdout)
@@ -145,7 +149,7 @@ def capture_nsys(
 
 def capture_ncu(
     ncu: Path | None, binary: Path, regime: dict[str, Any], method: str,
-    profile_dir: Path, patterns: list[str]
+    profile_dir: Path, patterns: list[str], seed_base: int
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     if ncu is None:
         path = profile_dir / "ncu-unavailable.txt"
@@ -153,7 +157,7 @@ def capture_ncu(
         return None, {"available": False, "failure_log": str(path), "exit_code": None}
     prefix = profile_dir / "ncu"
     command = build_ncu_command(
-        ncu, prefix, target(binary, regime, method, 1, True),
+        ncu, prefix, target(binary, regime, method, 1, True, seed_base),
         kernel_name_regex=".*paged_decode_attention.*",
     )
     completed = run(command, environment=cuda_environment())
@@ -184,6 +188,9 @@ def markdown(report: dict[str, Any], manifest_stub: dict[str, Any]) -> str:
         "This is a decode-only CUDA prototype, not a production llama.cpp dispatch integration. "
         "The primary effects are 20-pair no-profiler CUDA-event measurements. NSYS replays only "
         "bind kernel identity and launch count; profiler durations are not primary timings.", "",
+        "Every regime validates both CUDA arms against an independent CPU FP32 paged-attention "
+        f"oracle before timing; maximum absolute error was "
+        f"{report['analysis']['correctness']['maximum_absolute_error']:.9f}.", "",
         "## No-profiler paired results", "",
         "| Regime | GPU improvement median [95% CI] | End-to-end improvement median [95% CI] | Class |",
         "|---|---:|---:|---|",
@@ -240,8 +247,9 @@ def main() -> None:
     rows: list[dict[str, Any]] = []
     commands: list[dict[str, Any]] = []
     repetitions = int(protocol["no_profiler"]["paired_trials_per_regime"])
+    seed_base = int(protocol["random_seed_base"])
     for regime in protocol["regimes"]:
-        command = target(binary, regime, "paired", repetitions, False)
+        command = target(binary, regime, "paired", repetitions, False, seed_base)
         completed = run(command, environment=cuda_environment())
         csv_path = raw_dir / f"{regime['id']}.csv"
         stderr_path = raw_dir / f"{regime['id']}.stderr.txt"
@@ -272,10 +280,11 @@ def main() -> None:
             profile_dir.mkdir()
             patterns = protocol["profiler"]["kernel_patterns"][method]
             profiles[profile_id] = capture_nsys(
-                nsys, binary, regime, method, profile_repetitions, profile_dir, patterns
+                nsys, binary, regime, method, profile_repetitions, profile_dir, patterns,
+                seed_base,
             )
             ncu_parsed, ncu_status = capture_ncu(
-                ncu, binary, regime, method, profile_dir, patterns
+                ncu, binary, regime, method, profile_dir, patterns, seed_base
             )
             ncu_statuses[profile_id] = {"parsed": ncu_parsed, "status": ncu_status}
             ncu_complete = ncu_complete and ncu_parsed is not None

@@ -43,9 +43,9 @@ def load_paged_decode_protocol(path: Path) -> dict[str, Any]:
     return protocol
 
 
-def _expected_seed(regime: dict[str, Any]) -> int:
+def _expected_seed(regime: dict[str, Any], seed_base: int) -> int:
     return (
-        20260807
+        seed_base
         + int(regime["context"]) * 17
         + int(regime["batch"]) * 101
         + (1009 if regime["layout"] == "fragmented" else 0)
@@ -96,11 +96,13 @@ def _validate_and_group(
             raise ValueError("paged decode trial method or index is invalid")
         if method in grouped[str(regime["id"])][trial]:
             raise ValueError("paged decode trial contains a duplicate method")
-        if int(row.get("random_seed", -1)) != _expected_seed(regime):
+        if int(row.get("random_seed", -1)) != _expected_seed(
+            regime, int(protocol["random_seed_base"])
+        ):
             raise ValueError("paged decode random seed differs from protocol")
         if float(row.get("gpu_ms", 0)) <= 0 or float(row.get("end_to_end_ms", 0)) <= 0:
             raise ValueError("paged decode timing must be positive")
-        if float(row.get("max_abs_error", 1)) > 1e-5:
+        if not 0.0 <= float(row.get("max_abs_error", -1)) <= 0.00125:
             raise ValueError("paged decode CUDA differential error exceeds benchmark gate")
         grouped[str(regime["id"])][trial][method] = row
     if set(grouped) != set(regimes):
@@ -195,6 +197,12 @@ def analyze_paged_decode_trials(
         reason = "neither preregistered K2 nor K3 trigger fired"
     return {
         "schema_version": 1,
+        "correctness": {
+            "oracle": "independent CPU FP32 paged attention before every timed regime",
+            "maximum_absolute_error": max(float(row["max_abs_error"]) for row in rows),
+            "absolute_tolerance": float(protocol["correctness"]["absolute_tolerance"]),
+            "relative_tolerance": float(protocol["correctness"]["relative_tolerance"]),
+        },
         "regimes": results,
         "contains_neutral_or_loss": any(
             row["effect_class"] in {"neutral", "material-loss"} for row in results

@@ -97,6 +97,26 @@
       ]
     },
     {
+      "id": "paged-decode-contiguous",
+      "name": "Same-math contiguous CUDA decode-attention comparator",
+      "kind": "local",
+      "comparison_class": "quantitative",
+      "runnable": true,
+      "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
+      "source_revision": "vendor/llama.cpp@2fa773e86202f7c254d248097902bcb3ad068495",
+      "license": "MIT",
+      "commands": [
+        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_cuda_kv.ps1",
+        "python scripts/run_paged_decode_experiment.py --output-dir results/research/h3-paged-decode-v1.0.0"
+      ],
+      "controlled_mode": "FP16 Q/K/V and FP32 online-softmax output with contiguous per-sequence K/V; identical CUDA math, launch geometry, inputs, seeds, stream, and timing boundary to paged K1",
+      "comparability_limits": [
+        "This is a single-layer decode-attention microbenchmark comparator, not the upstream llama.cpp end-to-end attention graph.",
+        "It excludes page-table indirection but does not include Remap materialization, allocator, scheduler, model layers, or request latency.",
+        "Only the two preregistered Qwen2.5 geometries and the committed RTX 4050 protocol are quantitative evidence."
+      ]
+    },
+    {
       "id": "fixed-rule",
       "name": "Deterministic rule-based benefit gate",
       "kind": "local",

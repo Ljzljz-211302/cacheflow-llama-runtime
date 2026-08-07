@@ -131,7 +131,7 @@
         "graph capture and kernel warm-up",
         "scheduler and allocator differences"
       ],
-      "baselines": ["direct-copy", "scalar-remap", "vector-remap"],
+      "baselines": ["paged-decode-contiguous"],
       "mechanism": "Paged Decode Attention removes full-cache materialization but adds block-table lookup, irregular memory access, masking, online softmax, and reduction costs; the winning action depends on avoided bytes and available concurrency.",
       "falsification": [
         "The restricted kernel fails the numerical oracle or memory-safety checks.",
@@ -142,7 +142,9 @@
       "evidence_sources": [
         "https://arxiv.org/abs/2309.06180",
         "https://arxiv.org/abs/2205.14135",
-        "docs/research/primary-source-foundations.md"
+        "docs/research/primary-source-foundations.md",
+        "results/research/h3-paged-decode-v1.0.0/manifest.json",
+        "results/research/h3-paged-decode-v1.0.0/report.json"
       ],
       "observed_results": [
         "The restricted K1 CUDA kernel directly reads non-contiguous physical pages and produces FP32 attention output; independent CPU and contiguous-CUDA oracles cover Qwen2.5-0.5B 14/2/D64 and Qwen2.5-7B geometry 28/4/D128 with GQA ratio 7 and page size 16.",
