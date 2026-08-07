@@ -112,7 +112,7 @@
       "id": "H3-paged-decode-frontier",
       "question": "When is restricted Paged Decode Attention preferable to Direct or explicit KV Remap?",
       "hypothesis": "Direct page-table reads can avoid materialization bytes and improve capacity or latency only beyond a context, fragmentation, or reuse frontier; indirect addressing and online-softmax overhead may make it slower for short or contiguous cases.",
-      "status": "prospective",
+      "status": "limited-evidence",
       "independent_variables": [
         "Direct, Remap, or Paged Decode Attention action",
         "context length, page size, and physical fragmentation",
@@ -144,11 +144,19 @@
         "https://arxiv.org/abs/2205.14135",
         "docs/research/primary-source-foundations.md"
       ],
-      "observed_results": [],
+      "observed_results": [
+        "The restricted K1 CUDA kernel directly reads non-contiguous physical pages and produces FP32 attention output; independent CPU and contiguous-CUDA oracles cover Qwen2.5-0.5B 14/2/D64 and Qwen2.5-7B geometry 28/4/D128 with GQA ratio 7 and page size 16.",
+        "Across 9 preregistered regimes and 360 no-profiler observations, paged K1 regressed paired median CUDA-event time by 6.25% to 13.06% versus the same-math contiguous CUDA comparator; no latency-win regime was observed.",
+        "At context 1024 and batch 1, the 0.5B shape regressed 13.06% (95% CI 12.91% to 13.22%) and the 7B kernel shape regressed 11.59% (95% CI 11.39% to 11.65%).",
+        "The long-context batch-1 versus batch-4 regression gaps were only 0.99 and 1.82 percentage points, so the preregistered split-K trigger did not fire; the at-least-3% long-context regression rule selected K2 GQA KV reuse as the next unimplemented hypothesis.",
+        "Four method-isolated Nsight Systems captures each contain exactly five matching launches. Nsight Compute reported driver incompatibility and ERR_NVGPUCTRPERM, so memory-bound, occupancy, and hardware-DRAM-byte explanations are prohibited."
+      ],
       "scope_limits": [
-        "Qwen2.5, FP16 KV, GQA, head dimension 128",
+        "Qwen2.5, FP16 Q/K/V, FP32 output, GQA, head dimensions 64 and 128",
         "Single-token decode and 16-token pages",
-        "Single consumer NVIDIA GPU; unsupported shapes must fall back"
+        "Single RTX 4050 Laptop GPU; unsupported shapes fail closed in the prototype",
+        "The D128 result is model-faithful kernel geometry only, not end-to-end 7B serving evidence",
+        "No production dispatch, capacity benefit, or request-level latency claim in Issue #5"
       ],
       "negative_result_policy": "Report the losing regions and capacity/latency trade-off; a slower kernel with a measured capacity benefit is not rewritten as a latency win."
     },

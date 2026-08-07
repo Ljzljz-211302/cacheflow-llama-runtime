@@ -146,6 +146,10 @@ Windows WDDM 首次运行前需要以管理员身份执行 CUDA Toolkit 的 `Ena
 
 [确认性实验协议](docs/research/experiment-protocol.md)进一步冻结 warm-up、种子化随机 Trial Pair、host enqueue/CUDA Event/end-to-end 三种计时、paired bootstrap CI、无事后删异常和 CPU-only correctness fallback。`scripts/run_research_experiment.py` 用一个命令生成带 provenance 的 `manifest.json` 与逐行 `trials.jsonl`；方法学依据见 [实验协议一手资料](docs/research/experiment-protocol-foundations.md)。
 
+Issue #5 已实现第一版受限 Paged Decode Attention，而非继续用 Remap 冒充 attention：K1 CUDA kernel 以每个 `(sequence, query_head)` 一个 CTA，直接从非连续物理页读取 FP16 K/V，用 FP32 online softmax 产生真实 FP32 attention output。它覆盖本地 Qwen2.5-0.5B 的 `14Q/2KV/D64` 与 7B 模型几何的 `28Q/4KV/D128`，page size 固定 16，unsupported shape/context/page table fail closed；D128 结果不代表本机完成了 7B 端到端服务。
+
+正式 artifact 含 9 个 regime、360 条无 profiler paired observations 和 4 份方法隔离 NSYS trace。相对相同数学的 contiguous CUDA 对照，Paged K1 的 GPU-event 中位数在所有 regime 均回退 6.25%–13.06%；本地 0.5B 的 context 1024/batch 1 回退 13.06%（95% CI 12.91%–13.22%），7B shape 对应回退 11.59%（11.39%–11.65%）。每份 NSYS capture 都严格包含 5 个目标 kernel launch。预注册 split-K 条件未触发，规则选择下一步验证 K2 GQA KV reuse；这只是待实现假设，不是加速结论。NCU 因 driver incompatibility 与 `ERR_NVGPUCTRPERM` 不完整，因此禁止 memory-bound、occupancy 和 DRAM-byte 归因。详见 [受限设计与一手资料](docs/research/restricted-paged-decode-attention.md)及[正式报告](results/research/h3-paged-decode-v1.0.0/report.md)。
+
 ## 代码边界
 
 ```text

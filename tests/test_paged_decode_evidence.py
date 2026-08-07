@@ -52,7 +52,7 @@ class PagedDecodeEvidenceTests(unittest.TestCase):
         validated = validate_paged_decode_artifact(
             artifact, Path("config/paged_decode_protocol.json")
         )
-        self.assertEqual(len(validated["report"]["regimes"]), 9)
+        self.assertEqual(len(validated["report"]["analysis"]["regimes"]), 9)
 
     def test_validator_rejects_semantic_trial_tamper_even_when_rehashed(self) -> None:
         source = Path("results/research/h3-paged-decode-v1.0.0")
@@ -70,6 +70,19 @@ class PagedDecodeEvidenceTests(unittest.TestCase):
             manifest["artifact_hashes"]["trials.jsonl"] = file_sha256(trials)
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "context"):
+                validate_paged_decode_artifact(
+                    artifact, Path("config/paged_decode_protocol.json")
+                )
+
+    def test_validator_rejects_unmanifested_profile_file(self) -> None:
+        source = Path("results/research/h3-paged-decode-v1.0.0")
+        if not source.exists():
+            self.skipTest("formal artifact is created after implementation commit")
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact"
+            shutil.copytree(source, artifact)
+            (artifact / "profiles" / "untracked.txt").write_text("not evidence", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "file tree"):
                 validate_paged_decode_artifact(
                     artifact, Path("config/paged_decode_protocol.json")
                 )

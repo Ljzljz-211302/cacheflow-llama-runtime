@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import statistics
 from collections import defaultdict
@@ -50,6 +51,21 @@ def _expected_seed(regime: dict[str, Any]) -> int:
         + (1009 if regime["layout"] == "fragmented" else 0)
         + (10007 if regime["shape"] == "qwen2.5-7b-shape" else 0)
     )
+
+
+def _parse_raw_csv(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in csv.DictReader(path.read_text(encoding="utf-8").splitlines()):
+        row: dict[str, Any] = dict(raw)
+        for name in (
+            "context", "batch", "trial", "order_in_pair", "random_seed",
+            "logical_kv_bytes",
+        ):
+            row[name] = int(row[name])
+        for name in ("host_enqueue_ms", "gpu_ms", "end_to_end_ms", "max_abs_error"):
+            row[name] = float(row[name])
+        rows.append(row)
+    return rows
 
 
 def _validate_and_group(
@@ -222,6 +238,24 @@ def validate_paged_decode_artifact(
     ) * 2
     if len(rows) != expected_rows or manifest.get("raw_trial_count") != expected_rows:
         raise ValueError("paged decode raw trial count differs")
+    raw_rows: list[dict[str, Any]] = []
+    commands = manifest.get("commands", [])
+    command_by_regime = {str(item.get("regime_id")): item for item in commands}
+    if len(command_by_regime) != len(commands) or set(command_by_regime) != {
+        str(regime["id"]) for regime in protocol["regimes"]
+    }:
+        raise ValueError("paged decode no-profiler command coverage differs")
+    for regime in protocol["regimes"]:
+        raw_path = artifact_dir / "raw" / f"{regime['id']}.csv"
+        stderr_path = artifact_dir / "raw" / f"{regime['id']}.stderr.txt"
+        command = command_by_regime[str(regime["id"])]
+        if command.get("stdout_sha256") != file_sha256(raw_path):
+            raise ValueError("paged decode raw CSV differs from command evidence")
+        if command.get("stderr_sha256") != file_sha256(stderr_path):
+            raise ValueError("paged decode raw stderr differs from command evidence")
+        raw_rows.extend(_parse_raw_csv(raw_path))
+    if raw_rows != rows:
+        raise ValueError("paged decode trials differ from original benchmark CSV")
     profiles = manifest.get("profiles", {})
     expected_profile_ids = {
         f"{regime_id}-{method}"
@@ -262,6 +296,17 @@ def validate_paged_decode_artifact(
                 status.get("permission_denied") or status.get("driver_incompatible")
             ):
                 raise ValueError(f"paged decode NCU failure reason is not auditable: {profile_id}")
+            if status.get("available"):
+                csv_path = artifact_dir / "profiles" / profile_id / "ncu.csv"
+                failure_text = csv_path.read_text(encoding="utf-8", errors="replace")
+                if bool(status.get("permission_denied")) != (
+                    "ERR_NVGPUCTRPERM" in failure_text
+                ):
+                    raise ValueError(f"paged decode NCU permission status differs: {profile_id}")
+                if bool(status.get("driver_incompatible")) != (
+                    "driver is not compatible" in failure_text.lower()
+                ):
+                    raise ValueError(f"paged decode NCU driver status differs: {profile_id}")
         reasons = set(report.get("ncu_failure_reasons", []))
         if not reasons or not reasons <= {
             "ERR_NVGPUCTRPERM", "driver incompatibility", "CLI unavailable"

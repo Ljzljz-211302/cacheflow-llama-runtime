@@ -93,6 +93,14 @@ H2 进一步完成 4 个预注册 KV regime、160 条无 profiler paired trials 
 
 Nsight Compute 已实际执行，但当前 driver/tool compatibility 检查和 `ERR_NVGPUCTRPERM` 阻止硬件计数器采集；失败命令与日志均保留。因此验收只通过 NSYS + no-profiler effect 的限定主张，明确不声称 memory-bound、roofline、achieved occupancy 或 hardware DRAM bytes。
 
+### 受限 Paged Decode Attention（Issue #5）
+
+K1 CUDA 原型直接按 block table 从非连续物理页读取 K/V 并输出 attention，不在 timed path materialize contiguous KV。独立 CPU FP32 oracle 与相同数学的 contiguous CUDA 路径共同覆盖 `14/2/D64`、`28/4/D128`、ratio-7 GQA、context `1/15/16/17/31/32`、ragged batch、fragmented pages、unused-page poison、output guards 和 invalid shape/page table fail closed。
+
+正式实验保存 9 个 regime × 20 pairs × 2 methods = 360 条无 profiler observations。Paged K1 的 GPU-event 中位数在全部 regime 均比 contiguous 对照慢 6.25%–13.06%；0.5B shape 的 context 1024/batch 1 回退 13.06%（95% CI 12.91%–13.22%），7B shape 回退 11.59%（11.39%–11.65%）。4 份 NSYS trace 各精确包含 5 次对应方法 launch。batch-1 与 batch-4 的长 context 回退差只有 0.99/1.82 个百分点，未触发 K3 split-K；因长 context 回退超过 3%，预注册规则选择 K2 GQA reuse 作为下一待验证假设。
+
+本验收只证明受限算法正确、负结果可复现并能给出下一内核决策，不证明生产可用或端到端加速。NCU 仍报告 driver incompatibility 与 `ERR_NVGPUCTRPERM`，因此 memory-bound、occupancy 和 hardware DRAM-byte 解释继续禁止。完整 hash-bound artifact 位于 `results/research/h3-paged-decode-v1.0.0/`。
+
 服务级链路也已补齐：3 个 no-profiler upstream/always pairs 给出主要请求效应，相同 seed/config 的 NSYS 重放用 6 个 server PID 和 72 个 request ID 连接 scheduler、KV action、CUDA timeline 与 TTFT；profiler replay 的 42 次自研 KV launch 均与逐进程运行时 counter 完全相等。本轮 no-profiler 中 decision +20、prefill chunk +30、prefill token -86、KV launch +0、copy bytes +10,518,500、CUDA Event -1.040 ms；paired median TTFT P95 +126.932 ms、Engine execute +146,493 us，两者同向恶化。因此报告明确写“未复现旧的 execute/TTFT 反号”，不挑选更好看的历史 run 替代。
 
 exact output hash 被保留为审计指标而非并发性能硬门槛：batch composition 会改变近似相等 logits 与 EOS 位置；HTTP/SSE、上游兼容和语义质量分别由专门 gate 验证。

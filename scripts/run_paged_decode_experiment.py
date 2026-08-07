@@ -136,8 +136,8 @@ def capture_nsys(
     return {
         "capture_command": command, "capture_exit_code": completed.returncode,
         "export_command": export_command, "export_exit_code": exported.returncode,
-        "report": str(report.relative_to(profile_dir.parents[1])),
-        "sqlite": str(sqlite.relative_to(profile_dir.parents[1])),
+        "report": report.relative_to(profile_dir.parents[1]).as_posix(),
+        "sqlite": sqlite.relative_to(profile_dir.parents[1]).as_posix(),
         "report_sha256": file_sha256(report), "sqlite_sha256": file_sha256(sqlite),
         "parsed": parsed,
     }
