@@ -56,8 +56,13 @@ def load_kv_action_protocol(path: Path) -> dict[str, Any]:
         raise ValueError("KV action protocol requires seeded balanced Latin blocks")
     if not isinstance(protocol.get("confirmatory", {}).get("order_seed"), int):
         raise ValueError("KV action protocol requires an integer collection-order seed")
-    if protocol.get("overhead_gates", {}).get("cuda_synchronizations") != 0:
-        raise ValueError("KV action policy must prohibit CUDA synchronization")
+    if protocol.get("overhead_gates", {}).get("direct_cuda_sync_symbols") != 0:
+        raise ValueError("KV action policy must prohibit direct CUDA synchronization symbols")
+    divergence = protocol.get("confirmatory", {}).get("max_action_feature_delta")
+    if not isinstance(divergence, list) or len(divergence) != 9 or not all(
+        _finite(value) and float(value) >= 0 for value in divergence
+    ):
+        raise ValueError("KV action protocol requires nine feature-divergence gates")
     return protocol
 
 
@@ -147,13 +152,15 @@ def validate_kv_action_rows(rows: list[dict[str, Any]], protocol: dict[str, Any]
     required = {
         "snapshot_id", "trace_id", "session_id", "prefix_family", "split",
         "timestamp_order", "backend", "action", "baseline_action",
-        "regime", "analytical_cost_ms", "observed_cost_ms", *FEATURES, *MODEL_FEATURES,
+        "regime", "analytical_cost_ms", "observed_cost_ms", "observation_id",
+        "observation_order", *FEATURES, *MODEL_FEATURES,
     }
     if not rows:
         raise ValueError("KV action evaluation rows are empty")
     split_by_trace: dict[str, str] = {}
     split_by_group: dict[tuple[str, str], str] = {}
     snapshots: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    observations: dict[str, dict[str, Any]] = {}
     for row in rows:
         missing = required - row.keys()
         if missing:
@@ -189,6 +196,10 @@ def validate_kv_action_rows(rows: list[dict[str, Any]], protocol: dict[str, Any]
             raise ValueError("session/prefix family leaks across train/evaluation")
         order = int(row["timestamp_order"])
         snapshots[str(row["snapshot_id"])].append(row)
+        observation_id = str(row["observation_id"])
+        if observation_id in observations:
+            raise ValueError("KV action physical observation is reused across rows")
+        observations[observation_id] = row
     train_traces = {trace for trace, split in split_by_trace.items() if split == "train"}
     eval_traces = {trace for trace, split in split_by_trace.items() if split == "evaluation"}
     split = protocol["split"]
@@ -216,6 +227,18 @@ def validate_kv_action_rows(rows: list[dict[str, Any]], protocol: dict[str, Any]
             raise ValueError(
                 f"snapshot {snapshot_id} canonical features differ from its runtime H0 anchor"
             )
+        feature_gates = [
+            float(value) for value in protocol["confirmatory"]["max_action_feature_delta"]
+        ]
+        for row in group_rows:
+            for index, (canonical, actual, gate) in enumerate(zip(
+                reference["runtime_model_features"], row["action_runtime_model_features"],
+                feature_gates,
+            )):
+                if abs(float(canonical) - float(actual)) > gate + 1e-12:
+                    raise ValueError(
+                        f"snapshot {snapshot_id} action feature {index} exceeds divergence gate"
+                    )
         fixed = (
             "trace_id", "session_id", "prefix_family", "split", "timestamp_order",
             "regime", *FEATURES, *MODEL_FEATURES,
@@ -233,6 +256,16 @@ def validate_kv_action_rows(rows: list[dict[str, Any]], protocol: dict[str, Any]
         len(pairs) < minimum_pairs for pairs in evaluation_pairs.values()
     ):
         raise ValueError("KV action evaluation pairs per regime are below protocol")
+    required_regimes = set(protocol["confirmatory"]["regimes"])
+    for trace, split_name in split_by_trace.items():
+        trace_snapshots = {
+            str(row["regime"]): str(row["snapshot_id"])
+            for row in rows if str(row["trace_id"]) == trace
+        }
+        if set(trace_snapshots) != required_regimes or len(set(trace_snapshots.values())) != len(
+            required_regimes
+        ):
+            raise ValueError(f"KV action {split_name} trace cluster is incomplete")
 
 
 def _bucket(value: float, edges: Iterable[float]) -> int:
@@ -328,9 +361,7 @@ def evaluate_kv_action_models(
         action: _OnlineRidge(float(protocol["learned"]["ridge_lambda"]))
         for action in ACTIONS
     }
-    for row in sorted(
-        train, key=lambda value: (int(value["timestamp_order"]), str(value["snapshot_id"]))
-    ):
+    for row in sorted(train, key=lambda value: int(value["observation_order"])):
         learned[str(row["action"])].observe(
             _model_features(row), float(row["observed_cost_ms"])
         )
@@ -427,10 +458,19 @@ def evaluate_kv_action_models(
             ],
             "choices": {action: sum(row["chosen"] == action for row in decisions) for action in ACTIONS},
         }
+    max_feature_delta = [0.0] * 9
+    for row in rows:
+        for index, (canonical, actual) in enumerate(zip(
+            row["runtime_model_features"], row["action_runtime_model_features"]
+        )):
+            max_feature_delta[index] = max(
+                max_feature_delta[index], abs(float(canonical) - float(actual))
+            )
     return {
         "train_traces": len({row["trace_id"] for row in train}),
         "evaluation_traces": len({row["trace_id"] for row in evaluation}),
         "group_overlap": False,
+        "max_action_feature_delta": max_feature_delta,
         "models": summary,
         "decisions": results,
     }
@@ -444,11 +484,81 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _prometheus_metric(text: str, sample: str) -> float:
+    prefix = sample + " "
+    line = next((row for row in text.splitlines() if row.startswith(prefix)), None)
+    if line is None:
+        raise ValueError(f"KV action raw evidence lacks metric {sample}")
+    value = float(line[len(prefix):])
+    if not math.isfinite(value):
+        raise ValueError("KV action raw evidence contains a non-finite metric")
+    return value
+
+
+def validate_kv_action_raw_evidence(
+    rows: list[dict[str, Any]], evidence_rows: list[dict[str, Any]]
+) -> None:
+    by_observation = {str(row["observation_id"]): row for row in evidence_rows}
+    if len(by_observation) != len(evidence_rows) or set(by_observation) != {
+        str(row["observation_id"]) for row in rows
+    }:
+        raise ValueError("KV action raw observation identity coverage differs")
+    if [int(row.get("observation_order", -1)) for row in evidence_rows] != list(
+        range(1, len(evidence_rows) + 1)
+    ):
+        raise ValueError("KV action raw observation sequence differs")
+    for row in rows:
+        evidence = by_observation[str(row["observation_id"])]
+        if evidence.get("action") != row["action"] or evidence.get("trace_id") != row["trace_id"]:
+            raise ValueError("KV action raw observation identity differs")
+        if int(evidence.get("observation_order", -1)) != int(row["observation_order"]):
+            raise ValueError("KV action row order differs from raw observation sequence")
+        before = evidence.get("before_metrics")
+        after = evidence.get("after_metrics")
+        response = evidence.get("response")
+        if not isinstance(before, str) or not isinstance(after, str) or not isinstance(response, dict):
+            raise ValueError("KV action raw observation payload differs")
+        action = str(row["action"])
+        selected = f'llamacpp:kv_action_decisions_total{{action="{action}"}}'
+        observed = f'llamacpp:kv_action_observations_total{{action="{action}"}}'
+        cost = f'llamacpp:kv_action_observation_seconds_total{{action="{action}"}}'
+        decision = "llamacpp:kv_action_decision_seconds_total"
+        checks = {
+            "selected_delta": _prometheus_metric(after, selected) - _prometheus_metric(before, selected),
+            "observation_delta": _prometheus_metric(after, observed) - _prometheus_metric(before, observed),
+            "observed_cost_ms": 1000.0 * (
+                _prometheus_metric(after, cost) - _prometheus_metric(before, cost)
+            ),
+            "decision_cpu_ms": 1000.0 * (
+                _prometheus_metric(after, decision) - _prometheus_metric(before, decision)
+            ),
+            "paged_decisions": _prometheus_metric(
+                after, 'llamacpp:kv_action_decisions_total{action="paged"}'
+            ),
+            "invalid_features": _prometheus_metric(
+                after, "llamacpp:kv_action_invalid_features_total"
+            ),
+        }
+        for field, expected in checks.items():
+            if not math.isclose(float(row[field]), expected, rel_tol=1e-12, abs_tol=1e-12):
+                raise ValueError(f"KV action raw observation {field} differs")
+        raw_features = [
+            _prometheus_metric(
+                after, f'llamacpp:kv_action_last_model_feature{{index="{index}"}}'
+            )
+            for index in range(9)
+        ]
+        if raw_features != [float(value) for value in row["action_runtime_model_features"]]:
+            raise ValueError("KV action raw runtime feature vector differs")
+        if int(response.get("timings", {}).get("prompt_n", -1)) != int(row["prompt_tokens"]):
+            raise ValueError("KV action raw response prompt token count differs")
+
+
 def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str, Any]:
     protocol = load_kv_action_protocol(protocol_path)
     manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
     report = json.loads((artifact / "report.json").read_text(encoding="utf-8"))
-    if manifest.get("artifact_version") != "h4-kv-action-v1.2.0":
+    if manifest.get("artifact_version") != "h4-kv-action-v1.3.0":
         raise ValueError("KV action artifact version differs")
     if manifest.get("protocol_sha256") != _sha256(protocol_path):
         raise ValueError("KV action protocol hash differs")
@@ -539,6 +649,12 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
             encoding="utf-8"
         ).splitlines() if line
     ]
+    evidence_rows = [
+        json.loads(line) for line in (artifact / "runtime-evidence.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines() if line
+    ]
+    validate_kv_action_raw_evidence(rows, evidence_rows)
     validate_kv_action_collection_order(rows, protocol)
     for row in rows:
         if row.get("selected_delta") != 1 or row.get("observation_delta") != 1:
@@ -575,13 +691,13 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
         "p99_choose_microseconds": max(float(row["p99_ns"]) for row in overhead_rows) / 1000.0,
         "measured_max_choose_microseconds": max(float(row["max_ns"]) for row in overhead_rows) / 1000.0,
         "hot_loop_allocations": sum(int(row["allocations"]) for row in overhead_rows),
-        "cuda_synchronizations": len(expected_sync_audit["matches"]),
+        "direct_cuda_sync_symbols": len(expected_sync_audit["matches"]),
         "scheduler_cpu_ratio_p99": ratios[int(0.99 * (len(ratios) - 1))],
     }
     expected_overhead["passed"] = (
         expected_overhead["p99_choose_microseconds"] <= gates["p99_choose_microseconds_max"]
         and expected_overhead["hot_loop_allocations"] == gates["hot_loop_allocations"]
-        and expected_overhead["cuda_synchronizations"] == gates["cuda_synchronizations"]
+        and expected_overhead["direct_cuda_sync_symbols"] == gates["direct_cuda_sync_symbols"]
         and expected_overhead["scheduler_cpu_ratio_p99"] <= gates["scheduler_cpu_ratio_p99_max"]
     )
     if report.get("overhead") != expected_overhead or not expected_overhead["passed"]:

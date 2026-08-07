@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -26,7 +27,7 @@ from llama_lab.kv_action_evidence import (
 from llama_lab.server_bench import wait_until_ready
 
 
-ARTIFACT = ROOT / "results/research/h4-kv-action-v1.2.0"
+ARTIFACT = ROOT / "results/research/h4-kv-action-v1.3.0"
 PROTOCOL_PATH = ROOT / "config/kv_action_policy_protocol.json"
 SERVER = ROOT / "build/patched-cuda-ninja3/bin/llama-server.exe"
 MODEL = ROOT / "models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
@@ -176,6 +177,11 @@ def observe(mode: str, port: int, trace: int, prompt: str, unrelated: str) -> di
         "invalid_features": metric(after, "llamacpp:kv_action_invalid_features_total"),
         "decision_cpu_ms": decision_seconds * 1000.0,
         "decision_to_action_ratio": decision_seconds * 1000.0 / internal_cost_ms,
+        "_raw_evidence": {
+            "before_metrics": before,
+            "after_metrics": after,
+            "response": response,
+        },
     }
 
 
@@ -248,12 +254,14 @@ def main() -> None:
             processes[mode] = start(mode, port, handle)
 
         rows: list[dict[str, Any]] = []
+        raw_evidence: list[dict[str, Any]] = []
         repeats = (24, 48, 96, 128)
         trace_markers = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉天地玄黄宇宙洪荒日月盈昃寒来暑往秋收冬藏"
         action_orders = make_balanced_action_orders(
             MODES, 40, int(protocol["confirmatory"]["order_seed"])
         )
         order = 0
+        observation_order = 0
         for trace in range(40):
             order += 1
             family = f"prefix-family-{trace:02d}"
@@ -261,38 +269,65 @@ def main() -> None:
                 "cacheflow action evidence token " * repeats[trace % len(repeats)]
             )
             unrelated = f"unrelated-{trace:02d} " + ("eviction control token " * 32)
-            observed: dict[str, dict[str, float | int]] = {}
+            observed: dict[str, dict[str, Any]] = {}
             action_order = action_orders[trace]
             for collection_order, mode in enumerate(action_order):
-                observed[mode] = observe(mode, MODES[mode], trace, prompt, unrelated)
-                observed[mode]["collection_order"] = collection_order
-            tokens = max(int(value["prompt_tokens"]) for value in observed.values())
-            kv_bytes = tokens * 24 * 2 * 64 * 2 * 2
+                regimes = ("resident", "preempted") if mode == "recompute" else ("single",)
+                for regime in regimes:
+                    observation_order += 1
+                    observation_prompt = prompt if regime != "preempted" else prompt + " preempted"
+                    value = observe(
+                        mode, MODES[mode], trace, observation_prompt, unrelated + " " + regime
+                    )
+                    key = mode if regime == "single" else f"{mode}_{regime}"
+                    observation_id = f"trace-{trace:02d}-{key}"
+                    evidence = value.pop("_raw_evidence")
+                    raw_evidence.append({
+                        "observation_id": observation_id,
+                        "observation_order": observation_order,
+                        "trace_id": f"trace-{trace:02d}",
+                        "action": mode,
+                        **evidence,
+                    })
+                    value["collection_order"] = collection_order
+                    value["observation_order"] = observation_order
+                    value["observation_id"] = observation_id
+                    observed[key] = value
             split = "train" if trace < 20 else "evaluation"
-            pressure = 0.50 + 0.10 * (trace % 4)
-            reuse_distance = 1 + trace % 5
-            base = {
+            identity = {
                 "trace_id": f"trace-{trace:02d}",
                 "session_id": f"session-{trace:02d}",
                 "prefix_family": family,
                 "split": split,
                 "timestamp_order": order,
                 "backend": "cuda",
-                "context_tokens": tokens,
-                "batch": 1,
-                "kv_pressure": pressure,
-                "kv_bytes": kv_bytes,
-                "reuse_distance": reuse_distance,
             }
             for snapshot_kind, actions, baseline, page_runs in (
                 ("resident", ("direct", "recompute"), "direct", 1),
-                ("preempted", ("device_swap", "host_swap", "recompute"), "device_swap",
-                 max(1, (tokens + 15) // 16)),
+                ("preempted", ("device_swap", "host_swap", "recompute"), "device_swap", 0),
             ):
                 snapshot_id = f"trace-{trace:02d}-{snapshot_kind}"
                 canonical_action = "direct" if snapshot_kind == "resident" else "device_swap"
                 model_features = observed[canonical_action]["runtime_model_features"]
+                context_tokens = max(1, round(float(model_features[1]) * 4096.0))
+                if snapshot_kind == "preempted":
+                    page_runs = max(1, (context_tokens + 15) // 16)
+                kv_bytes = max(1, round(float(model_features[3]) * 1024.0 * 1024.0 * 1024.0))
+                pressure = float(model_features[6])
+                reuse_distance = max(0, round(math.expm1(float(model_features[5]) * 20.0)))
+                base = {
+                    **identity,
+                    "context_tokens": context_tokens,
+                    "batch": 1,
+                    "kv_pressure": pressure,
+                    "kv_bytes": kv_bytes,
+                    "reuse_distance": reuse_distance,
+                }
                 for action in actions:
+                    observation_key = (
+                        f"recompute_{snapshot_kind}" if action == "recompute" else action
+                    )
+                    observation = observed[observation_key]
                     rows.append({
                         **base,
                         "snapshot_id": snapshot_id,
@@ -300,22 +335,27 @@ def main() -> None:
                         "page_runs": page_runs,
                         "action": action,
                         "baseline_action": baseline,
-                        "analytical_cost_ms": analytical(action, tokens, kv_bytes, pressure),
-                        "observed_cost_ms": observed[action]["observed_cost_ms"],
-                        "http_elapsed_ms": observed[action]["http_elapsed_ms"],
+                        "analytical_cost_ms": analytical(
+                            action, context_tokens, kv_bytes, pressure
+                        ),
+                        "observed_cost_ms": observation["observed_cost_ms"],
+                        "http_elapsed_ms": observation["http_elapsed_ms"],
                         "runtime_model_features": model_features,
-                        "action_runtime_model_features": observed[action]["runtime_model_features"],
-                        "collection_order": observed[action]["collection_order"],
+                        "action_runtime_model_features": observation["runtime_model_features"],
+                        "collection_order": observation["collection_order"],
+                        "observation_order": observation["observation_order"],
+                        "observation_id": observation["observation_id"],
                         **{
                             f"model_feature_{index}": value
                             for index, value in enumerate(model_features)
                         },
-                        "selected_delta": observed[action]["selected_delta"],
-                        "observation_delta": observed[action]["observation_delta"],
-                        "paged_decisions": observed[action]["paged_decisions"],
-                        "invalid_features": observed[action]["invalid_features"],
-                        "decision_cpu_ms": observed[action]["decision_cpu_ms"],
-                        "decision_to_action_ratio": observed[action]["decision_to_action_ratio"],
+                        "prompt_tokens": observation["prompt_tokens"],
+                        "selected_delta": observation["selected_delta"],
+                        "observation_delta": observation["observation_delta"],
+                        "paged_decisions": observation["paged_decisions"],
+                        "invalid_features": observation["invalid_features"],
+                        "decision_cpu_ms": observation["decision_cpu_ms"],
+                        "decision_to_action_ratio": observation["decision_to_action_ratio"],
                     })
     finally:
         for process in processes.values():
@@ -325,6 +365,10 @@ def main() -> None:
 
     trials = ARTIFACT / "paired-actions.jsonl"
     trials.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
+    (ARTIFACT / "runtime-evidence.jsonl").write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in raw_evidence),
+        encoding="utf-8",
+    )
     analysis = evaluate_kv_action_models(rows, protocol)
     benchmark = ROOT / "build/patched-cpu-noui/bin/Release/bench-kv-action-policy.exe"
     overhead_lines = subprocess.check_output([str(benchmark)], cwd=ROOT, text=True).splitlines()
@@ -347,13 +391,13 @@ def main() -> None:
         "p99_choose_microseconds": max(float(row["p99_ns"]) for row in overhead) / 1000.0,
         "measured_max_choose_microseconds": max(float(row["max_ns"]) for row in overhead) / 1000.0,
         "hot_loop_allocations": sum(int(row["allocations"]) for row in overhead),
-        "cuda_synchronizations": len(sync_audit["matches"]),
+        "direct_cuda_sync_symbols": len(sync_audit["matches"]),
         "scheduler_cpu_ratio_p99": ratio_p99,
     }
     overhead_result["passed"] = (
         overhead_result["p99_choose_microseconds"] <= overhead_gates["p99_choose_microseconds_max"]
         and overhead_result["hot_loop_allocations"] == overhead_gates["hot_loop_allocations"]
-        and overhead_result["cuda_synchronizations"] == overhead_gates["cuda_synchronizations"]
+        and overhead_result["direct_cuda_sync_symbols"] == overhead_gates["direct_cuda_sync_symbols"]
         and overhead_result["scheduler_cpu_ratio_p99"] <= overhead_gates["scheduler_cpu_ratio_p99_max"]
     )
     report = {
@@ -389,7 +433,7 @@ def main() -> None:
     report_markdown = "\n".join([
         "# H4 unified KV action policy report",
         "",
-        "The confirmatory replay compares only actions with complete real-service implementations. "
+        "The matched-workload replay compares only actions with complete real-service implementations. "
         "Remap and Paged remain capability-masked; Paged recorded zero production decisions.",
         "",
         "`observed_cost_ms` is the server policy's internal counter delta from scheduler snapshot "
@@ -408,8 +452,12 @@ def main() -> None:
         f"observed max {overhead_result['measured_max_choose_microseconds']:.3f} us; "
         f"scheduler/action ratio p99 {overhead_result['scheduler_cpu_ratio_p99'] * 100:.4f}%; "
         f"hot-loop allocations {overhead_result['hot_loop_allocations']}; "
-        f"CUDA synchronizations {overhead_result['cuda_synchronizations']}.",
+        f"direct CUDA synchronization symbols {overhead_result['direct_cuda_sync_symbols']}.",
         "",
+        "The action servers can expose different stateful feature values; their maximum normalized "
+        "feature deltas are retained in report.json and checked against protocol gates. The shared "
+        "model input is the real H0 anchor, so this is not described as an exact cloned-state causal "
+        "counterfactual.\n\n"
         "Each model's JSON summary includes a 10,000-resample paired trace-cluster bootstrap "
         "95% CI for mean regret delta versus H0.",
         "",
@@ -420,7 +468,7 @@ def main() -> None:
     (ARTIFACT / "report.md").write_text(report_markdown, encoding="utf-8")
     manifest = {
         "schema_version": 1,
-        "artifact_version": "h4-kv-action-v1.2.0",
+        "artifact_version": "h4-kv-action-v1.3.0",
         "protocol_sha256": sha256(PROTOCOL_PATH),
         "model_path": MODEL.relative_to(ROOT).as_posix(),
         "model_sha256": sha256(MODEL),

@@ -16,3 +16,11 @@ source constraint.
 
 Do not cite v1.0.0 or v1.1.0 as formal evidence. Both remain byte-for-byte
 preserved beneath this directory so the negative audit trail is not erased.
+
+`h4-kv-action-v1.2.0` added runtime H0 anchors, balanced collection order,
+trace-cluster bootstrap, and source-bound lexical synchronization audit. It is
+still superseded: action costs came from servers whose stateful feature vectors
+differed from the shared H0 anchor, one physical Recompute observation was
+duplicated across both regimes, replay ignored physical observation order, raw
+Prometheus snapshots were not retained, and the lexical audit was described too
+strongly as runtime zero-sync evidence. Do not cite v1.2.0 as formal evidence.

@@ -200,17 +200,14 @@
         "docs/experiment-limitations.md",
         "docs/research/primary-source-foundations.md",
         "docs/research/unified-action-cost-model.md",
-        "results/research/h4-kv-action-v1.2.0/manifest.json",
-        "results/research/h4-kv-action-v1.2.0/report.json"
+        "results/research/h4-kv-action-v1.3.0/manifest.json",
+        "results/research/h4-kv-action-v1.3.0/report.json"
       ],
       "observed_results": [
         "The v1.0.0 replay is superseded because it used client HTTP round-trip latency instead of the registered internal complete-action boundary and evaluated a different Ridge contract; it remains under results/research/superseded for audit only.",
         "The v1.1.0 replay is also superseded because it used synthetic canonical model inputs, resampled decisions rather than trace clusters, lacked preregistered balanced collection order, and reported CUDA synchronization from a literal rather than a source-bound audit.",
-        "The v1.2.0 CUDA replay collected 40 trace-isolated groups, split chronologically into 20 training and 20 evaluation traces; production-observed nine-feature vectors are shared within each counterfactual snapshot, collection uses preregistered seeded balanced Latin blocks, and bootstrap resamples whole trace clusters.",
-        "Observed cost is the native kv_action_observation_seconds_total delta from scheduler snapshot through the same slot's first completed useful target decode; HTTP round-trip is retained separately and never enters regret or harm.",
-        "H0, A1, and production-isomorphic nine-feature online Ridge L1 each recorded median/P95/cumulative regret of 0/1.488/8.986 ms with zero harmful decisions. L1 made no confidence-bound switch, so this is a safe fallback result rather than a learned-policy win.",
-        "T1 recorded median/P95/cumulative regret of 0/1.488/11.738 ms and 3/40 harmful decisions (7.50%); its paired trace-cluster mean-regret delta versus H0 had a 10,000-resample 95% CI of -0.0127 to 0.1681 ms, so it did not establish an advantage.",
-        "The five-regime, five-million-choice hot-path benchmark recorded worst p99 0.600 us, decision/action ratio p99 0.0460%, and zero heap allocations. A hash-bound source audit found no CUDA synchronization symbol or backend include in the policy module; the untrimmed 242.700 us Windows wall maximum is report-only."
+        "The v1.2.0 replay is superseded because it did not retain raw Prometheus evidence, reused one Recompute observation across two regimes, ignored physical observation order in Ridge replay, and described a lexical synchronization audit too strongly.",
+        "The v1.3.0 matched-workload replay is pending; no superseded numerical result is a current formal claim."
       ],
       "scope_limits": [
         "The unified policy currently executes H0 and runs per-action Ridge in shadow; the held-out run did not justify active L1 selection.",

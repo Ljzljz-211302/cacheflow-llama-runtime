@@ -53,6 +53,9 @@ def rows() -> list[dict[str, object]]:
                         "reuse_distance": 3,
                         "analytical_cost_ms": analytical,
                         "observed_cost_ms": observed,
+                        "observation_id": f"observation-{len(output)}",
+                        "observation_order": len(output),
+                        "prompt_tokens": 1024,
                         "runtime_model_features": model_features,
                         "action_runtime_model_features": model_features,
                         **{f"model_feature_{index}": value for index, value in enumerate(
@@ -85,6 +88,16 @@ class KvActionEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "trace_id leaks"):
             validate_kv_action_rows(tampered, self.protocol)
 
+    def test_incomplete_trace_cluster_is_rejected(self) -> None:
+        tampered = copy.deepcopy(rows())
+        source_trace = "evaluation-0"
+        target_trace = "evaluation-1"
+        for row in tampered:
+            if row["trace_id"] == source_trace and row["regime"] == "resident":
+                row["trace_id"] = target_trace
+        with self.assertRaisesRegex(ValueError, "trace cluster is incomplete"):
+            validate_kv_action_rows(tampered, self.protocol)
+
     def test_paired_feature_drift_is_rejected(self) -> None:
         tampered = copy.deepcopy(rows())
         tampered[1]["kv_bytes"] = int(tampered[1]["kv_bytes"]) + 1
@@ -105,6 +118,15 @@ class KvActionEvidenceTests(unittest.TestCase):
         )
         baseline["action_runtime_model_features"][0] = 2.0
         with self.assertRaisesRegex(ValueError, "runtime H0 anchor"):
+            validate_kv_action_rows(tampered, self.protocol)
+
+    def test_action_feature_divergence_gate_is_enforced(self) -> None:
+        tampered = copy.deepcopy(rows())
+        tampered[1]["action_runtime_model_features"] = list(
+            tampered[1]["action_runtime_model_features"]
+        )
+        tampered[1]["action_runtime_model_features"][1] = 5.0
+        with self.assertRaisesRegex(ValueError, "exceeds divergence gate"):
             validate_kv_action_rows(tampered, self.protocol)
 
     def test_policy_sync_audit_is_enforceable(self) -> None:
@@ -134,7 +156,7 @@ class KvActionEvidenceTests(unittest.TestCase):
             self.assertTrue(all(regimes == {"resident", "preempted"} for regimes in grouped.values()))
 
     def test_formal_artifact_recomputes_from_hashed_trials(self) -> None:
-        artifact = Path("results/research/h4-kv-action-v1.2.0")
+        artifact = Path("results/research/h4-kv-action-v1.3.0")
         if not (artifact / "manifest.json").exists():
             self.skipTest("formal H4 artifact has not been generated")
         report = validate_kv_action_artifact(
@@ -143,7 +165,7 @@ class KvActionEvidenceTests(unittest.TestCase):
         self.assertTrue(report["overhead"]["passed"])
 
     def _copy_formal_artifact(self, destination: Path) -> Path:
-        source = Path("results/research/h4-kv-action-v1.2.0")
+        source = Path("results/research/h4-kv-action-v1.3.0")
         if not (source / "manifest.json").exists():
             self.skipTest("formal H4 artifact has not been generated")
         artifact = destination / source.name
