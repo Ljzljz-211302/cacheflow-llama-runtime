@@ -1230,6 +1230,6 @@ Remap/Paged 在生产快照中的 capability 为 false；正式 CUDA 证据要�
 
 ### 26.5 正式证据与边界
 
-协议固定 trace/session/prefix-family 分组、时间顺序切分、paired matched-workload action、H0/A1/T1/L1 和开销门禁。v1.3.0 保存原始 Prometheus/响应证据，每个 regime 独立采集 Recompute，按真实 observation 顺序 replay，强制每个 trace 同时包含 resident/preempted，并报告/门禁各动作服务器相对真实 H0 锚点的状态特征偏差。因此该实验不再表述为“克隆同一状态的因果反事实”。源码哈希绑定的词法审计只证明策略模块未发现直接 CUDA 同步符号或后端 include，不证明运行时不存在间接同步。v1.0.0 至 v1.2.0 均已移入 superseded。
+协议固定 trace/session/prefix-family 分组、时间顺序切分、paired matched-workload action、H0/A1/T1/L1 和开销门禁。v1.3.0 保存并语义校验 200 组原始 Prometheus/响应 observation，每个 regime 独立采集 Recompute，按真实 observation 顺序 replay，强制每个 trace 同时包含 resident/preempted，并报告/门禁各动作服务器相对真实 H0 锚点的九维最大偏差 `[0, 0.188721, 0, 0.00885548, 1, 0.544826, 0.382813, 1.63381, 0.00755668]`。因此不表述为“克隆同一状态的因果反事实”。H0/A1/L1 的 median/P95/cumulative regret 均为 0/1.953/15.543 ms、harmful 0；离线 T1 为 0/1.516/5.506 ms、harmful 0，paired trace-cluster CI [-0.5285, -0.0511] ms。该结果只说明本次 matched-workload replay 中 T1 低于 H0，不是生产在线或因果收益。源码哈希绑定的词法审计只证明策略模块未发现直接 CUDA 同步符号或后端 include。v1.0.0 至 v1.2.0 均已移入 superseded。
 
 硬门禁为 choose p99 不超过 50 us、decision/action ratio p99 不超过 1%、热路径零 allocation，以及策略模块词法审计中直接 CUDA 同步符号/后端 include 为零；后者不等价于运行时零同步。Windows raw wall-clock maximum 原样保留为抢占诊断，不作硬门禁。artifact 绑定协议、模型 SHA-256、外层实现提交、固定上游与 replay patch、完整文件树及逐文件哈希；校验器接受与 patch 等价的干净开发提交树或 bootstrap 后的已应用 patch 工作树，拒绝任何额外 vendor 改动，并从原始 paired rows 与 Prometheus/响应证据重算分析和开销。

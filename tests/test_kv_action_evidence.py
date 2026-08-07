@@ -196,7 +196,25 @@ class KvActionEvidenceTests(unittest.TestCase):
                 "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
             )
             self._rehash(artifact, "paired-actions.jsonl")
-            with self.assertRaisesRegex(ValueError, "ratio differs|analysis differs"):
+            with self.assertRaisesRegex(ValueError, "raw observation|ratio differs|analysis differs"):
+                validate_kv_action_artifact(artifact, Path("config/kv_action_policy_protocol.json"))
+
+    def test_formal_artifact_rejects_rehashed_raw_metric_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = self._copy_formal_artifact(Path(temporary))
+            evidence_path = artifact / "runtime-evidence.jsonl"
+            evidence = [
+                json.loads(line) for line in evidence_path.read_text(encoding="utf-8").splitlines()
+            ]
+            evidence[0]["after_metrics"] = evidence[0]["after_metrics"].replace(
+                'llamacpp:kv_action_last_model_feature{index="0"} 1',
+                'llamacpp:kv_action_last_model_feature{index="0"} 2',
+            )
+            evidence_path.write_text(
+                "\n".join(json.dumps(row) for row in evidence) + "\n", encoding="utf-8"
+            )
+            self._rehash(artifact, "runtime-evidence.jsonl")
+            with self.assertRaisesRegex(ValueError, "raw runtime feature vector differs"):
                 validate_kv_action_artifact(artifact, Path("config/kv_action_policy_protocol.json"))
 
     def test_formal_artifact_rejects_rehashed_overhead_tamper(self) -> None:

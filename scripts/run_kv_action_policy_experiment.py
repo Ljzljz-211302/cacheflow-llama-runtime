@@ -493,13 +493,17 @@ def main() -> None:
         "patch_path": PATCH_REPOSITORY_PATH,
         "patch_sha256": hashlib.sha256(committed_patch).hexdigest(),
         "runs": {
-            "direct": {"port": 19840, "kv_action_policy": "fixed", "cache_idle_slots": False},
-            "device_swap": {"port": 19841, "kv_action_policy": "fixed", "cache_idle_slots": True},
+            "direct": {"port": 19840, "kv_action_policy": "fixed", "cache_idle_slots": False,
+                       "endpoint_slots": True},
+            "device_swap": {"port": 19841, "kv_action_policy": "fixed", "cache_idle_slots": True,
+                            "endpoint_slots": True},
             "host_swap": {
                 "port": 19842, "kv_action_policy": "fixed", "cache_idle_slots": True,
-                "kv_swap_path": "memory", "kv_swap_budget_mib": 256,
+                "kv_swap_path": "memory", "kv_swap_budget_mib": 256, "endpoint_slots": True,
             },
-            "recompute": {"port": 19843, "kv_action_policy": "fixed", "cache_idle_slots": False},
+            "recompute": {"port": 19843, "kv_action_policy": "fixed", "cache_idle_slots": False,
+                          "endpoint_slots": True, "cache_prompt": False,
+                          "observations_per_trace": 2},
         },
         "files": {},
     }

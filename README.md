@@ -60,7 +60,7 @@ flowchart LR
 
 服务现在用同一个 fail-closed 接口比较 Direct、CUDA-managed Swap、事务型 host Swap 与 Recompute；Remap/Paged 在缺少完整服务 adapter 时由 capability gate 禁止进入生产选择。策略包含固定 H0、解析 A1、分桶查表 T1 与带置信边界/H0 fallback 的 L1，并通过 Prometheus 分开记录推荐、实际执行和完整动作反馈。
 
-H4 v1.3 正在按再次收紧的协议重新生成：保存并语义校验原始 Prometheus/响应证据，每个 regime 独立采集 Recompute，按真实 observation 顺序 replay，强制完整 trace cluster，并报告/门禁动作服务器相对 H0 锚点的状态特征偏差。源码审计只能证明策略模块未发现直接 CUDA 同步符号或后端 include，不再宣称运行时“零同步”。v1.0.0、v1.1.0、v1.2.0 均仅保留在 `results/research/superseded/`，不得引用旧数值。
+正式 Qwen2.5-0.5B CUDA v1.3 matched-workload replay 使用 40 个隔离 trace（20 train/20 evaluation），保存并语义校验 200 组原始 Prometheus/响应 observation，按真实 observation 顺序训练并按完整 trace 聚类 bootstrap。H0/A1/L1 的 median/P95/cumulative regret 均为 `0/1.953/15.543 ms`、harmful 0；L1 未切换。离线 T1 为 `0/1.516/5.506 ms`、harmful 0，paired trace-cluster mean-regret delta 95% CI `[-0.5285, -0.0511] ms`，在本次 matched-workload replay 中低于 H0，但不外推为克隆状态下的因果收益或生产在线收益。500 万次 choose 的最差 p99 1.000 us、decision/action ratio p99 0.0644%、零 allocation；源码审计仅确认未发现直接 CUDA 同步符号或后端 include，raw max 1997.800 us 只作 Windows 抢占诊断。v1.0.0 至 v1.2.0 均仅保留在 `results/research/superseded/`。
 
 ## 一键复现
 

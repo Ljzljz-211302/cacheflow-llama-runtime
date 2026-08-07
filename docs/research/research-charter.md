@@ -82,9 +82,9 @@ Issue #5 的 H3 v1.0.0 已得到受限混合结果：K1 直接分页 kernel 在�
 
 训练/调参 trace 与评估 trace 必须隔离；exploration 不得计作收敛。若固定规则在全部 held-out regime 内与模型无显著差异或更安全，则保留固定规则并报告复杂模型没有价值。
 
-Issue #6 的 v1.0.0 至 v1.2.0 均因后续审计发现的证据合同问题而否决并完整保留。v1.3.0 保存原始 Prometheus/响应证据，每个 regime 独立采集 Recompute，按真实 observation 顺序 replay，强制完整 trace cluster，并量化各动作服务器相对 H0 锚点的状态特征偏差。由于动作服务器并非克隆同一内存状态，只称 paired matched-workload comparison，不作因果反事实声明。
+Issue #6 的 v1.0.0 至 v1.2.0 均因后续审计发现的证据合同问题而否决并完整保留。v1.3.0 保存并语义校验 200 组原始 Prometheus/响应 observation，每个 regime 独立采集 Recompute，按真实 observation 顺序 replay，强制完整 trace cluster，并量化各动作服务器相对 H0 锚点的状态特征偏差。H0/A1/L1 的 median/P95/cumulative regret 均为 0/1.953/15.543 ms、harmful 0；离线 T1 为 0/1.516/5.506 ms、harmful 0，paired trace-cluster CI [-0.5285, -0.0511] ms。由于动作服务器并非克隆同一内存状态，只称本次 matched-workload replay 中 T1 低于 H0，不作因果反事实或生产在线收益声明。
 
-正式生产动作只包含 Direct、CUDA-managed Swap、transactional host Swap 与 Recompute；Remap/Paged 因缺少完整 adapter 被 capability mask。v1.3.0 正式数值待重新生成；源码哈希绑定审计只证明未发现直接 CUDA 同步符号或后端 include，不作运行时零同步声明。
+正式生产动作只包含 Direct、CUDA-managed Swap、transactional host Swap 与 Recompute；Remap/Paged 因缺少完整 adapter 被 capability mask。500 万次 choose 的最差 p99 1.000 us、decision/action ratio p99 0.0644%、零 allocation；源码哈希绑定审计只证明未发现直接 CUDA 同步符号或后端 include，不作运行时零同步声明。hash-bound artifact 位于 `results/research/h4-kv-action-v1.3.0/`。
 
 ## 7. H5：已观察到的反向因果链
 

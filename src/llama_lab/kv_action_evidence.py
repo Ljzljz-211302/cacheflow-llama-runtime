@@ -570,13 +570,17 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
     if not model_path.is_file() or manifest.get("model_sha256") != _sha256(model_path):
         raise ValueError("KV action model hash differs")
     expected_runs = {
-        "direct": {"port": 19840, "kv_action_policy": "fixed", "cache_idle_slots": False},
-        "device_swap": {"port": 19841, "kv_action_policy": "fixed", "cache_idle_slots": True},
+        "direct": {"port": 19840, "kv_action_policy": "fixed", "cache_idle_slots": False,
+                   "endpoint_slots": True},
+        "device_swap": {"port": 19841, "kv_action_policy": "fixed", "cache_idle_slots": True,
+                        "endpoint_slots": True},
         "host_swap": {
             "port": 19842, "kv_action_policy": "fixed", "cache_idle_slots": True,
-            "kv_swap_path": "memory", "kv_swap_budget_mib": 256,
+            "kv_swap_path": "memory", "kv_swap_budget_mib": 256, "endpoint_slots": True,
         },
-        "recompute": {"port": 19843, "kv_action_policy": "fixed", "cache_idle_slots": False},
+        "recompute": {"port": 19843, "kv_action_policy": "fixed", "cache_idle_slots": False,
+                      "endpoint_slots": True, "cache_prompt": False,
+                      "observations_per_trace": 2},
     }
     if manifest.get("runs") != expected_runs:
         raise ValueError("KV action service run configuration differs")

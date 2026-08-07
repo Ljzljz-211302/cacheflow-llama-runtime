@@ -171,6 +171,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 - 算法：H0 固定安全规则、A1 解析模型、T1 分桶查表、L1 置信约束 Ridge 使用相同 snapshot 和完整动作边界；无效/OOD/冷启动/不确定性均 fail closed。
 - 数据隔离：20 个 trace group 按时间顺序切为 12 train / 8 evaluation，session、prefix family 与 trace 均无交叉；16 个 held-out resident/preempted snapshot 采用 paired action observation。
 - v1.0.0 因错误使用 HTTP 往返计时且 L1 合同与生产不一致而被否决，仅保留在 `results/research/superseded/`。v1.1.0 从干净提交 `32c8fe7` 重采集：40 trace 按时间切为 20 train/20 evaluation，resident/preempted 各 20 个 held-out pair。
-- v1.0.0 至 v1.2.0 均在后续审计中发现证据合同缺陷，已移入 superseded 且不得作为验收结果；v1.3.0 正式 CUDA replay 待按原始 metrics 绑定、独立 Recompute observation、真实 observation 顺序和完整 trace cluster 协议重新生成。
-- 热路径仍要求 5 个 regime、500 万次 choose 与零 allocation；源码哈希绑定审计只门禁直接 CUDA 同步符号和后端 include，不把词法检查冒充运行时“零同步”。正式数值以待生成的 v1.3.0 artifact 为准。
+- v1.3.0 正式 CUDA matched-workload replay 保存并语义校验 200 组原始 Prometheus/响应 observation，独立采集两个 regime 的 Recompute，按真实 observation 顺序训练并强制完整 trace cluster。H0/A1/L1 的 median/P95/cumulative regret 均为 0/1.953/15.543 ms、harmful 0；L1 未切换。离线 T1 为 0/1.516/5.506 ms、harmful 0，paired trace-cluster mean-regret delta 95% CI 为 [-0.5285, -0.0511] ms。动作服务器的状态特征存在已报告偏差，故只称本次 matched-workload replay 中低于 H0，不作克隆状态因果或生产在线收益声明。v1.0.0 至 v1.2.0 均仅作否决审计记录。
+- 热路径：5 个 regime、500 万次 choose、零 allocation，最差 p99 1.000 us，decision/action ratio p99 0.0644%；源码哈希绑定审计未发现直接 CUDA 同步符号或后端 include，但不证明运行时间接同步为零。raw Windows maximum 1997.800 us 保留为 report-only 抢占诊断。
 - 证据所有权：artifact 精确绑定协议/模型哈希、外层实现提交、固定上游及 replay patch、完整文件树；validator 同时验证干净开发提交树或 bootstrap 已应用 patch 树，拒绝额外 vendor 改动，并从 raw rows 重算 H0/A1/T1/L1 与 overhead。
