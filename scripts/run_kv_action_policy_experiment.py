@@ -65,6 +65,16 @@ def metrics(port: int) -> str:
         return response.read().decode()
 
 
+def erase_slots(port: int) -> None:
+    for slot in range(2):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/slots/{slot}?action=erase", data=b"", method="POST"
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            if response.status != 200:
+                raise AssertionError(f"failed to erase recompute control slot {slot}")
+
+
 def metric(text: str, sample: str) -> float:
     prefix = sample + " "
     line = next((row for row in text.splitlines() if row.startswith(prefix)), None)
@@ -166,6 +176,8 @@ def observe(mode: str, port: int, trace: int, prompt: str, unrelated: str) -> di
     internal_cost_ms = (cost_after - cost_before) * 1000.0
     if internal_cost_ms <= 0:
         raise AssertionError("KV action internal complete-action cost did not increase")
+    if mode == "recompute":
+        erase_slots(port)
     return {
         "observed_cost_ms": internal_cost_ms,
         "http_elapsed_ms": elapsed_ms,
