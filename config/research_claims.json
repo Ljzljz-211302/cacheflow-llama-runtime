@@ -149,9 +149,10 @@
       "observed_results": [
         "The restricted K1 CUDA kernel directly reads non-contiguous physical pages and produces FP32 attention output; independent CPU and contiguous-CUDA oracles cover Qwen2.5-0.5B 14/2/D64 and Qwen2.5-7B geometry 28/4/D128 with GQA ratio 7 and page size 16.",
         "Every timed regime first passed an independent CPU FP32 paged-attention oracle; the maximum absolute CUDA output error was 3.6e-8.",
-        "Across 9 preregistered regimes and 360 no-profiler observations, paged K1 regressed paired median CUDA-event time by 6.46% to 13.07% versus the same-math contiguous CUDA comparator; no median latency-win regime was observed.",
-        "At context 1024 and batch 1, the 0.5B shape regressed 13.07% (95% CI 12.91% to 13.32%) and the 7B kernel shape regressed 11.54% (95% CI 11.32% to 11.68%).",
-        "The long-context batch-1 versus batch-4 regression gaps were only 1.38 and 1.69 percentage points, so the preregistered split-K trigger did not fire; the at-least-3% long-context regression rule selected K2 GQA KV reuse as the next unimplemented hypothesis.",
+        "The 0.5B 16-token regime was neutral; its 17-token regime showed a noisy +22.87% median improvement with a 0.00% to 47.08% interval that did not establish a stable material win. Every medium/long regime regressed by 10.41% to 13.05%.",
+        "At context 1024 and batch 1, the 0.5B shape regressed 13.05% (95% CI 12.91% to 13.12%) and the 7B kernel shape regressed 11.59% (95% CI 11.37% to 11.78%).",
+        "The long-context batch-1 versus batch-4 regression gaps were only 0.84 and 1.18 percentage points, so the preregistered split-K trigger did not fire; the at-least-3% long-context regression rule selected K2 GQA KV reuse as the next unimplemented hypothesis.",
+        "The formal environment is an RTX 4050 Laptop GPU (compute capability 8.9) with 6141 MiB total memory; per-regime input/output/workspace accounting is retained and the maximum benchmark device allocation was 16,864,272 bytes.",
         "Four method-isolated Nsight Systems captures each contain exactly five matching launches. Nsight Compute reported driver incompatibility and ERR_NVGPUCTRPERM, so memory-bound, occupancy, and hardware-DRAM-byte explanations are prohibited."
       ],
       "scope_limits": [

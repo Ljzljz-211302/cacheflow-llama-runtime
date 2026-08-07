@@ -87,6 +87,32 @@ class PagedDecodeEvidenceTests(unittest.TestCase):
                     artifact, Path("config/paged_decode_protocol.json")
                 )
 
+    def test_validator_rejects_rehashed_device_identity_tamper(self) -> None:
+        source = Path("results/research/h3-paged-decode-v1.0.0")
+        if not source.exists():
+            self.skipTest("formal artifact is created after implementation commit")
+        with tempfile.TemporaryDirectory() as directory:
+            artifact = Path(directory) / "artifact"
+            shutil.copytree(source, artifact)
+            environment_path = artifact / "environment.json"
+            report_path = artifact / "report.json"
+            manifest_path = artifact / "manifest.json"
+            environment = json.loads(environment_path.read_text(encoding="utf-8"))
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            environment["compute_capability"] = "9.0"
+            report["device_environment"] = environment
+            manifest["environment"] = environment
+            environment_path.write_text(json.dumps(environment), encoding="utf-8")
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            manifest["artifact_hashes"]["environment.json"] = file_sha256(environment_path)
+            manifest["artifact_hashes"]["report.json"] = file_sha256(report_path)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "device environment differs"):
+                validate_paged_decode_artifact(
+                    artifact, Path("config/paged_decode_protocol.json")
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
