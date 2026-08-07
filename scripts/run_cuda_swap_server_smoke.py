@@ -11,6 +11,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def metric_value(text: str, sample: str) -> float:
+    prefix = sample + " "
+    line = next((row for row in text.splitlines() if row.startswith(prefix)), None)
+    if line is None:
+        raise AssertionError(f"missing Prometheus sample: {sample}")
+    return float(line[len(prefix):])
+
+
 def post(url: str, payload: dict[str, object]) -> dict[str, object]:
     request = urllib.request.Request(
         url,
@@ -111,6 +119,14 @@ def main() -> None:
         raise AssertionError("real CUDA KV event timings did not advance")
     if metric_values.get("llamacpp:cuda_kv_backend_errors_total", -1) != 0:
         raise AssertionError("real CUDA KV backend reported an error")
+    if metric_value(prometheus, 'llamacpp:kv_action_decisions_total{action="device_swap"}') < 1:
+        raise AssertionError("unified policy did not execute CUDA-managed swap restore")
+    if metric_value(prometheus, 'llamacpp:kv_action_observations_total{action="device_swap"}') < 1:
+        raise AssertionError("CUDA-managed swap did not reach the full action-cost observation boundary")
+    if metric_value(prometheus, 'llamacpp:kv_action_decisions_total{action="paged"}') != 0:
+        raise AssertionError("evidence-gated Paged action entered the production path")
+    if metric_value(prometheus, "llamacpp:kv_action_invalid_features_total") != 0:
+        raise AssertionError("real CUDA service produced an invalid action snapshot")
     first_prompt = first.get("timings", {}).get("prompt_n", 0)  # type: ignore[union-attr]
     restored_prompt = restored.get("timings", {}).get("prompt_n", 0)  # type: ignore[union-attr]
     if not isinstance(restored_prompt, int) or restored_prompt >= first_prompt:
@@ -120,6 +136,9 @@ def main() -> None:
         "restored_prompt_tokens": restored_prompt,
         "cuda_copy_bytes": metric_values["llamacpp:cuda_kv_copy_bytes_total"],
         "cuda_events_waited": metric_values["llamacpp:cuda_kv_events_waited_total"],
+        "kv_action_device_swap": metric_value(
+            prometheus, 'llamacpp:kv_action_decisions_total{action="device_swap"}'
+        ),
         "log": str(log_path),
     }))
 

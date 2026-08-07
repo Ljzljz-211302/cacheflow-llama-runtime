@@ -18,10 +18,10 @@ index 9e7b125..6195e3f 100644
  license_add_file("llama.cpp" "LICENSE")
  
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 8382c1d..523b5dc 100644
+index 8382c1d..127808f 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -3256,6 +3256,270 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3256,6 +3256,312 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.slot_prompt_similarity = std::stof(value);
          }
      ).set_examples({LLAMA_EXAMPLE_SERVER}));
@@ -39,6 +39,7 @@ index 8382c1d..523b5dc 100644
 +                params.kv_block_runtime = false;
 +                params.spec_policy = "fixed";
 +                params.speculative_adaptive = false;
++                params.kv_action_policy = "fixed";
 +            } else if (value == "cacheflow") {
 +                params.scheduler_policy = value;
 +                params.benefit_policy = "learned";
@@ -48,6 +49,7 @@ index 8382c1d..523b5dc 100644
 +                params.kv_block_runtime = true;
 +                params.spec_policy = "adaptive";
 +                params.speculative_adaptive = true;
++                params.kv_action_policy = "learned-shadow";
 +            } else {
 +                throw std::invalid_argument("scheduler policy must be upstream or cacheflow");
 +            }
@@ -200,6 +202,46 @@ index 8382c1d..523b5dc 100644
 +        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
++        {"--kv-action-policy"}, "fixed|analytical|learned-shadow|learned",
++        "select unified Direct/Remap/Paged/Swap/Recompute policy (default: learned-shadow)",
++        [](common_params & params, const std::string & value) {
++            if (value != "fixed" && value != "analytical" &&
++                    value != "learned-shadow" && value != "learned") {
++                throw std::invalid_argument(
++                        "KV action policy must be fixed, analytical, learned-shadow, or learned");
++            }
++            params.kv_action_policy = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--kv-action-min-observations"}, "N",
++        "completed observations required per action before learned comparison",
++        [](common_params & params, int value) {
++            if (value <= 0) throw std::invalid_argument("KV action minimum observations must be positive");
++            params.kv_action_min_observations = value;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--kv-action-confidence-beta"}, "BETA",
++        "confidence radius multiplier for learned KV action selection",
++        [](common_params & params, const std::string & value) {
++            params.kv_action_confidence_beta = std::stof(value);
++            if (params.kv_action_confidence_beta < 0.0f) {
++                throw std::invalid_argument("KV action confidence beta must be non-negative");
++            }
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--kv-action-switch-margin-ms"}, "MS",
++        "minimum pessimistic cost advantage required to leave the fixed H0 action",
++        [](common_params & params, const std::string & value) {
++            params.kv_action_switch_margin_ms = std::stof(value);
++            if (params.kv_action_switch_margin_ms < 0.0f) {
++                throw std::invalid_argument("KV action switch margin must be non-negative");
++            }
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
 +        {"--kv-swap-path"}, "memory|PATH",
 +        "enable transactional KV swap in host memory or in the specified directory",
 +        [](common_params & params, const std::string & value) {
@@ -292,7 +334,7 @@ index 8382c1d..523b5dc 100644
      add_opt(common_arg(
          {"--lora-init-without-apply"},
          string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),
-@@ -3413,6 +3677,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3413,6 +3719,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
  
      //
      // speculative parameters
@@ -347,10 +389,10 @@ index 8382c1d..523b5dc 100644
  
      add_opt(common_arg(
 diff --git a/common/common.h b/common/common.h
-index 0b284cb..618baf5 100644
+index 0b284cb..a2897c0 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -653,6 +653,36 @@ struct common_params {
+@@ -653,6 +653,40 @@ struct common_params {
      std::string media_path; // path to directory for loading media files
  
      float slot_prompt_similarity = 0.1f;
@@ -383,6 +425,10 @@ index 0b284cb..618baf5 100644
 +    std::string kv_swap_path;
 +    int32_t kv_swap_budget_mib = 0;
 +    std::string kv_swap_fault = "none";
++    std::string kv_action_policy = "learned-shadow";
++    int32_t kv_action_min_observations = 8;
++    float kv_action_confidence_beta = 1.0f;
++    float kv_action_switch_margin_ms = 0.25f;
 +    std::string engine_trace_path;
  
      // batched-bench params
@@ -1585,10 +1631,10 @@ index 0000000..7b912cb
 +const llama_paged_decode_config & llama_paged_decode_plan_config(
 +        const llama_paged_decode_plan * plan);
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index e284a58..3567ea0 100644
+index e284a58..3d152f1 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -116,6 +116,146 @@ function(llama_build_and_test source)
+@@ -116,6 +116,156 @@ function(llama_build_and_test source)
      set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})
  endfunction()
  
@@ -1608,6 +1654,7 @@ index e284a58..3567ea0 100644
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-inference-iteration.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-inference-scheduler.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-model-cost-model.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-action-policy.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-benefit-policy.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-benefit-checkpoint.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-capacity-planner.cpp
@@ -1629,6 +1676,15 @@ index e284a58..3567ea0 100644
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-model-cost-model.cpp)
 +target_include_directories(test-model-cost-model PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
 +llama_test(test-model-cost-model)
++
++llama_build(test-kv-action-policy.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-action-policy.cpp)
++target_include_directories(test-kv-action-policy PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
++llama_test(test-kv-action-policy)
++
++llama_build(bench-kv-action-policy.cpp
++    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-action-policy.cpp)
++target_include_directories(bench-kv-action-policy PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
 +
 +llama_build(test-benefit-policy.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-benefit-policy.cpp
@@ -1735,6 +1791,137 @@ index e284a58..3567ea0 100644
  # build test-tokenizer-0 target once and add many tests
  llama_build(test-tokenizer-0.cpp)
  
+diff --git a/tests/bench-kv-action-policy.cpp b/tests/bench-kv-action-policy.cpp
+new file mode 100644
+index 0000000..4befb07
+--- /dev/null
++++ b/tests/bench-kv-action-policy.cpp
+@@ -0,0 +1,125 @@
++#include "server-kv-action-policy.h"
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <new>
++#include <vector>
++
++static std::atomic<bool> track_allocations{false};
++static std::atomic<uint64_t> tracked_allocations{0};
++
++void * operator new(std::size_t size) {
++    if (track_allocations.load(std::memory_order_relaxed)) {
++        tracked_allocations.fetch_add(1, std::memory_order_relaxed);
++    }
++    if (void * value = std::malloc(size)) return value;
++    throw std::bad_alloc();
++}
++
++void operator delete(void * value) noexcept { std::free(value); }
++void operator delete(void * value, std::size_t) noexcept { std::free(value); }
++
++static server_kv_action_request request(bool ood = false) {
++    server_kv_action_request value;
++    value.phase = server_kv_action_phase::serve;
++    value.direct_legal = true;
++    value.cached_tokens = ood ? (1ULL << 30) : 1024;
++    value.expected_decode_tokens = 128;
++    value.kv_bytes = ood ? (1ULL << 50) : 32ULL * 1024 * 1024;
++    value.page_count = ood ? (1ULL << 24) : 64;
++    value.contiguous_pages = 16;
++    value.reuse_distance = ood ? UINT64_MAX : 3;
++    value.kv_pressure = 0.85;
++    value.device_bandwidth_bytes_per_ms = 100.0 * 1024 * 1024;
++    value.host_bandwidth_bytes_per_ms = 12.0 * 1024 * 1024;
++    value.launch_ms = 0.01;
++    value.prefill_ms_per_token = 0.03;
++    value.decode_ms_per_token = 0.02;
++    value.paged_decode_multiplier = 1.13;
++    return value;
++}
++
++static server_kv_action_capabilities capabilities(size_t count) {
++    server_kv_action_capabilities value;
++    value.recompute = true;
++    if (count >= 2) value.device_swap = true;
++    if (count >= 4) {
++        value.direct = true;
++        value.remap = true;
++    }
++    if (count >= 6) {
++        value.paged = true;
++        value.host_swap = true;
++    }
++    return value;
++}
++
++static uint64_t percentile(std::vector<uint64_t> values, double quantile) {
++    const size_t index = std::min(values.size() - 1,
++            (size_t) (quantile * (values.size() - 1)));
++    std::nth_element(values.begin(), values.begin() + index, values.end());
++    return values[index];
++}
++
++static void run_case(size_t candidate_count, bool hot, bool ood) {
++    server_kv_action_policy_config config;
++    config.model = server_kv_action_model::learned;
++    config.minimum_observations = 4;
++    config.confidence_beta = 1.0;
++    config.shadow = true;
++    server_kv_action_policy policy(config);
++    auto input = request(ood);
++    auto available = capabilities(candidate_count);
++
++    if (hot) {
++        for (size_t i = 0; i < 8; ++i) {
++            const auto decision = policy.choose(input, available);
++            for (size_t action = 0; action < server_kv_action_count; ++action) {
++                if (!decision.estimates[action].eligible) continue;
++                policy.observe(decision, {
++                    static_cast<server_kv_action>(action),
++                    1.0 + action * 0.5,
++                    false,
++                });
++            }
++        }
++    }
++
++    constexpr size_t iterations = 1000000;
++    std::vector<uint64_t> durations(iterations);
++    tracked_allocations = 0;
++    track_allocations = true;
++    for (size_t i = 0; i < iterations; ++i) {
++        const auto started = std::chrono::steady_clock::now();
++        const auto decision = policy.choose(input, available);
++        const auto finished = std::chrono::steady_clock::now();
++        durations[i] = (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
++                finished - started).count();
++        if (decision.id == 0) std::abort();
++    }
++    track_allocations = false;
++    const auto allocations = tracked_allocations.load();
++    const auto maximum = *std::max_element(durations.begin(), durations.end());
++    std::printf(
++            "{\"candidates\":%zu,\"state\":\"%s\",\"ood\":%s,"
++            "\"iterations\":%zu,\"p50_ns\":%llu,\"p95_ns\":%llu,"
++            "\"p99_ns\":%llu,\"max_ns\":%llu,\"allocations\":%llu}\n",
++            candidate_count, hot ? "hot" : "cold", ood ? "true" : "false", iterations,
++            (unsigned long long) percentile(durations, 0.50),
++            (unsigned long long) percentile(durations, 0.95),
++            (unsigned long long) percentile(durations, 0.99),
++            (unsigned long long) maximum,
++            (unsigned long long) allocations);
++}
++
++int main() {
++    run_case(1, false, false);
++    run_case(2, false, false);
++    run_case(4, true, false);
++    run_case(6, true, false);
++    run_case(6, true, true);
++    return 0;
++}
 diff --git a/tests/bench-kv-block-cuda.cu b/tests/bench-kv-block-cuda.cu
 new file mode 100644
 index 0000000..f2f4e62
@@ -2832,10 +3019,10 @@ index 0000000..3d9c648
 +}
 diff --git a/tests/test-inference-engine.cpp b/tests/test-inference-engine.cpp
 new file mode 100644
-index 0000000..9ba8b55
+index 0000000..b611e77
 --- /dev/null
 +++ b/tests/test-inference-engine.cpp
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,98 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -2857,6 +3044,10 @@ index 0000000..9ba8b55
 +    benefit_config.mode = server_benefit_mode::always_cacheflow;
 +    engine.benefit_policy().configure(benefit_config);
 +    assert(engine.benefit_policy().choose({}).action == server_benefit_action::cacheflow);
++    server_kv_action_capabilities action_capabilities;
++    action_capabilities.recompute = true;
++    const auto action = engine.kv_action_policy().choose({}, action_capabilities);
++    assert(action.action == server_kv_action::recompute);
 +    engine.set_kv_runtime(std::make_unique<server_kv_runtime>(16, 64));
 +    engine.set_swap_store(server_kv_create_host_swap_store(1 << 20));
 +    engine.set_runtime(std::make_unique<server_deterministic_runtime>(
@@ -2885,6 +3076,7 @@ index 0000000..9ba8b55
 +    assert(snapshot.iteration_plan.prefill_tokens == 7);
 +    assert(snapshot.block_runtime_enabled && snapshot.swap_store_enabled);
 +    assert(snapshot.cpu_benefit.cacheflow_decisions == 1);
++    assert(snapshot.kv_action_policy.decisions == 1);
 +
 +    bool prepared = false;
 +    bool executed = false;
@@ -3105,6 +3297,173 @@ index 0000000..dd36bec
 +    test_shadow_upstream_plan_is_pure_and_matches_greedy();
 +    test_adaptive_chunk_responds_to_real_iteration_feedback();
 +    test_adaptive_cpu_safety_fallback_selects_greedy_action();
++    return 0;
++}
+diff --git a/tests/test-kv-action-policy.cpp b/tests/test-kv-action-policy.cpp
+new file mode 100644
+index 0000000..f318466
+--- /dev/null
++++ b/tests/test-kv-action-policy.cpp
+@@ -0,0 +1,161 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
++#include "server-kv-action-policy.h"
++
++#include <cassert>
++#include <cmath>
++#include <limits>
++
++static server_kv_action_request baseline_request() {
++    server_kv_action_request request;
++    request.phase = server_kv_action_phase::serve;
++    request.cached_tokens = 1024;
++    request.expected_decode_tokens = 128;
++    request.kv_bytes = 32ULL * 1024 * 1024;
++    request.page_count = 64;
++    request.contiguous_pages = 16;
++    request.reuse_distance = 2;
++    request.kv_pressure = 0.75;
++    request.device_bandwidth_bytes_per_ms = 100ULL * 1024 * 1024;
++    request.host_bandwidth_bytes_per_ms = 12ULL * 1024 * 1024;
++    request.launch_ms = 0.01;
++    request.prefill_ms_per_token = 0.03;
++    request.decode_ms_per_token = 0.02;
++    return request;
++}
++
++int main() {
++    server_kv_action_policy_config analytical_config;
++    analytical_config.model = server_kv_action_model::analytical;
++    server_kv_action_policy policy(analytical_config);
++    auto request = baseline_request();
++
++    // A prototype kernel is not a production capability.  It must remain
++    // ineligible even when its analytical estimate would otherwise win.
++    server_kv_action_capabilities capabilities;
++    capabilities.direct = true;
++    capabilities.remap = true;
++    capabilities.paged = false;
++    capabilities.device_swap = true;
++    capabilities.host_swap = true;
++    capabilities.recompute = true;
++    request.direct_legal = false;
++    request.paged_decode_multiplier = 0.01;
++    const auto guarded = policy.choose(request, capabilities);
++    assert(guarded.action != server_kv_action::paged);
++    assert(guarded.estimate(server_kv_action::paged).reason ==
++            server_kv_action_rejection::capability_unavailable);
++
++    // Recompute is the deterministic safety fallback when no optimized
++    // action is both available and legal.
++    capabilities = {};
++    capabilities.recompute = true;
++    request.direct_legal = false;
++    const auto fallback = policy.choose(request, capabilities);
++    assert(fallback.action == server_kv_action::recompute);
++    assert(fallback.fallback == server_kv_action::recompute);
++    assert(fallback.safe_fallback_used);
++
++    // Non-finite observations never enter a cost comparison.
++    capabilities.direct = true;
++    request.direct_legal = true;
++    request.kv_pressure = std::numeric_limits<double>::quiet_NaN();
++    const auto invalid = policy.choose(request, capabilities);
++    assert(invalid.action == server_kv_action::recompute);
++    assert(invalid.reason == server_kv_action_reason::invalid_features);
++
++    // Worked analytical examples use literal expectations independent of the
++    // policy implementation: 32 MiB / 12 MiB/ms ~= 2.67 ms is cheaper than
++    // recomputing 1024 * 0.03 = 30.72 ms.
++    request = baseline_request();
++    request.direct_legal = false;
++    capabilities = {};
++    capabilities.device_swap = true;
++    capabilities.recompute = true;
++    const auto long_cache = policy.choose(request, capabilities);
++    assert(long_cache.action == server_kv_action::device_swap);
++    assert(std::abs(long_cache.estimate(server_kv_action::device_swap).cost_ms -
++            (32.0 / 12.0 + 0.02 + 128.0 * 0.02)) < 1e-9);
++
++    // Eight cached tokens cost 0.24 ms to recompute, so retaining the same
++    // 32 MiB payload would be a measurable wrong enable.
++    request.cached_tokens = 8;
++    const auto short_cache = policy.choose(request, capabilities);
++    assert(short_cache.action == server_kv_action::recompute);
++    assert(!short_cache.safe_fallback_used);
++    assert(short_cache.baseline_action == server_kv_action::device_swap);
++
++    request = baseline_request();
++    request.direct_legal = true;
++    capabilities.direct = true;
++    const auto resident = policy.choose(request, capabilities);
++    assert(resident.action == server_kv_action::direct);
++
++    server_kv_action_policy fixed({server_kv_action_model::fixed_rule});
++    request.direct_legal = false;
++    capabilities.host_swap = true;
++    const auto heuristic = fixed.choose(request, capabilities);
++    assert(heuristic.action == server_kv_action::device_swap);
++    assert(heuristic.reason == server_kv_action_reason::fixed_rule);
++
++    request.phase = server_kv_action_phase::preempt;
++    capabilities.remap = true;
++    capabilities.paged = true;
++    const auto preempt = policy.choose(request, capabilities);
++    assert(preempt.estimate(server_kv_action::direct).reason ==
++            server_kv_action_rejection::illegal_for_phase);
++    assert(preempt.estimate(server_kv_action::remap).reason ==
++            server_kv_action_rejection::illegal_for_phase);
++    assert(preempt.estimate(server_kv_action::paged).reason ==
++            server_kv_action_rejection::illegal_for_phase);
++
++    const auto snapshot = policy.snapshot();
++    assert(snapshot.decisions == 7);
++    assert(snapshot.action_decisions[static_cast<size_t>(server_kv_action::recompute)] == 3);
++    assert(snapshot.safe_fallbacks == 2);
++    assert(snapshot.invalid_feature_fallbacks == 1);
++    assert(snapshot.total_decision_nanoseconds >= snapshot.maximum_decision_nanoseconds);
++
++    server_kv_action_policy_config learned_config;
++    learned_config.model = server_kv_action_model::learned;
++    learned_config.minimum_observations = 3;
++    learned_config.ridge_lambda = 0.01;
++    learned_config.confidence_beta = 0.0;
++    learned_config.switch_margin_ms = 0.1;
++    learned_config.shadow = false;
++    server_kv_action_policy learned(learned_config);
++    request = baseline_request();
++    request.direct_legal = false;
++    capabilities = {};
++    capabilities.device_swap = true;
++    capabilities.recompute = true;
++    auto cold = learned.choose(request, capabilities);
++    assert(cold.action == server_kv_action::device_swap);
++    assert(cold.reason == server_kv_action_reason::cold_start);
++    for (size_t i = 0; i < 8; ++i) {
++        const auto training = learned.choose(request, capabilities);
++        learned.observe(training, {server_kv_action::device_swap, 8.0, false});
++        learned.observe(training, {server_kv_action::recompute, 2.0, false});
++    }
++    const auto active_learned = learned.choose(request, capabilities);
++    assert(active_learned.baseline_action == server_kv_action::device_swap);
++    assert(active_learned.recommended_action == server_kv_action::recompute);
++    assert(active_learned.action == server_kv_action::recompute);
++    assert(active_learned.reason == server_kv_action_reason::positive_lower_bound);
++
++    learned_config.shadow = true;
++    server_kv_action_policy shadow(learned_config);
++    for (size_t i = 0; i < 8; ++i) {
++        const auto training = shadow.choose(request, capabilities);
++        shadow.observe(training, {server_kv_action::device_swap, 8.0, false});
++        shadow.observe(training, {server_kv_action::recompute, 2.0, false});
++    }
++    const auto shadowed = shadow.choose(request, capabilities);
++    assert(shadowed.recommended_action == server_kv_action::recompute);
++    assert(shadowed.action == server_kv_action::device_swap);
++    assert(shadowed.reason == server_kv_action_reason::shadow_baseline);
++    assert(shadow.snapshot().shadow_decisions >= 1);
 +    return 0;
 +}
 diff --git a/tests/test-kv-block-backend.cpp b/tests/test-kv-block-backend.cpp
@@ -4575,10 +4934,10 @@ index 0000000..297ccfe
 +    return 0;
 +}
 diff --git a/tools/server/CMakeLists.txt b/tools/server/CMakeLists.txt
-index 7d42743..b0c1d87 100644
+index 7d42743..7d4ccd8 100644
 --- a/tools/server/CMakeLists.txt
 +++ b/tools/server/CMakeLists.txt
-@@ -11,6 +11,32 @@ add_library(${TARGET} STATIC
+@@ -11,6 +11,34 @@ add_library(${TARGET} STATIC
      server-task.h
      server-queue.cpp
      server-queue.h
@@ -4604,6 +4963,8 @@ index 7d42743..b0c1d87 100644
 +    server-runtime-adapter.h
 +    server-model-cost-model.cpp
 +    server-model-cost-model.h
++    server-kv-action-policy.cpp
++    server-kv-action-policy.h
 +    server-benefit-policy.cpp
 +    server-benefit-policy.h
 +    server-benefit-checkpoint.cpp
@@ -4611,7 +4972,7 @@ index 7d42743..b0c1d87 100644
      server-common.cpp
      server-common.h
      server-context.cpp
-@@ -27,6 +53,12 @@ target_include_directories(${TARGET} PRIVATE ../mtmd)
+@@ -27,6 +55,12 @@ target_include_directories(${TARGET} PRIVATE ../mtmd)
  target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR})
  target_link_libraries(${TARGET} PUBLIC llama-common mtmd ${CMAKE_THREAD_LIBS_INIT})
  
@@ -5698,7 +6059,7 @@ index 0000000..9e4bc3b
 +    checkpoint_restore_result restore_checkpoint(const std::string & payload);
 +};
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..0ec1d2b 100644
+index 986b2f1..e843530 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -4,6 +4,14 @@
@@ -5741,7 +6102,7 @@ index 986b2f1..0ec1d2b 100644
  enum server_state {
      SERVER_STATE_LOADING_MODEL,  // Server is starting up, model not fully loaded yet
      SERVER_STATE_READY,          // Server is ready and model is loaded
-@@ -126,9 +125,12 @@ struct server_slot {
+@@ -126,9 +125,16 @@ struct server_slot {
      std::string stopping_word;
  
      // state
@@ -5752,10 +6113,14 @@ index 986b2f1..0ec1d2b 100644
 +    llama_tokens cuda_swapped_tokens;
 +    llama_tokens store_swapped_tokens;
 +    server_kv_swap_handle store_swap_handle = 0;
++    size_t kv_action_bytes = 0;
++    server_kv_action_decision pending_kv_action;
++    int64_t pending_kv_action_started_us = 0;
++    bool has_pending_kv_action = false;
  
      bool prompt_save(server_prompt_cache & prompt_cache) const {
          if (prompt.tokens.size() == 0) {
-@@ -325,7 +327,7 @@ struct server_slot {
+@@ -325,7 +331,7 @@ struct server_slot {
      }
  
      bool is_processing() const {
@@ -5764,7 +6129,7 @@ index 986b2f1..0ec1d2b 100644
      }
  
      bool can_speculate() const {
-@@ -403,8 +405,6 @@ struct server_slot {
+@@ -403,8 +409,6 @@ struct server_slot {
              t_last_used        =  ggml_time_us();
              t_token_generation = (ggml_time_us() - t_start_generation) / 1e3;
  
@@ -5773,7 +6138,7 @@ index 986b2f1..0ec1d2b 100644
              // do not keep context of the child slots - the parent's context is enough
              if (task->is_child()) {
                  prompt_clear(false);
-@@ -570,7 +570,7 @@ struct server_slot {
+@@ -570,7 +574,7 @@ struct server_slot {
      }
  
      void copy_state_to(server_slot & other) const {
@@ -5782,7 +6147,7 @@ index 986b2f1..0ec1d2b 100644
  
          common_context_seq_rm(ctx_tgt, other.id,     -1, -1);
          common_context_seq_cp(ctx_tgt, id, other.id, -1, -1);
-@@ -685,6 +685,7 @@ struct server_metrics {
+@@ -685,6 +689,7 @@ struct server_metrics {
      int64_t t_start = 0;
  
      uint64_t n_prompt_tokens_processed_total = 0;
@@ -5790,7 +6155,7 @@ index 986b2f1..0ec1d2b 100644
      uint64_t t_prompt_processing_total       = 0;
      uint64_t n_tokens_predicted_total        = 0;
      uint64_t t_tokens_generation_total       = 0;
-@@ -692,6 +693,7 @@ struct server_metrics {
+@@ -692,6 +697,7 @@ struct server_metrics {
      uint64_t n_tokens_max = 0;
  
      uint64_t n_prompt_tokens_processed = 0;
@@ -5798,7 +6163,7 @@ index 986b2f1..0ec1d2b 100644
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -700,6 +702,33 @@ struct server_metrics {
+@@ -700,6 +706,33 @@ struct server_metrics {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -5832,7 +6197,7 @@ index 986b2f1..0ec1d2b 100644
      void init() {
          t_start = ggml_time_us();
      }
-@@ -707,6 +736,8 @@ struct server_metrics {
+@@ -707,6 +740,8 @@ struct server_metrics {
      void on_prompt_eval(const server_slot & slot) {
          n_prompt_tokens_processed_total += slot.n_prompt_tokens_processed;
          n_prompt_tokens_processed       += slot.n_prompt_tokens_processed;
@@ -5841,7 +6206,7 @@ index 986b2f1..0ec1d2b 100644
          t_prompt_processing             += slot.t_prompt_processing;
          t_prompt_processing_total       += slot.t_prompt_processing;
  
-@@ -730,8 +761,63 @@ struct server_metrics {
+@@ -730,8 +765,63 @@ struct server_metrics {
          }
      }
  
@@ -5905,7 +6270,7 @@ index 986b2f1..0ec1d2b 100644
          t_prompt_processing       = 0;
          n_tokens_predicted        = 0;
          t_tokens_generation       = 0;
-@@ -816,8 +902,7 @@ private:
+@@ -816,8 +906,7 @@ private:
      json json_ui_settings = json::object();    // Primary: new name
      json json_webui_settings = json::object();    // Deprecated: use json_ui_settings instead (kept for compat)
  
@@ -5915,7 +6280,7 @@ index 986b2f1..0ec1d2b 100644
  
      std::string model_name; // name of the loaded model, to be used by API
      std::set<std::string> model_aliases; // additional names for the model
-@@ -864,6 +949,10 @@ private:
+@@ -864,6 +953,10 @@ private:
  
          params_base = params;
          params_base.n_outputs_max = server_n_outputs_max(params_base);
@@ -5926,7 +6291,7 @@ index 986b2f1..0ec1d2b 100644
  
          std::string & mmproj_path = params_base.mmproj.path;
          bool has_mmproj = !mmproj_path.empty();
-@@ -1114,8 +1203,106 @@ private:
+@@ -1114,8 +1207,123 @@ private:
  
          n_swa = params_base.swa_full ? 0 : llama_model_n_swa(model_tgt);
  
@@ -5981,9 +6346,26 @@ index 986b2f1..0ec1d2b 100644
 +            }
 +        }
 +        inference_engine.benefit_policy().configure(benefit_config);
-+        SRV_INF("CacheFlow policies: scheduler=%s, prefill=%s, benefit=%s, speculation=%s, kv_blocks=%s\n",
++        server_kv_action_policy_config kv_action_config;
++        if (params_base.kv_action_policy == "fixed") {
++            kv_action_config.model = server_kv_action_model::fixed_rule;
++            kv_action_config.shadow = false;
++        } else if (params_base.kv_action_policy == "analytical") {
++            kv_action_config.model = server_kv_action_model::analytical;
++            kv_action_config.shadow = false;
++        } else {
++            kv_action_config.model = server_kv_action_model::learned;
++            kv_action_config.shadow = params_base.kv_action_policy == "learned-shadow";
++        }
++        kv_action_config.minimum_observations =
++                (size_t) params_base.kv_action_min_observations;
++        kv_action_config.confidence_beta = params_base.kv_action_confidence_beta;
++        kv_action_config.switch_margin_ms = params_base.kv_action_switch_margin_ms;
++        inference_engine.kv_action_policy().configure(kv_action_config);
++        SRV_INF("CacheFlow policies: scheduler=%s, prefill=%s, benefit=%s, kv_action=%s, speculation=%s, kv_blocks=%s\n",
 +                params_base.scheduler_policy.c_str(), params_base.prefill_policy.c_str(),
 +                params_base.benefit_policy.c_str(),
++                params_base.kv_action_policy.c_str(),
 +                params_base.spec_policy.c_str(), params_base.kv_block_runtime ? "enabled" : "disabled");
 +        inference_engine.speculation().configure({
 +            params_base.speculative_adaptive,
@@ -6035,7 +6417,7 @@ index 986b2f1..0ec1d2b 100644
  
          // setup slots
          SRV_INF("initializing slots, n_slots = %d\n", params_base.n_parallel);
-@@ -1178,6 +1365,9 @@ private:
+@@ -1178,6 +1386,9 @@ private:
              SLT_INF(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
  
              slot.callback_on_release = [this](int id_slot) {
@@ -6045,7 +6427,7 @@ index 986b2f1..0ec1d2b 100644
                  queue_tasks.pop_deferred_task(id_slot);
              };
  
-@@ -1383,9 +1573,10 @@ private:
+@@ -1383,9 +1594,10 @@ private:
  
          bool update_cache = false;
  
@@ -6059,7 +6441,7 @@ index 986b2f1..0ec1d2b 100644
  
              for (server_slot & slot : slots) {
                  // skip the slot if it is not available
-@@ -1393,29 +1584,41 @@ private:
+@@ -1393,29 +1605,41 @@ private:
                      continue;
                  }
  
@@ -6121,7 +6503,7 @@ index 986b2f1..0ec1d2b 100644
  
                  // if we are about to lose a large portion of the existing context - save it in the prompt cache
                  if (f_keep < 0.5f) {
-@@ -1443,12 +1646,16 @@ private:
+@@ -1443,12 +1667,97 @@ private:
  
              if (ret != nullptr) {
                  SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
@@ -6132,13 +6514,94 @@ index 986b2f1..0ec1d2b 100644
          }
  
          if (ret) {
-+            const bool store_restored = try_restore_store_swap(*ret, task.tokens);
-+            const bool cuda_restored = !store_restored && try_restore_cuda_swap(*ret, task.tokens);
++            const auto prefix_matches = [&task](const llama_tokens & cached) {
++                if (cached.empty() || task.tokens.size() < cached.size()) return false;
++                for (size_t i = 0; i < cached.size(); ++i) {
++                    if (cached[i] != task.tokens[i]) return false;
++                }
++                return true;
++            };
++            const size_t resident_prefix = ret->prompt.tokens.get_common_prefix(task.tokens);
++            const size_t cached_tokens = std::max({
++                resident_prefix,
++                ret->cuda_swapped_tokens.size(),
++                ret->store_swapped_tokens.size(),
++            });
++            size_t kv_bytes = ret->kv_action_bytes;
++            if (kv_bytes == 0 && resident_prefix > 0) {
++                kv_bytes = llama_state_seq_get_size_ext(
++                        ctx_tgt, ret->id, LLAMA_STATE_SEQ_FLAGS_NONE);
++            }
++            const size_t block_size = (size_t) std::max(1, params_base.kv_block_size);
++            const size_t pages = (cached_tokens + block_size - 1) / block_size;
++            double kv_pressure = 0.0;
++            if (const auto * runtime = inference_engine.kv_runtime()) {
++                const auto blocks = runtime->snapshot().blocks;
++                if (blocks.capacity_blocks > 0) {
++                    kv_pressure = (double) (blocks.allocated_blocks + blocks.reserved_blocks) /
++                            blocks.capacity_blocks;
++                }
++            }
++            const auto measured_cost = inference_engine.scheduler().state().cost;
++            server_kv_action_request action_request;
++            action_request.phase = server_kv_action_phase::serve;
++            action_request.direct_legal = resident_prefix > 0 &&
++                    ret->cuda_swapped_tokens.empty() && ret->store_swapped_tokens.empty();
++            action_request.cached_tokens = cached_tokens;
++            action_request.expected_decode_tokens = task.params.n_predict > 0
++                    ? (size_t) task.params.n_predict : 128;
++            action_request.kv_bytes = kv_bytes;
++            action_request.page_count = pages;
++            action_request.contiguous_pages = action_request.direct_legal ? pages : 0;
++            action_request.reuse_distance = ret->t_last_used < 0 ? 0 :
++                    (uint64_t) std::max<int64_t>(0, ggml_time_us() - ret->t_last_used);
++            action_request.kv_pressure = kv_pressure;
++            action_request.device_bandwidth_bytes_per_ms = 100.0 * 1024 * 1024;
++            action_request.host_bandwidth_bytes_per_ms = 12.0 * 1024 * 1024;
++            action_request.launch_ms = 0.01;
++            action_request.prefill_ms_per_token = measured_cost.prefill_ms_per_token > 0.0
++                    ? measured_cost.prefill_ms_per_token : 0.03;
++            action_request.decode_ms_per_token = measured_cost.decode_ms_per_token > 0.0
++                    ? measured_cost.decode_ms_per_token : 0.02;
++
++            server_kv_action_capabilities action_capabilities;
++            action_capabilities.direct = action_request.direct_legal;
++            // The operator prototypes are not yet wired to llama_decode.
++            action_capabilities.remap = false;
++            action_capabilities.paged = false;
++            action_capabilities.device_swap = prefix_matches(ret->cuda_swapped_tokens);
++            action_capabilities.host_swap = ret->store_swap_handle != 0 &&
++                    prefix_matches(ret->store_swapped_tokens);
++            action_capabilities.recompute = true;
++            const int64_t action_started_us = ggml_time_us();
++            auto action_decision = inference_engine.kv_action_policy().choose(
++                    action_request, action_capabilities);
++            const bool store_restored = action_decision.action == server_kv_action::host_swap &&
++                    try_restore_store_swap(*ret, task.tokens);
++            const bool cuda_restored = action_decision.action == server_kv_action::device_swap &&
++                    try_restore_cuda_swap(*ret, task.tokens);
++            const bool restore_failed =
++                    (action_decision.action == server_kv_action::host_swap && !store_restored) ||
++                    (action_decision.action == server_kv_action::device_swap && !cuda_restored);
++            if (restore_failed) {
++                inference_engine.kv_action_policy().observe(action_decision, {
++                    action_decision.action,
++                    (ggml_time_us() - action_started_us) / 1000.0,
++                    true,
++                });
++                server_kv_action_capabilities recompute_only;
++                recompute_only.recompute = true;
++                action_decision = inference_engine.kv_action_policy().choose(
++                        action_request, recompute_only);
++            }
++            ret->pending_kv_action = action_decision;
++            ret->pending_kv_action_started_us = action_started_us;
++            ret->has_pending_kv_action = true;
 +            if (store_restored || cuda_restored) update_cache = false;
              update_cache = update_cache && prompt_cache;
  
              // cache prompts only for completion tasks
-@@ -1469,41 +1676,114 @@ private:
+@@ -1469,41 +1778,114 @@ private:
  
                  SRV_INF("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
              }
@@ -6274,7 +6737,7 @@ index 986b2f1..0ec1d2b 100644
      }
  
      std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
-@@ -1519,7 +1799,234 @@ private:
+@@ -1519,7 +1901,244 @@ private:
          return output;
      }
  
@@ -6370,6 +6833,7 @@ index 986b2f1..0ec1d2b 100644
 +        const auto previous = slot.store_swap_handle;
 +        slot.store_swap_handle = saved.handle;
 +        slot.store_swapped_tokens = slot.prompt.tokens.get_tokens();
++        slot.kv_action_bytes = state_size;
 +        common_context_seq_rm(ctx_tgt, slot.id, -1, -1);
 +        if (previous != 0) kv_swap_store->erase(previous);
 +        SRV_INF("stored KV state for slot %d with %zu tokens and %zu bytes\n",
@@ -6398,6 +6862,7 @@ index 986b2f1..0ec1d2b 100644
 +            kv_swap_store->erase(slot.store_swap_handle);
 +            slot.store_swap_handle = 0;
 +            slot.store_swapped_tokens.clear();
++            slot.kv_action_bytes = 0;
 +            metrics.n_requests_recomputed_total++;
 +            return false;
 +        }
@@ -6410,6 +6875,7 @@ index 986b2f1..0ec1d2b 100644
 +            kv_swap_store->erase(slot.store_swap_handle);
 +            slot.store_swap_handle = 0;
 +            slot.store_swapped_tokens.clear();
++            slot.kv_action_bytes = 0;
 +            metrics.n_requests_recomputed_total++;
 +            return false;
 +        }
@@ -6423,6 +6889,7 @@ index 986b2f1..0ec1d2b 100644
 +        kv_swap_store->erase(slot.store_swap_handle);
 +        slot.store_swap_handle = 0;
 +        slot.store_swapped_tokens.clear();
++        slot.kv_action_bytes = 0;
 +        metrics.n_requests_restored_total++;
 +        if (kv_runtime && kv_runtime->is_swapped(slot.id)) {
 +            std::string logical_error;
@@ -6441,9 +6908,12 @@ index 986b2f1..0ec1d2b 100644
 +        bool physically_swapped = try_swap_out_store(slot);
 +        auto * memory = llama_get_memory(ctx_tgt);
 +        if (!physically_swapped && !ctx_dft && llama_memory_seq_can_swap_cuda(memory, slot.id)) {
++            slot.kv_action_bytes = llama_state_seq_get_size_ext(
++                    ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_NONE);
 +            llama_synchronize(ctx_tgt);
 +            physically_swapped = llama_memory_seq_swap_out_cuda(memory, slot.id);
 +            if (physically_swapped) slot.cuda_swapped_tokens = slot.prompt.tokens.get_tokens();
++            else slot.kv_action_bytes = 0;
 +        }
 +        metrics.n_requests_preempted_total++;
 +        metrics.n_requests_swapped_total += physically_swapped ? 1 : 0;
@@ -6480,6 +6950,7 @@ index 986b2f1..0ec1d2b 100644
 +            common_context_seq_rm(ctx_tgt, slot.id, slot.prompt.tokens.pos_next(), -1);
 +        }
 +        slot.cuda_swapped_tokens.clear();
++        slot.kv_action_bytes = 0;
 +        metrics.n_requests_restored_total++;
 +        if (kv_runtime && kv_runtime->is_swapped(slot.id)) {
 +            std::string error;
@@ -6498,18 +6969,20 @@ index 986b2f1..0ec1d2b 100644
 +            if (kv_swap_store) kv_swap_store->erase(slot.store_swap_handle);
 +            slot.store_swap_handle = 0;
 +            slot.store_swapped_tokens.clear();
++            slot.kv_action_bytes = 0;
 +            metrics.n_requests_recomputed_total++;
 +        }
 +        if (!slot.cuda_swapped_tokens.empty()) {
 +            llama_memory_seq_swap_erase_cuda(llama_get_memory(ctx_tgt), slot.id);
 +            slot.cuda_swapped_tokens.clear();
++            slot.kv_action_bytes = 0;
 +            metrics.n_requests_recomputed_total++;
 +        }
 +        inference_engine.speculation().reset(slot.id);
          // process per-request lora adapters
          if (!task.params.lora.empty()) {
              auto task_loras = construct_lora_list(task.params.lora);
-@@ -1590,6 +2097,8 @@ private:
+@@ -1590,6 +2209,8 @@ private:
              return false;
          }
  
@@ -6518,7 +6991,7 @@ index 986b2f1..0ec1d2b 100644
          SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
  
          // initialize samplers
-@@ -1629,9 +2138,10 @@ private:
+@@ -1629,9 +2250,10 @@ private:
  
          slot.task = std::make_unique<const server_task>(std::move(task));
  
@@ -6530,7 +7003,7 @@ index 986b2f1..0ec1d2b 100644
  
          // reset server kill-switch counter
          n_empty_consecutive = 0;
-@@ -1966,6 +2476,7 @@ private:
+@@ -1966,6 +2588,7 @@ private:
  
          res->generation_params = slot.task->params; // copy the parameters
  
@@ -6538,7 +7011,7 @@ index 986b2f1..0ec1d2b 100644
          queue_results.send(std::move(res));
      }
  
-@@ -2214,12 +2725,14 @@ private:
+@@ -2214,12 +2837,14 @@ private:
                              if (!slot.is_processing()) {
                                  SLT_INF(slot, "%s", "saving idle slot to prompt cache\n");
  
@@ -6555,7 +7028,7 @@ index 986b2f1..0ec1d2b 100644
                                      // [TAG_IDLE_SLOT_CLEAR]
                                      slot.prompt_clear(false);
                                  }
-@@ -2301,6 +2814,7 @@ private:
+@@ -2301,6 +2926,7 @@ private:
                      res->t_start             = metrics.t_start;
  
                      res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
@@ -6563,7 +7036,7 @@ index 986b2f1..0ec1d2b 100644
                      res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
                      res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
                      res->t_tokens_generation_total       = metrics.t_tokens_generation_total;
-@@ -2308,12 +2822,99 @@ private:
+@@ -2308,12 +2934,100 @@ private:
                      res->n_tokens_max = metrics.n_tokens_max;
  
                      res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
@@ -6608,6 +7081,7 @@ index 986b2f1..0ec1d2b 100644
 +                    res->benefit_cpu = engine_snapshot.cpu_benefit;
 +                    res->benefit_cuda = engine_snapshot.cuda_benefit;
 +                    res->benefit_persistence = engine_snapshot.benefit_persistence;
++                    res->kv_action_policy = engine_snapshot.kv_action_policy;
 +                    res->time_to_first_token = metrics.time_to_first_token;
 +                    res->time_per_output_token = metrics.time_per_output_token;
 +                    res->request_latency = metrics.request_latency;
@@ -6663,7 +7137,7 @@ index 986b2f1..0ec1d2b 100644
  
                      if (task.metrics_reset_bucket) {
                          metrics.reset_bucket();
-@@ -2479,7 +3080,7 @@ private:
+@@ -2479,7 +3193,7 @@ private:
          }
      }
  
@@ -6672,7 +7146,7 @@ index 986b2f1..0ec1d2b 100644
          // check if all slots are idle
          {
              bool all_idle = true;
-@@ -2494,7 +3095,7 @@ private:
+@@ -2494,7 +3208,7 @@ private:
              if (all_idle) {
                  SRV_INF("%s", "all slots are idle\n");
  
@@ -6681,7 +7155,7 @@ index 986b2f1..0ec1d2b 100644
              }
          }
  
-@@ -2509,7 +3110,7 @@ private:
+@@ -2509,7 +3223,7 @@ private:
          // apply context-shift if needed
          // TODO: simplify and improve
          for (server_slot & slot : slots) {
@@ -6690,7 +7164,7 @@ index 986b2f1..0ec1d2b 100644
                  if (!params_base.ctx_shift) {
                      // this check is redundant (for good)
                      // we should never get here, because generation should already stopped in process_token()
-@@ -2572,6 +3173,10 @@ private:
+@@ -2572,6 +3286,10 @@ private:
              }
          }
  
@@ -6701,7 +7175,7 @@ index 986b2f1..0ec1d2b 100644
          // start populating the batch for this iteration
          common_batch_clear(batch);
  
-@@ -2583,7 +3188,7 @@ private:
+@@ -2583,7 +3301,7 @@ private:
  
          // determine which slots are generating and drafting
          for (auto & slot : slots) {
@@ -6710,7 +7184,7 @@ index 986b2f1..0ec1d2b 100644
                  continue;
              }
  
-@@ -2602,7 +3207,9 @@ private:
+@@ -2602,7 +3320,9 @@ private:
                  const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                  const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
  
@@ -6721,7 +7195,7 @@ index 986b2f1..0ec1d2b 100644
  
                  if (n_draft_max > 0) {
                      GGML_ASSERT(slot.can_speculate());
-@@ -2643,7 +3250,12 @@ private:
+@@ -2643,7 +3363,12 @@ private:
  
          // generate the actual drafts (if any)
          {
@@ -6734,7 +7208,7 @@ index 986b2f1..0ec1d2b 100644
          }
  
          // make checkpoints if needed
-@@ -2705,6 +3317,91 @@ private:
+@@ -2705,6 +3430,91 @@ private:
          int32_t n_batch  = llama_n_batch(ctx_tgt);
          int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
  
@@ -6826,7 +7300,7 @@ index 986b2f1..0ec1d2b 100644
          float  alora_scale       = -1.0f;
          size_t alora_disabled_id = 0;
  
-@@ -2721,24 +3418,33 @@ private:
+@@ -2721,24 +3531,33 @@ private:
                  }
  
                  // check if this is a child slot
@@ -6864,7 +7338,7 @@ index 986b2f1..0ec1d2b 100644
  
                          SLT_TRC(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
                                  slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
-@@ -3110,7 +3816,9 @@ private:
+@@ -3110,7 +3929,9 @@ private:
                      const bool n_before_user_known = n_before_user > 0;
  
                      // add prompt tokens for processing in the current batch
@@ -6875,7 +7349,7 @@ index 986b2f1..0ec1d2b 100644
                          // get next token to process
                          llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                          if (cur_tok == LLAMA_TOKEN_NULL) {
-@@ -3173,7 +3881,8 @@ private:
+@@ -3173,7 +3994,8 @@ private:
  
                      // entire prompt has been processed
                      if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
@@ -6885,7 +7359,7 @@ index 986b2f1..0ec1d2b 100644
  
                          GGML_ASSERT(batch.n_tokens > 0);
  
-@@ -3249,6 +3958,13 @@ private:
+@@ -3249,6 +4071,13 @@ private:
  
          SRV_DBG("decoding batch, n_tokens = %d\n", batch.n_tokens);
  
@@ -6899,7 +7373,7 @@ index 986b2f1..0ec1d2b 100644
          auto accept_special_token = [&](server_slot & slot, llama_token token) {
              return params_base.special ||
                  slot.task->params.sampling.preserved_tokens.find(token) != slot.task->params.sampling.preserved_tokens.end();
-@@ -3294,7 +4010,8 @@ private:
+@@ -3294,7 +4123,8 @@ private:
                  batch.logits   + i,
              };
  
@@ -6909,7 +7383,7 @@ index 986b2f1..0ec1d2b 100644
  
              metrics.on_decoded(slots);
  
-@@ -3320,6 +4037,7 @@ private:
+@@ -3320,6 +4150,7 @@ private:
                      // TODO: handle ret == 2 (abort) when we start aborting
  
                      if (!err.empty()) {
@@ -6917,7 +7391,7 @@ index 986b2f1..0ec1d2b 100644
                          SRV_ERR("%s i = %d, n_batch = %d, ret = %d\n", err.c_str(), i, n_batch, ret);
  
                          for (auto & slot : slots) {
-@@ -3394,6 +4112,7 @@ private:
+@@ -3394,6 +4225,7 @@ private:
              //}
              if (!common_speculative_process(spec.get(), batch_view)) {
                  SRV_ERR("%s", "failed to process speculative batch\n");
@@ -6925,7 +7399,7 @@ index 986b2f1..0ec1d2b 100644
  
                  // TODO: handle error
                  break;
-@@ -3407,10 +4126,11 @@ private:
+@@ -3407,10 +4239,11 @@ private:
  
              // handle `n_cmpl > 1` tasks - when the main prompt is processed, activate all child tasks too
              for (auto & slot : slots) {
@@ -6939,7 +7413,7 @@ index 986b2f1..0ec1d2b 100644
                              children.push_back(&other);
                          }
                      }
-@@ -3420,17 +4140,19 @@ private:
+@@ -3420,17 +4253,19 @@ private:
                      for (auto & child : children) {
                          SLT_INF(slot, " - copying state to child %d\n", child->id);
  
@@ -6962,7 +7436,7 @@ index 986b2f1..0ec1d2b 100644
                      if (slot.task->params.stream && slot.task->params.return_progress) {
                          send_partial_response(slot, {}, true);
                      }
-@@ -3440,7 +4162,7 @@ private:
+@@ -3440,7 +4275,7 @@ private:
                      continue; // continue loop of slots
                  }
  
@@ -6971,7 +7445,7 @@ index 986b2f1..0ec1d2b 100644
                      if (slot.task->type == SERVER_TASK_TYPE_EMBEDDING) {
                          // prompt evaluated for embedding
                          send_embedding(slot, batch_view);
-@@ -3459,12 +4181,12 @@ private:
+@@ -3459,12 +4294,12 @@ private:
                      GGML_ASSERT(slot.task->need_sampling());
  
                      // prompt evaluated for next-token prediction
@@ -6986,7 +7460,7 @@ index 986b2f1..0ec1d2b 100644
                      continue; // continue loop of slots
                  }
  
-@@ -3517,7 +4239,8 @@ private:
+@@ -3517,7 +4352,8 @@ private:
  
              // speculative decoding - main model sample and accept
              for (auto & slot : slots) {
@@ -6996,7 +7470,7 @@ index 986b2f1..0ec1d2b 100644
                      continue;
                  }
  
-@@ -3593,6 +4316,13 @@ private:
+@@ -3593,6 +4429,13 @@ private:
  
                  // update how many tokens out of those tested were accepted
                  slot.n_draft_accepted += ids.size() - 1;
@@ -7010,7 +7484,7 @@ index 986b2f1..0ec1d2b 100644
  
                  // add accepted tokens to the prompt
                  slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - n_draft);
-@@ -3631,11 +4361,51 @@ private:
+@@ -3631,11 +4474,61 @@ private:
  
                  SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) ids.size() - 1, (int) n_draft, slot.prompt.n_tokens());
              }
@@ -7040,6 +7514,16 @@ index 986b2f1..0ec1d2b 100644
 +            elapsed_ms,
 +            prefill_plan.allocations.size(),
 +        });
++        const int64_t action_finished_us = ggml_time_us();
++        for (auto & slot : slots) {
++            if (!slot.has_pending_kv_action) continue;
++            inference_engine.kv_action_policy().observe(slot.pending_kv_action, {
++                slot.pending_kv_action.action,
++                (action_finished_us - slot.pending_kv_action_started_us) / 1000.0,
++                execution_failed,
++            });
++            slot.has_pending_kv_action = false;
++        }
 +        if (benefit_decision_active) {
 +            inference_engine.benefit_policy().observe(benefit_decision, {
 +                elapsed_ms,
@@ -7062,7 +7546,7 @@ index 986b2f1..0ec1d2b 100644
      int get_slot_n_ctx() {
          return slots.back().n_ctx;
      }
-@@ -4127,6 +4897,159 @@ void server_routes::init_routes() {
+@@ -4127,6 +5020,159 @@ void server_routes::init_routes() {
                      {"name",  "prompt_tokens_total"},
                      {"help",  "Number of prompt tokens processed."},
                      {"value",  (uint64_t) res_task->n_prompt_tokens_processed_total}
@@ -7222,7 +7706,7 @@ index 986b2f1..0ec1d2b 100644
              }, {
                      {"name",  "prompt_seconds_total"},
                      {"help",  "Prompt process time"},
-@@ -4149,6 +5072,18 @@ void server_routes::init_routes() {
+@@ -4149,6 +5195,18 @@ void server_routes::init_routes() {
                      {"value",  res_task->n_tokens_max}
              }}},
              {"gauge", {{
@@ -7241,7 +7725,7 @@ index 986b2f1..0ec1d2b 100644
                      {"name",  "prompt_tokens_seconds"},
                      {"help",  "Average prompt throughput in tokens/s."},
                      {"value",  res_task->n_prompt_tokens_processed ? 1.e3 / res_task->t_prompt_processing * res_task->n_prompt_tokens_processed : 0.}
-@@ -4156,6 +5091,115 @@ void server_routes::init_routes() {
+@@ -4156,6 +5214,115 @@ void server_routes::init_routes() {
                      {"name",  "predicted_tokens_seconds"},
                      {"help",  "Average generation throughput in tokens/s."},
                      {"value",  res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}
@@ -7357,7 +7841,7 @@ index 986b2f1..0ec1d2b 100644
              },{
                      {"name",  "requests_processing"},
                      {"help",  "Number of requests processing."},
-@@ -4188,6 +5232,108 @@ void server_routes::init_routes() {
+@@ -4188,6 +5355,148 @@ void server_routes::init_routes() {
              }
          }
  
@@ -7410,6 +7894,46 @@ index 986b2f1..0ec1d2b 100644
 +                   << "# TYPE llamacpp:benefit_uncertainty_ms gauge\n";
 +        append_benefit("cpu", res_task->benefit_cpu);
 +        append_benefit("cuda", res_task->benefit_cuda);
++
++        const auto & kv_actions = res_task->kv_action_policy;
++        static constexpr const char * kv_action_names[] = {
++            "direct", "remap", "paged", "device_swap", "host_swap", "recompute",
++        };
++        prometheus << "# HELP llamacpp:kv_action_decisions_total Unified KV execution decisions by selected action.\n"
++                   << "# TYPE llamacpp:kv_action_decisions_total counter\n";
++        for (size_t i = 0; i < server_kv_action_count; ++i) {
++            prometheus << "llamacpp:kv_action_decisions_total{action=\"" << kv_action_names[i]
++                       << "\"} " << kv_actions.action_decisions[i] << "\n";
++        }
++        prometheus << "# HELP llamacpp:kv_action_observations_total Completed action observations by executed action.\n"
++                   << "# TYPE llamacpp:kv_action_observations_total counter\n";
++        for (size_t i = 0; i < server_kv_action_count; ++i) {
++            prometheus << "llamacpp:kv_action_observations_total{action=\"" << kv_action_names[i]
++                       << "\"} " << kv_actions.observations[i] << "\n";
++        }
++        prometheus << "# HELP llamacpp:kv_action_safe_fallback_total Decisions conservatively executed through H0.\n"
++                   << "# TYPE llamacpp:kv_action_safe_fallback_total counter\n"
++                   << "llamacpp:kv_action_safe_fallback_total " << kv_actions.safe_fallbacks << "\n"
++                   << "# HELP llamacpp:kv_action_invalid_features_total Invalid feature snapshots rejected before ranking.\n"
++                   << "# TYPE llamacpp:kv_action_invalid_features_total counter\n"
++                   << "llamacpp:kv_action_invalid_features_total " << kv_actions.invalid_feature_fallbacks << "\n"
++                   << "# HELP llamacpp:kv_action_cold_start_total Decisions kept on H0 because action models lacked samples.\n"
++                   << "# TYPE llamacpp:kv_action_cold_start_total counter\n"
++                   << "llamacpp:kv_action_cold_start_total " << kv_actions.cold_start_fallbacks << "\n"
++                   << "# HELP llamacpp:kv_action_uncertainty_fallback_total Decisions kept on H0 because confidence bounds overlapped.\n"
++                   << "# TYPE llamacpp:kv_action_uncertainty_fallback_total counter\n"
++                   << "llamacpp:kv_action_uncertainty_fallback_total " << kv_actions.uncertainty_fallbacks << "\n"
++                   << "# HELP llamacpp:kv_action_shadow_total Learned recommendations observed while H0 remained executed.\n"
++                   << "# TYPE llamacpp:kv_action_shadow_total counter\n"
++                   << "llamacpp:kv_action_shadow_total " << kv_actions.shadow_decisions << "\n"
++                   << "# HELP llamacpp:kv_action_decision_seconds_total CPU time spent in the decision module.\n"
++                   << "# TYPE llamacpp:kv_action_decision_seconds_total counter\n"
++                   << "llamacpp:kv_action_decision_seconds_total "
++                   << kv_actions.total_decision_nanoseconds / 1.e9 << "\n"
++                   << "# HELP llamacpp:kv_action_decision_seconds_max Maximum observed decision time.\n"
++                   << "# TYPE llamacpp:kv_action_decision_seconds_max gauge\n"
++                   << "llamacpp:kv_action_decision_seconds_max "
++                   << kv_actions.maximum_decision_nanoseconds / 1.e9 << "\n";
 +
 +        const auto & checkpoint = res_task->benefit_persistence;
 +        prometheus << "# HELP llamacpp:benefit_checkpoint_restore_total Benefit checkpoint startup outcomes.\n"
@@ -7468,10 +7992,10 @@ index 986b2f1..0ec1d2b 100644
          res->status = 200;
 diff --git a/tools/server/server-inference-engine.cpp b/tools/server/server-inference-engine.cpp
 new file mode 100644
-index 0000000..038e847
+index 0000000..8bfbcec
 --- /dev/null
 +++ b/tools/server/server-inference-engine.cpp
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,101 @@
 +#include "server-inference-engine.h"
 +
 +#include <stdexcept>
@@ -7565,6 +8089,7 @@ index 0000000..038e847
 +        benefit_policy_.snapshot(server_benefit_backend::cpu),
 +        benefit_policy_.snapshot(server_benefit_backend::cuda),
 +        benefit_policy_.checkpoint_snapshot(),
++        kv_action_policy_.snapshot(),
 +    };
 +}
 +
@@ -7574,16 +8099,17 @@ index 0000000..038e847
 +}
 diff --git a/tools/server/server-inference-engine.h b/tools/server/server-inference-engine.h
 new file mode 100644
-index 0000000..f450f5d
+index 0000000..9d68ddf
 --- /dev/null
 +++ b/tools/server/server-inference-engine.h
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,164 @@
 +#pragma once
 +
 +#include "server-benefit-policy.h"
 +#include "server-inference-iteration.h"
 +#include "server-inference-scheduler.h"
 +#include "server-kv-capacity-planner.h"
++#include "server-kv-action-policy.h"
 +#include "server-kv-runtime.h"
 +#include "server-kv-swap-store.h"
 +#include "server-runtime-adapter.h"
@@ -7624,6 +8150,7 @@ index 0000000..f450f5d
 +    server_benefit_snapshot cpu_benefit;
 +    server_benefit_snapshot cuda_benefit;
 +    server_benefit_persistence_snapshot benefit_persistence;
++    server_kv_action_policy_snapshot kv_action_policy;
 +};
 +
 +// Owns the inference control plane. server_context remains the protocol and
@@ -7702,6 +8229,7 @@ index 0000000..f450f5d
 +
 +    server_inference_scheduler & scheduler() { return scheduler_; }
 +    server_benefit_policy & benefit_policy() { return benefit_policy_; }
++    server_kv_action_policy & kv_action_policy() { return kv_action_policy_; }
 +    server_kv_capacity_planner & capacity_planner() { return capacity_planner_; }
 +    server_speculation_controller & speculation() { return speculation_; }
 +    server_runtime_adapter & runtime() { return *runtime_; }
@@ -7720,6 +8248,7 @@ index 0000000..f450f5d
 +private:
 +    server_inference_scheduler scheduler_;
 +    server_benefit_policy benefit_policy_;
++    server_kv_action_policy kv_action_policy_;
 +    server_kv_capacity_planner capacity_planner_;
 +    server_speculation_controller speculation_;
 +    std::unique_ptr<server_kv_runtime> kv_runtime_;
@@ -8197,6 +8726,537 @@ index 0000000..ac22980
 +    double iteration_latency_ewma_ms_ = 0.0;
 +    uint64_t observations_ = 0;
 +    server_model_cost_model cost_model_;
++};
+diff --git a/tools/server/server-kv-action-policy.cpp b/tools/server/server-kv-action-policy.cpp
+new file mode 100644
+index 0000000..fb4d7a0
+--- /dev/null
++++ b/tools/server/server-kv-action-policy.cpp
+@@ -0,0 +1,354 @@
++#include "server-kv-action-policy.h"
++
++#include <algorithm>
++#include <chrono>
++#include <cmath>
++
++namespace {
++
++size_t index_of(server_kv_action action) {
++    return static_cast<size_t>(action);
++}
++
++bool capability(const server_kv_action_capabilities & value, server_kv_action action) {
++    switch (action) {
++        case server_kv_action::direct:      return value.direct;
++        case server_kv_action::remap:       return value.remap;
++        case server_kv_action::paged:       return value.paged;
++        case server_kv_action::device_swap: return value.device_swap;
++        case server_kv_action::host_swap:   return value.host_swap;
++        case server_kv_action::recompute:   return value.recompute;
++    }
++    return false;
++}
++
++bool finite_request(const server_kv_action_request & value) {
++    const double fields[] = {
++        value.reuse_probability,
++        value.kv_pressure,
++        value.device_bandwidth_bytes_per_ms,
++        value.host_bandwidth_bytes_per_ms,
++        value.launch_ms,
++        value.prefill_ms_per_token,
++        value.decode_ms_per_token,
++        value.paged_decode_multiplier,
++    };
++    return std::all_of(std::begin(fields), std::end(fields), [](double item) {
++        return std::isfinite(item) && item >= 0.0;
++    }) && value.reuse_probability <= 1.0 && value.kv_pressure <= 1.0 &&
++            value.device_bandwidth_bytes_per_ms > 0.0 &&
++            value.host_bandwidth_bytes_per_ms > 0.0;
++}
++
++bool legal(const server_kv_action_request & request, server_kv_action action) {
++    if (request.phase == server_kv_action_phase::preempt) {
++        return action == server_kv_action::device_swap ||
++                action == server_kv_action::host_swap ||
++                action == server_kv_action::recompute;
++    }
++    if (action == server_kv_action::direct) return request.direct_legal;
++    return true;
++}
++
++double estimate_cost(
++        const server_kv_action_policy_config & config,
++        const server_kv_action_request & request,
++        server_kv_action action) {
++    const double bytes = static_cast<double>(request.kv_bytes);
++    const double device_transfer = bytes / request.device_bandwidth_bytes_per_ms;
++    const double host_transfer = bytes / request.host_bandwidth_bytes_per_ms;
++    const double decode = request.expected_decode_tokens * request.decode_ms_per_token;
++    const double recompute = request.cached_tokens * request.prefill_ms_per_token;
++    const size_t fragmented_pages = request.page_count > request.contiguous_pages
++            ? request.page_count - request.contiguous_pages : 0;
++    const double future = request.phase == server_kv_action_phase::preempt
++            ? request.reuse_probability : 1.0;
++
++    switch (action) {
++        case server_kv_action::direct:
++            return decode;
++        case server_kv_action::remap:
++            return decode + device_transfer + 2.0 * request.launch_ms +
++                    fragmented_pages * config.remap_fragment_page_ms;
++        case server_kv_action::paged:
++            return decode * request.paged_decode_multiplier + request.launch_ms +
++                    fragmented_pages * config.paged_fragment_page_ms;
++        case server_kv_action::device_swap:
++            // CUDA-managed swap crosses the device/host seam once per phase.
++            return (request.phase == server_kv_action_phase::serve ? host_transfer :
++                    host_transfer * (1.0 + future)) + 2.0 * request.launch_ms +
++                    (request.phase == server_kv_action_phase::serve ? decode : 0.0);
++        case server_kv_action::host_swap:
++            // Transactional host/file storage adds serialization/checksum cost.
++            return (request.phase == server_kv_action_phase::serve ? host_transfer :
++                    host_transfer * (1.0 + future)) + config.host_swap_fixed_ms +
++                    (request.phase == server_kv_action_phase::serve ? decode : 0.0);
++        case server_kv_action::recompute:
++            return future * recompute + decode;
++    }
++    return std::numeric_limits<double>::infinity();
++}
++
++} // namespace
++
++const server_kv_action_estimate & server_kv_action_decision::estimate(
++        server_kv_action candidate) const {
++    return estimates.at(index_of(candidate));
++}
++
++server_kv_action_policy::server_kv_action_policy(server_kv_action_policy_config config) {
++    configure(config);
++}
++
++void server_kv_action_policy::configure(server_kv_action_policy_config config) {
++    config.host_swap_fixed_ms = std::max(0.0, config.host_swap_fixed_ms);
++    config.remap_fragment_page_ms = std::max(0.0, config.remap_fragment_page_ms);
++    config.paged_fragment_page_ms = std::max(0.0, config.paged_fragment_page_ms);
++    config.pressure_reserve = std::clamp(config.pressure_reserve, 0.0, 1.0);
++    config.switch_margin_ms = std::max(0.0, config.switch_margin_ms);
++    config.minimum_observations = std::max<size_t>(1, config.minimum_observations);
++    config.ridge_lambda = std::max(1e-9, config.ridge_lambda);
++    config.confidence_beta = std::max(0.0, config.confidence_beta);
++    config.failure_penalty_ms = std::max(0.0, config.failure_penalty_ms);
++    config_ = config;
++    snapshot_ = {};
++    next_id_ = 1;
++    for (auto & model : learned_) model.reset(config_.ridge_lambda);
++}
++
++void server_kv_action_policy::ridge_model::reset(double lambda) {
++    observations = 0;
++    residual_variance_ewma = 0.0;
++    for (size_t row = 0; row < server_kv_action_feature_count; ++row) {
++        rhs[row] = 0.0;
++        for (size_t column = 0; column < server_kv_action_feature_count; ++column) {
++            inverse[row][column] = row == column ? 1.0 / lambda : 0.0;
++        }
++    }
++}
++
++double server_kv_action_policy::ridge_model::predict(
++        const std::array<double, server_kv_action_feature_count> & x) const {
++    double result = 0.0;
++    for (size_t row = 0; row < server_kv_action_feature_count; ++row) {
++        double theta = 0.0;
++        for (size_t column = 0; column < server_kv_action_feature_count; ++column) {
++            theta += inverse[row][column] * rhs[column];
++        }
++        result += theta * x[row];
++    }
++    return std::max(0.0, result);
++}
++
++double server_kv_action_policy::ridge_model::radius(
++        const std::array<double, server_kv_action_feature_count> & x, double beta) const {
++    double quadratic = 0.0;
++    for (size_t row = 0; row < server_kv_action_feature_count; ++row) {
++        for (size_t column = 0; column < server_kv_action_feature_count; ++column) {
++            quadratic += x[row] * inverse[row][column] * x[column];
++        }
++    }
++    const double sigma = std::sqrt(std::max(1e-9, residual_variance_ewma));
++    return beta * sigma * std::sqrt(std::max(0.0, quadratic));
++}
++
++void server_kv_action_policy::ridge_model::observe(
++        const std::array<double, server_kv_action_feature_count> & x, double cost) {
++    const double previous = predict(x);
++    std::array<double, server_kv_action_feature_count> inverse_x{};
++    double denominator = 1.0;
++    for (size_t row = 0; row < server_kv_action_feature_count; ++row) {
++        for (size_t column = 0; column < server_kv_action_feature_count; ++column) {
++            inverse_x[row] += inverse[row][column] * x[column];
++        }
++        denominator += x[row] * inverse_x[row];
++    }
++    for (size_t row = 0; row < server_kv_action_feature_count; ++row) {
++        for (size_t column = 0; column < server_kv_action_feature_count; ++column) {
++            inverse[row][column] -= inverse_x[row] * inverse_x[column] / denominator;
++        }
++        rhs[row] += x[row] * cost;
++    }
++    const double residual = cost - previous;
++    residual_variance_ewma = observations == 0 ? residual * residual :
++            0.1 * residual * residual + 0.9 * residual_variance_ewma;
++    observations++;
++}
++
++std::array<double, server_kv_action_feature_count> server_kv_action_policy::normalize(
++        const server_kv_action_request & request) {
++    const double fragmented = request.page_count > 0
++            ? (double) (request.page_count - std::min(request.page_count, request.contiguous_pages)) /
++                    request.page_count : 0.0;
++    const double host_transfer_ms = (double) request.kv_bytes /
++            request.host_bandwidth_bytes_per_ms;
++    const auto bound = [](double value) { return std::clamp(value, 0.0, 4.0); };
++    return {
++        1.0,
++        bound(request.cached_tokens / 4096.0),
++        bound(request.expected_decode_tokens / 512.0),
++        bound((double) request.kv_bytes / (1024.0 * 1024 * 1024)),
++        fragmented,
++        bound(std::log1p((double) request.reuse_distance) / 20.0),
++        request.kv_pressure,
++        bound(request.prefill_ms_per_token * 10.0),
++        bound(host_transfer_ms / 100.0),
++    };
++}
++
++server_kv_action_decision server_kv_action_policy::choose(
++        const server_kv_action_request & request,
++        const server_kv_action_capabilities & capabilities) {
++    const auto started = std::chrono::steady_clock::now();
++    server_kv_action_decision decision;
++    decision.id = next_id_++;
++    const auto finish = [this, started](const server_kv_action_decision & value) {
++        const uint64_t elapsed = static_cast<uint64_t>(std::chrono::duration_cast<
++                std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
++        snapshot_.decisions++;
++        snapshot_.action_decisions[index_of(value.action)]++;
++        snapshot_.safe_fallbacks += value.safe_fallback_used ? 1 : 0;
++        snapshot_.invalid_feature_fallbacks +=
++                value.reason == server_kv_action_reason::invalid_features ? 1 : 0;
++        snapshot_.cold_start_fallbacks +=
++                value.reason == server_kv_action_reason::cold_start ? 1 : 0;
++        snapshot_.uncertainty_fallbacks +=
++                value.reason == server_kv_action_reason::uncertainty_fallback ? 1 : 0;
++        snapshot_.shadow_decisions +=
++                value.reason == server_kv_action_reason::shadow_baseline ? 1 : 0;
++        snapshot_.total_decision_nanoseconds += elapsed;
++        snapshot_.maximum_decision_nanoseconds = std::max(
++                snapshot_.maximum_decision_nanoseconds, elapsed);
++        return value;
++    };
++    if (!finite_request(request)) {
++        decision.reason = server_kv_action_reason::invalid_features;
++        decision.safe_fallback_used = true;
++        for (auto & estimate : decision.estimates) {
++            estimate.reason = server_kv_action_rejection::invalid_features;
++        }
++        return finish(decision);
++    }
++    decision.model_features = normalize(request);
++
++    for (size_t i = 0; i < server_kv_action_count; ++i) {
++        const auto action = static_cast<server_kv_action>(i);
++        auto & estimate = decision.estimates[i];
++        if (!capability(capabilities, action)) {
++            estimate.reason = server_kv_action_rejection::capability_unavailable;
++            continue;
++        }
++        if (!legal(request, action)) {
++            estimate.reason = server_kv_action_rejection::illegal_for_phase;
++            continue;
++        }
++        estimate.eligible = true;
++        estimate.cost_ms = estimate_cost(config_, request, action);
++    }
++
++    constexpr server_kv_action fixed_order[] = {
++        server_kv_action::direct,
++        server_kv_action::device_swap,
++        server_kv_action::host_swap,
++        server_kv_action::remap,
++        server_kv_action::paged,
++        server_kv_action::recompute,
++    };
++    for (const auto action : fixed_order) {
++        if (!decision.estimate(action).eligible) continue;
++        decision.baseline_action = action;
++        break;
++    }
++    decision.action = decision.baseline_action;
++    decision.recommended_action = decision.baseline_action;
++    if (config_.model == server_kv_action_model::fixed_rule) {
++        decision.reason = server_kv_action_reason::fixed_rule;
++    } else if (config_.model == server_kv_action_model::analytical) {
++        double best = std::numeric_limits<double>::infinity();
++        for (size_t i = 0; i < server_kv_action_count; ++i) {
++            const auto & estimate = decision.estimates[i];
++            if (estimate.eligible && estimate.cost_ms < best) {
++                best = estimate.cost_ms;
++                decision.recommended_action = static_cast<server_kv_action>(i);
++            }
++        }
++        const double baseline_cost = decision.estimate(decision.baseline_action).cost_ms;
++        const double candidate_cost = decision.estimate(decision.recommended_action).cost_ms;
++        if (candidate_cost + config_.switch_margin_ms < baseline_cost) {
++            decision.action = decision.recommended_action;
++            decision.reason = server_kv_action_reason::minimum_estimated_cost;
++        } else {
++            decision.reason = server_kv_action_reason::fixed_rule;
++            decision.safe_fallback_used = decision.recommended_action != decision.baseline_action;
++        }
++    } else {
++        const auto baseline_index = index_of(decision.baseline_action);
++        if (learned_[baseline_index].observations < config_.minimum_observations) {
++            decision.reason = server_kv_action_reason::cold_start;
++            decision.safe_fallback_used = true;
++        } else {
++            for (size_t i = 0; i < server_kv_action_count; ++i) {
++                if (!decision.estimates[i].eligible ||
++                        learned_[i].observations < config_.minimum_observations) continue;
++                decision.estimates[i].cost_ms = learned_[i].predict(decision.model_features);
++                decision.estimates[i].uncertainty_ms = learned_[i].radius(
++                        decision.model_features, config_.confidence_beta);
++            }
++            const auto & baseline = decision.estimates[baseline_index];
++            const double baseline_lower = std::max(0.0,
++                    baseline.cost_ms - baseline.uncertainty_ms);
++            double best_upper = std::numeric_limits<double>::infinity();
++            for (size_t i = 0; i < server_kv_action_count; ++i) {
++                if (i == baseline_index || !decision.estimates[i].eligible ||
++                        learned_[i].observations < config_.minimum_observations) continue;
++                const double upper = decision.estimates[i].cost_ms +
++                        decision.estimates[i].uncertainty_ms;
++                if (upper < best_upper) {
++                    best_upper = upper;
++                    decision.recommended_action = static_cast<server_kv_action>(i);
++                }
++            }
++            if (decision.recommended_action != decision.baseline_action &&
++                    best_upper + config_.switch_margin_ms < baseline_lower) {
++                if (config_.shadow) {
++                    decision.reason = server_kv_action_reason::shadow_baseline;
++                    decision.safe_fallback_used = true;
++                } else {
++                    decision.action = decision.recommended_action;
++                    decision.reason = server_kv_action_reason::positive_lower_bound;
++                }
++            } else {
++                decision.reason = server_kv_action_reason::uncertainty_fallback;
++                decision.safe_fallback_used = true;
++            }
++        }
++    }
++    if (!decision.estimate(decision.action).eligible && capabilities.recompute) {
++        decision.action = server_kv_action::recompute;
++        decision.baseline_action = server_kv_action::recompute;
++        decision.recommended_action = server_kv_action::recompute;
++        decision.safe_fallback_used = true;
++        decision.reason = server_kv_action_reason::no_optimized_action;
++    }
++    bool optimized_eligible = false;
++    for (size_t i = 0; i < index_of(server_kv_action::recompute); ++i) {
++        optimized_eligible = optimized_eligible || decision.estimates[i].eligible;
++    }
++    if (!optimized_eligible && decision.action == server_kv_action::recompute) {
++        decision.safe_fallback_used = true;
++        decision.reason = server_kv_action_reason::no_optimized_action;
++    }
++    return finish(decision);
++}
++
++void server_kv_action_policy::observe(
++        const server_kv_action_decision & decision,
++        const server_kv_action_feedback & feedback) {
++    const size_t action = index_of(feedback.action);
++    if (decision.id == 0 || action >= server_kv_action_count ||
++            !decision.estimates[action].eligible) return;
++    double cost = feedback.execution_failed ? config_.failure_penalty_ms : feedback.total_ms;
++    if (!std::isfinite(cost) || cost < 0.0) return;
++    learned_[action].observe(decision.model_features, cost);
++    snapshot_.observations[action]++;
++}
+diff --git a/tools/server/server-kv-action-policy.h b/tools/server/server-kv-action-policy.h
+new file mode 100644
+index 0000000..17a4f43
+--- /dev/null
++++ b/tools/server/server-kv-action-policy.h
+@@ -0,0 +1,165 @@
++#pragma once
++
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <limits>
++
++enum class server_kv_action : uint8_t {
++    direct,
++    remap,
++    paged,
++    device_swap,
++    host_swap,
++    recompute,
++};
++
++enum class server_kv_action_phase : uint8_t {
++    serve,
++    preempt,
++};
++
++enum class server_kv_action_model : uint8_t {
++    fixed_rule,
++    analytical,
++    learned,
++};
++
++enum class server_kv_action_rejection : uint8_t {
++    none,
++    capability_unavailable,
++    illegal_for_phase,
++    invalid_features,
++};
++
++enum class server_kv_action_reason : uint8_t {
++    minimum_estimated_cost,
++    fixed_rule,
++    no_optimized_action,
++    invalid_features,
++    cold_start,
++    uncertainty_fallback,
++    positive_lower_bound,
++    shadow_baseline,
++};
++
++constexpr size_t server_kv_action_count = 6;
++constexpr size_t server_kv_action_feature_count = 9;
++
++struct server_kv_action_capabilities {
++    bool direct = false;
++    bool remap = false;
++    bool paged = false;
++    bool device_swap = false;
++    bool host_swap = false;
++    bool recompute = true;
++};
++
++struct server_kv_action_request {
++    server_kv_action_phase phase = server_kv_action_phase::serve;
++    bool direct_legal = false;
++    size_t cached_tokens = 0;
++    size_t expected_decode_tokens = 0;
++    uint64_t kv_bytes = 0;
++    size_t page_count = 0;
++    size_t contiguous_pages = 0;
++    uint64_t reuse_distance = 0;
++    double reuse_probability = 1.0;
++    double kv_pressure = 0.0;
++    double device_bandwidth_bytes_per_ms = 1.0;
++    double host_bandwidth_bytes_per_ms = 1.0;
++    double launch_ms = 0.0;
++    double prefill_ms_per_token = 0.0;
++    double decode_ms_per_token = 0.0;
++    double paged_decode_multiplier = 1.0;
++};
++
++struct server_kv_action_estimate {
++    bool eligible = false;
++    double cost_ms = std::numeric_limits<double>::infinity();
++    double uncertainty_ms = 0.0;
++    server_kv_action_rejection reason = server_kv_action_rejection::none;
++};
++
++struct server_kv_action_decision {
++    uint64_t id = 0;
++    server_kv_action action = server_kv_action::recompute;
++    server_kv_action baseline_action = server_kv_action::recompute;
++    server_kv_action recommended_action = server_kv_action::recompute;
++    server_kv_action fallback = server_kv_action::recompute;
++    server_kv_action_reason reason = server_kv_action_reason::no_optimized_action;
++    bool safe_fallback_used = false;
++    std::array<server_kv_action_estimate, server_kv_action_count> estimates{};
++    std::array<double, server_kv_action_feature_count> model_features{};
++
++    const server_kv_action_estimate & estimate(server_kv_action candidate) const;
++};
++
++struct server_kv_action_policy_config {
++    server_kv_action_model model = server_kv_action_model::learned;
++    double host_swap_fixed_ms = 0.20;
++    double remap_fragment_page_ms = 0.0005;
++    double paged_fragment_page_ms = 0.0010;
++    double pressure_reserve = 0.90;
++    double switch_margin_ms = 0.25;
++    size_t minimum_observations = 8;
++    double ridge_lambda = 1.0;
++    double confidence_beta = 1.0;
++    double failure_penalty_ms = 1000.0;
++    bool shadow = true;
++};
++
++struct server_kv_action_feedback {
++    server_kv_action action = server_kv_action::recompute;
++    double total_ms = 0.0;
++    bool execution_failed = false;
++};
++
++struct server_kv_action_policy_snapshot {
++    uint64_t decisions = 0;
++    std::array<uint64_t, server_kv_action_count> action_decisions{};
++    uint64_t safe_fallbacks = 0;
++    uint64_t invalid_feature_fallbacks = 0;
++    uint64_t cold_start_fallbacks = 0;
++    uint64_t uncertainty_fallbacks = 0;
++    uint64_t shadow_decisions = 0;
++    std::array<uint64_t, server_kv_action_count> observations{};
++    uint64_t total_decision_nanoseconds = 0;
++    uint64_t maximum_decision_nanoseconds = 0;
++};
++
++// Deep, pure decision module. Callers provide one immutable runtime snapshot;
++// the module owns legality, cost estimation, action ranking and fail-closed
++// fallback. It never performs KV mutation.
++class server_kv_action_policy {
++public:
++    explicit server_kv_action_policy(server_kv_action_policy_config config = {});
++    void configure(server_kv_action_policy_config config);
++    server_kv_action_decision choose(
++            const server_kv_action_request & request,
++            const server_kv_action_capabilities & capabilities);
++    void observe(const server_kv_action_decision & decision,
++            const server_kv_action_feedback & feedback);
++    server_kv_action_policy_snapshot snapshot() const { return snapshot_; }
++
++private:
++    server_kv_action_policy_config config_;
++    server_kv_action_policy_snapshot snapshot_;
++    uint64_t next_id_ = 1;
++
++    struct ridge_model {
++        double inverse[server_kv_action_feature_count][server_kv_action_feature_count]{};
++        double rhs[server_kv_action_feature_count]{};
++        uint64_t observations = 0;
++        double residual_variance_ewma = 0.0;
++
++        void reset(double lambda);
++        void observe(const std::array<double, server_kv_action_feature_count> & x, double cost);
++        double predict(const std::array<double, server_kv_action_feature_count> & x) const;
++        double radius(const std::array<double, server_kv_action_feature_count> & x, double beta) const;
++    };
++    std::array<ridge_model, server_kv_action_count> learned_{};
++
++    static std::array<double, server_kv_action_feature_count> normalize(
++            const server_kv_action_request & request);
 +};
 diff --git a/tools/server/server-kv-block-backend.cpp b/tools/server/server-kv-block-backend.cpp
 new file mode 100644
@@ -10842,7 +11902,7 @@ index 0000000..3b0b46a
 +    server_speculation_state & get_or_create(int sequence_id);
 +};
 diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
-index 72a4bd0..53cf7d2 100644
+index 72a4bd0..5c404c6 100644
 --- a/tools/server/server-task.cpp
 +++ b/tools/server/server-task.cpp
 @@ -1895,6 +1895,7 @@ json server_task_result_metrics::to_json() {
@@ -10861,7 +11921,7 @@ index 72a4bd0..53cf7d2 100644
          { "t_prompt_processing",             t_prompt_processing },
          { "n_tokens_predicted",              n_tokens_predicted },
          { "t_tokens_generation",             t_tokens_generation },
-@@ -1909,6 +1911,59 @@ json server_task_result_metrics::to_json() {
+@@ -1909,6 +1911,83 @@ json server_task_result_metrics::to_json() {
          { "n_decode_total",                  n_decode_total },
          { "n_busy_slots_total",              n_busy_slots_total },
  
@@ -10910,6 +11970,30 @@ index 72a4bd0..53cf7d2 100644
 +            { "predicted_benefit_ms", benefit_cuda.last_predicted_benefit_ms },
 +            { "uncertainty_ms", benefit_cuda.last_uncertainty_ms }
 +        } },
++        { "kv_action_policy", {
++            { "decisions", kv_action_policy.decisions },
++            { "direct", kv_action_policy.action_decisions[(size_t) server_kv_action::direct] },
++            { "remap", kv_action_policy.action_decisions[(size_t) server_kv_action::remap] },
++            { "paged", kv_action_policy.action_decisions[(size_t) server_kv_action::paged] },
++            { "device_swap", kv_action_policy.action_decisions[(size_t) server_kv_action::device_swap] },
++            { "host_swap", kv_action_policy.action_decisions[(size_t) server_kv_action::host_swap] },
++            { "recompute", kv_action_policy.action_decisions[(size_t) server_kv_action::recompute] },
++            { "safe_fallbacks", kv_action_policy.safe_fallbacks },
++            { "invalid_feature_fallbacks", kv_action_policy.invalid_feature_fallbacks },
++            { "cold_start_fallbacks", kv_action_policy.cold_start_fallbacks },
++            { "uncertainty_fallbacks", kv_action_policy.uncertainty_fallbacks },
++            { "shadow_decisions", kv_action_policy.shadow_decisions },
++            { "observations", {
++                { "direct", kv_action_policy.observations[(size_t) server_kv_action::direct] },
++                { "remap", kv_action_policy.observations[(size_t) server_kv_action::remap] },
++                { "paged", kv_action_policy.observations[(size_t) server_kv_action::paged] },
++                { "device_swap", kv_action_policy.observations[(size_t) server_kv_action::device_swap] },
++                { "host_swap", kv_action_policy.observations[(size_t) server_kv_action::host_swap] },
++                { "recompute", kv_action_policy.observations[(size_t) server_kv_action::recompute] }
++            } },
++            { "total_decision_nanoseconds", kv_action_policy.total_decision_nanoseconds },
++            { "maximum_decision_nanoseconds", kv_action_policy.maximum_decision_nanoseconds }
++        } },
 +
 +        { "kv_cache_tokens",                 kv_cache_tokens },
 +        { "kv_cache_capacity_tokens",        kv_cache_capacity_tokens },
@@ -10922,14 +12006,15 @@ index 72a4bd0..53cf7d2 100644
      };
  }
 diff --git a/tools/server/server-task.h b/tools/server/server-task.h
-index bdadcff..615ac36 100644
+index bdadcff..0988699 100644
 --- a/tools/server/server-task.h
 +++ b/tools/server/server-task.h
-@@ -10,6 +10,11 @@
+@@ -10,6 +10,12 @@
  
  // TODO: prevent including the whole server-common.h as we only use server_tokens
  #include "server-common.h"
 +#include "server-benefit-policy.h"
++#include "server-kv-action-policy.h"
 +
 +#include "ggml.h"
 +
@@ -10937,7 +12022,7 @@ index bdadcff..615ac36 100644
  
  using json = nlohmann::ordered_json;
  
-@@ -132,6 +137,7 @@ struct task_result_state {
+@@ -132,6 +138,7 @@ struct task_result_state {
  
  struct server_task {
      int id = -1; // to be filled by server_queue
@@ -10945,7 +12030,7 @@ index bdadcff..615ac36 100644
  
      // TODO @ngxson : remove this field and implement a mapping task_id -> idx in the response_reader
      size_t index = 0; // used when there are multiple prompts (batch request)
-@@ -234,6 +240,7 @@ struct server_task {
+@@ -234,6 +241,7 @@ struct server_task {
  
          copy.id        = id_child;
          copy.id_parent = id_parent;
@@ -10953,7 +12038,7 @@ index bdadcff..615ac36 100644
          copy.params    = params;
          copy.type      = type;
          copy.tokens    = tokens.clone();
-@@ -263,6 +270,23 @@ struct server_task {
+@@ -263,6 +271,23 @@ struct server_task {
      }
  };
  
@@ -10977,7 +12062,7 @@ index bdadcff..615ac36 100644
  struct result_timings {
      int32_t cache_n = -1;
  
-@@ -517,6 +541,7 @@ struct server_task_result_metrics : server_task_result {
+@@ -517,6 +542,7 @@ struct server_task_result_metrics : server_task_result {
  
      // TODO: somehow reuse server_metrics in the future, instead of duplicating the fields
      uint64_t n_prompt_tokens_processed_total = 0;
@@ -10985,7 +12070,7 @@ index bdadcff..615ac36 100644
      uint64_t t_prompt_processing_total       = 0;
      uint64_t n_tokens_predicted_total        = 0;
      uint64_t t_tokens_generation_total       = 0;
-@@ -524,6 +549,7 @@ struct server_task_result_metrics : server_task_result {
+@@ -524,6 +550,7 @@ struct server_task_result_metrics : server_task_result {
      uint64_t n_tokens_max = 0;
  
      uint64_t n_prompt_tokens_processed = 0;
@@ -10993,7 +12078,7 @@ index bdadcff..615ac36 100644
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -532,6 +558,60 @@ struct server_task_result_metrics : server_task_result {
+@@ -532,6 +559,61 @@ struct server_task_result_metrics : server_task_result {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -11023,6 +12108,7 @@ index bdadcff..615ac36 100644
 +    server_benefit_snapshot benefit_cpu;
 +    server_benefit_snapshot benefit_cuda;
 +    server_benefit_persistence_snapshot benefit_persistence;
++    server_kv_action_policy_snapshot kv_action_policy;
 +
 +    uint64_t kv_cache_tokens          = 0;
 +    uint64_t kv_cache_capacity_tokens = 0;

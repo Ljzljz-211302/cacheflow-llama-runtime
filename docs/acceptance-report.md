@@ -163,3 +163,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 - 真实 Qwen：共享 21 个 Prefix KV Block，partial-tail COW 后与 cold deterministic decode 输出一致；
 - 真实用户应用：原生指标累计 5,603,330 个 vectorized remap byte；
 - 20 组配对交替顺序微基准：1/4/16/32 Block 的 GPU 中位改善为 53.33%/48.89%/3.13%/1.87%，最差规模仍为正向，不宣称等比例端到端收益。
+
+## Unified KV Action Policy 验收
+
+- 生产动作：Direct、CUDA-managed Swap、事务型 host Swap、Recompute 均走真实服务路径；每条正式 row 的 selected/observed counter 均精确增加 1，restore 失败显式转 Recompute。
+- 能力门禁：Remap/Paged 没有完整 `llama_decode` adapter，因此正式生产 capability 为 false；Paged decision 为 0，不把 H3 microbenchmark 冒充生产 dispatch。
+- 算法：H0 固定安全规则、A1 解析模型、T1 分桶查表、L1 置信约束 Ridge 使用相同 snapshot 和完整动作边界；无效/OOD/冷启动/不确定性均 fail closed。
+- 数据隔离：20 个 trace group 按时间顺序切为 12 train / 8 evaluation，session、prefix family 与 trace 均无交叉；16 个 held-out resident/preempted snapshot 采用 paired action observation。
+- 受限结果：L1 没有置信切换，精确匹配 H0（median regret 0 ms、P95 9.9865 ms、cumulative 51.4836 ms、harmful 0）；T1 median regret 0.6154 ms、cumulative 60.5061 ms、harmful 4/16。结论是安全回退成立，不能声称 learned policy 已优于 H0。
+- 热路径：5 个 action/OOD regime、500 万次 choose、零 allocation，最差 p99 低于 50 us，decision/action ratio p99 低于 1%；raw Windows maximum 保留为 report-only 抢占诊断。
+- 证据所有权：artifact 精确绑定协议/模型哈希、实现提交、vendor gitlink、完整文件树；validator 从 raw rows 重算 H0/A1/T1/L1 与 overhead，并有重哈希 trial/overhead、额外文件和伪提交测试。

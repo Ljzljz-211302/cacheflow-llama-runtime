@@ -1193,3 +1193,43 @@ Issue #4 在这条服务因果链下新增 H2 算子机制切片。`bench-kv-blo
 原型只接受 page size 16、D64/D128 和整除 GQA；当前模型忠实 shape 是 Qwen2.5-0.5B 的 `14/2/64`，`28/4/128` 仅是 Qwen2.5-7B 的 kernel geometry，不代表本机已经完成 7B 服务。无效 shape、空 context、已使用的越界物理页和空指针全部 fail closed；生产 fallback 与 dtype adapter 不属于该 seam。
 
 验证分成三层：独立 CPU FP32 oracle 检查跨页、ragged GQA、边界、poison 和 guard；20-pair无 profiler CUDA-event 实验给出 D64/D128、短/中/长 context 和 batch 1/4 的效应与 bootstrap 区间；方法隔离的 NSYS replay 只绑定 kernel identity/launch count。NCU counter 缺失时禁止 memory-bound、occupancy 和 DRAM-byte 归因。预注册规则只选择下一候选 K2（GQA KV reuse）、K3（split-KV）或保留 K1，不把候选选择写成已实现加速。生产 dispatch、真实 llama attention tensor adapter 和用户请求 A/B 由后续 Issue 单独验收。
+
+## 26. Unified KV Action Policy（Issue #6）
+
+### 26.1 决策边界与深模块
+
+`server_kv_action_policy` 是 Engine 独占的深模块，公开面只有 `choose(ActionSnapshot) -> Decision`、`observe(Decision, Feedback)` 与 `snapshot()`。Scheduler 只提供不可变快照，不修改模型状态；Runtime 只执行 `Decision.action`。一次动作从“scheduler snapshot 已就绪”计时到“下一次有用 decode 已可运行”，所以复制、恢复、重算和其后的 decode 不能使用不同边界。
+
+快照包含 cached/decode token、KV byte、page run/连续性、reuse distance/probability、KV pressure、device/host bandwidth、launch、prefill/decode 估计和 Paged multiplier。系统先检查有限性与 capability/resource，再允许模型评分。非法、资源不足、冷启动、置信度不足或执行失败都 fail closed 到 H0；执行失败先作为原动作失败反馈，再产生只允许 Recompute 的新决策，不能把失败样本错误标成重算样本。
+
+### 26.2 动作能力矩阵
+
+| 动作 | 当前生产执行 | 完整反馈 | 选择边界 |
+|---|---|---|---|
+| Direct | 是 | 是 | KV 已驻留并直接进入下一次 decode |
+| CUDA-managed Swap | 是 | 是 | pinned-host snapshot 恢复后进入 decode |
+| Transactional host Swap | 是 | 是 | memory/file store 恢复后进入 decode |
+| Recompute | 是 | 是 | 重新 prefill 后进入 decode |
+| Remap | 否 | 否 | 算子存在，但缺少完整 `llama_decode` action adapter |
+| Paged | 否 | 否 | H3 长上下文负结果且缺少生产 dispatch adapter |
+
+Remap/Paged 在生产快照中的 capability 为 false；正式 CUDA 证据要求 Paged decision counter 恒为 0。可运行的 microbenchmark 不等于服务动作已经可用。
+
+### 26.3 H0/A1/T1/L1
+
+- H0：确定性合法动作顺序，是安全基线和所有不确定状态的 fallback。
+- A1：组合 movement byte、带宽、launch、prefill/decode 与 reuse/pressure 的解析成本。
+- T1：离线 action/context/batch/page-runs/pressure 分桶中位数查表；没有置信保护，用于检验稀疏 bucket 的直接切换是否有害。
+- L1：固定 9 维特征的 bounded per-action Ridge，使用最小样本、残差不确定性、confidence beta 与 switch margin；只有候选置信上界严格优于 H0 才切换，否则精确执行 H0。
+
+在线更新以 Sherman–Morrison 维护逆矩阵；热路径使用固定数组，不分配堆内存、不调用 CUDA API、不触发同步。`learned-shadow` 记录推荐动作但执行 H0，是 CacheFlow preset；正式样本尚未证明主动 `learned` 切换有收益。
+
+### 26.4 服务集成与可观测性
+
+`server_context::get_available_slot` 生成真实动作快照；slot 保存 pending decision，直到下一次成功提交 decode 才 `observe`。Prometheus 暴露逐动作 decision/observation、safe fallback、invalid/cold/uncertainty/shadow、总决策时间与最大决策时间。CLI 为 `--kv-action-policy fixed|analytical|learned-shadow|learned`，并提供最小样本、confidence beta 和 switch margin。Direct、两类 Swap、Recompute 的真实 smoke 均验证 selected/observed 各增加 1；恢复失败必须转为 Recompute。
+
+### 26.5 正式证据与边界
+
+协议固定 trace/session/prefix-family 分组、时间顺序切分、同 snapshot paired action、H0/A1/T1/L1 和开销门禁。正式 artifact 使用真实 Qwen2.5-0.5B CUDA server 收集 20 个 trace group，前 12 个训练、后 8 个评估，共 16 个 held-out resident/preempted snapshot。当前 L1 因置信界不足没有切换，与 H0 完全一致；T1 查表在稀疏 held-out bucket 上产生 25% harmful decision。这是安全回退有效的证据，不是 learned policy 已经加速的证据。
+
+硬门禁为 choose p99 不超过 50 us、decision/action ratio p99 不超过 1%、热路径零 allocation、零 CUDA sync。Windows raw wall-clock maximum 原样保留为抢占诊断，不作硬门禁。artifact 绑定协议、模型 SHA-256、外层实现提交、vendor gitlink、完整文件树与逐文件哈希；校验器从原始 paired rows 重算分析和开销，并拒绝重新计算文件哈希后的语义篡改。

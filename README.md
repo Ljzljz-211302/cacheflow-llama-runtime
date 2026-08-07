@@ -56,6 +56,12 @@ flowchart LR
 
 所有性能 A/B 结论至少 3 次 fresh-process trial；功能 smoke 和 Engine trace 不冒充多 trial 性能结论。汇总位于 `results/`，原始 trial 位于 `results/raw/`。硬件、模型和负结果边界见 [实验限制](docs/experiment-limitations.md)。
 
+### Unified KV Action Policy
+
+服务现在用同一个 fail-closed 接口比较 Direct、CUDA-managed Swap、事务型 host Swap 与 Recompute；Remap/Paged 在缺少完整服务 adapter 时由 capability gate 禁止进入生产选择。策略包含固定 H0、解析 A1、分桶查表 T1 与带置信边界/H0 fallback 的 L1，并通过 Prometheus 分开记录推荐、实际执行和完整动作反馈。
+
+正式 Qwen2.5-0.5B CUDA paired replay 使用 20 个 trace group，按时间切成 12 train / 8 evaluation。16 个 held-out snapshot 上，L1 没有满足切换置信条件，因而与 H0 完全一致；T1 产生 25% harmful decision。项目将它报告为“安全回退有效、学习收益尚未成立”，而不是把零切换包装成 learned 加速。choose 热路径 5 个 regime 共执行 500 万次，零 heap allocation，p99 低于 50 us；Windows raw maximum 仅作抢占诊断。完整证据在 `results/research/h4-kv-action-v1.0.0/`。
+
 ## 一键复现
 
 依赖：PowerShell、Git、Python 3、Node.js 22.14.0（由 `.nvmrc` 固定，仅用于前端语法门禁）、CMake、Ninja、Visual Studio 2022 C++ workload。仓库已在 `runtime/cuda-dev` 固定 CUDA 12.6 开发环境；模型和预编译基线由 SHA-256 清单固定。

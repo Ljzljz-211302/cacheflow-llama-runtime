@@ -26,7 +26,7 @@
 | H1 | 128-bit 向量化何时降低 snapshot-preserving Remap 成本？ | existing-evidence | 锁定环境中 1/4/16/32 blocks 的配对改善非递增 | 趋势不再非递增、任一规模回归超过 3%、没有规模改善至少 10%，或正确性失败 |
 | H2 | KV 搬运何时成为请求级瓶颈？ | limited evidence | 对齐小搬运中向量化材料性获益，规模增大后收益低于门槛；错位 layout 明确反转 | 所有预注册高搬运场景中 KV 均不 material，或没有 CUDA mediator |
 | H3 | Paged Decode Attention 何时优于 Direct/Remap？ | limited evidence | K1 相对同数学 contiguous comparator 在已测 regime 全部回退；下一步验证 GQA reuse | 所有场景既无延迟 non-inferiority 也无容量收益，或数值不正确 |
-| H4 | 可解释代价模型能否安全优于固定规则？ | prospective | 在 held-out workload 上降低 regret，且不错误启用有害动作 | regret/回归超门槛、开销吃掉收益、分布切换后仍持续错误启用 |
+| H4 | 可解释代价模型能否安全优于固定规则？ | limited evidence | 当前 L1 安全回退到 H0；尚未证明 learned 收益 | regret/回归超门槛、开销吃掉收益、分布切换后仍持续错误启用 |
 | H5 | 调度能否改变 CUDA 工作却在 execute 汇总下降时恶化 TTFT？ | existing-evidence | 请求排队结构可使 phase aggregate 与请求 SLO 反向 | 决策、CUDA mediator、请求结果三段因果链任一不存在 |
 
 完整字段——自变量、因变量、混杂因素、基线、机制、证伪条件、证据和边界——以 JSON 原件为准，并由单元测试拒绝缺字段、无证伪条件、伪造 observed result 或引用未注册基线。
@@ -81,6 +81,10 @@ Issue #5 的 H3 v1.0.0 已得到受限混合结果：K1 直接分页 kernel 在�
 比较对象必须包含固定规则 `H0`，而不是只比较一个故意较差的 always action。候选模型使用 moved bytes、fragmentation、reuse distance、memory pressure、launch/transfer cost 和 decode work；指标包括 paired oracle regret、upstream regression、wrong-enable、fallback、decision overhead 和请求级 SLO。
 
 训练/调参 trace 与评估 trace 必须隔离；exploration 不得计作收敛。若固定规则在全部 held-out regime 内与模型无显著差异或更安全，则保留固定规则并报告复杂模型没有价值。
+
+Issue #6 已完成受限正式实验：真实 Qwen2.5-0.5B CUDA server 收集 20 个 trace group，严格按时间顺序使用 12 个训练、8 个评估，session/prefix-family/trace 均无泄漏。16 个 held-out resident/preempted snapshot 中，L1 的置信上界没有击败 H0，因此零切换并与 H0 精确相同：median regret 0 ms、P95 9.9865 ms、cumulative 51.4836 ms、harmful 0。没有置信保护的 T1 分桶查表选择了 6 次 host swap，产生 4/16（25%）harmful decision，median regret 0.6154 ms、cumulative 60.5061 ms。这个结果支持安全 fallback 的必要性，不支持“学习模型已经提速”。
+
+正式生产动作只包含 Direct、CUDA-managed Swap、transactional host Swap 与 Recompute；Remap/Paged 因缺少完整 adapter 被 capability mask，Paged 生产 decision 为 0。choose benchmark 覆盖 5 个 regime、500 万次调用、零 allocation，p99 低于 50 us；raw Windows maximum 只作为 preemption diagnostic。hash-bound artifact 位于 `results/research/h4-kv-action-v1.0.0/`。
 
 ## 7. H5：已观察到的反向因果链
 

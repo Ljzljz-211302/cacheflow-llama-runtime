@@ -19,7 +19,9 @@ class ResearchCharterTests(unittest.TestCase):
         self.assertEqual(charter["schema_version"], 1)
         self.assertGreaterEqual(len(charter["claims"]), 4)
         statuses = {claim["status"] for claim in charter["claims"]}
-        self.assertIn("prospective", statuses)
+        self.assertLessEqual(
+            statuses, {"prospective", "existing-evidence", "limited-evidence"}
+        )
         self.assertIn("existing-evidence", statuses)
         self.assertIn("limited-evidence", statuses)
         for claim in charter["claims"]:

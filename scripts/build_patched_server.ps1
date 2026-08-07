@@ -16,7 +16,8 @@ $nativeTests = @(
     "test-speculation-controller",
     "test-runtime-adapter",
     "test-model-cost-model",
-    "test-benefit-policy"
+    "test-kv-action-policy",
+    "test-benefit-policy",
     "test-benefit-checkpoint"
 )
 
@@ -39,7 +40,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "patched server configure failed"
 }
 
-& cmake --build $buildRoot --config Release --target llama-server @nativeTests -j 8
+& cmake --build $buildRoot --config Release --target llama-server bench-kv-action-policy @nativeTests -j 8
 if ($LASTEXITCODE -ne 0) {
     throw "patched server build failed"
 }

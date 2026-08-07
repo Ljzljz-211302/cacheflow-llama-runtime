@@ -168,7 +168,7 @@
       "id": "H4-adaptive-action-policy",
       "question": "Can an explainable cost model safely select among KV execution actions better than a fixed rule?",
       "hypothesis": "A model using measurable movement, fragmentation, reuse, memory-pressure, and compute features can reduce paired regret relative to the fixed rule while bounding wrong enables and decision overhead.",
-      "status": "prospective",
+      "status": "limited-evidence",
       "independent_variables": [
         "fixed rule versus analytical, table-driven, learned, or hybrid policy",
         "workload distribution and distribution shift",
@@ -187,7 +187,7 @@
         "changing action availability",
         "backend and context-bucket distribution"
       ],
-      "baselines": ["fixed-rule", "upstream", "direct-copy", "vector-remap"],
+      "baselines": ["kv-action-h0", "kv-action-a1", "kv-action-t1", "kv-action-l1"],
       "mechanism": "No single action minimizes cost across copy legality, bytes, fragmentation, memory pressure, and decode work; an uncertainty-aware policy should choose only when predicted benefit exceeds risk and overhead.",
       "falsification": [
         "The policy exceeds preregistered paired-regret or upstream-regression gates.",
@@ -198,11 +198,22 @@
       "evidence_sources": [
         "results/benefit_gating_trials.csv",
         "docs/experiment-limitations.md",
-        "docs/research/primary-source-foundations.md"
+        "docs/research/primary-source-foundations.md",
+        "docs/research/unified-action-cost-model.md",
+        "results/research/h4-kv-action-v1.0.0/manifest.json",
+        "results/research/h4-kv-action-v1.0.0/report.json"
       ],
-      "observed_results": [],
+      "observed_results": [
+        "A real Qwen2.5-0.5B CUDA replay collected 20 trace-grouped paired action sets, split chronologically into 12 training and 8 evaluation traces with zero session or prefix-family overlap.",
+        "Sixteen held-out resident/preempted snapshots compared H0, analytical A1, table T1, and per-action Ridge L1 against the same observed complete-action costs.",
+        "L1 made no confidence-bound switch and exactly matched H0: median regret 0 ms, P95 regret 9.9865 ms, cumulative regret 51.4836 ms, and zero decisions more than 3% worse than H0. This is a safe fallback result, not a learned-policy win.",
+        "T1 selected host swap in six preempted snapshots and produced a 25% harmful-decision rate; its median regret was 0.6154 ms and cumulative regret 60.5061 ms.",
+        "The hot-path benchmark performed five million choices across 1/2/4/6-action and OOD regimes with zero heap allocations; the worst p99 was below 50 us. Raw Windows wall-clock maxima are retained without trimming as report-only preemption diagnostics.",
+        "Every real action row independently recorded exactly one selected-action delta and one completed-observation delta; Paged recorded zero production decisions and remains evidence-gated."
+      ],
       "scope_limits": [
-        "The present Ridge Benefit Gate selects scheduling plans, not the future five-action KV policy.",
+        "The unified policy currently executes H0 and runs per-action Ridge in shadow; the held-out run did not justify active L1 selection.",
+        "Production-complete evidence covers Direct, CUDA-managed pinned-host swap, transactional host swap, and Recompute; Remap and Paged remain capability-masked until complete llama_decode adapters exist.",
         "No reinforcement-learning claim",
         "Held-out evaluation is restricted to the available single-GPU workload matrix"
       ],

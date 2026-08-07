@@ -11,6 +11,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def metric_value(text: str, sample: str) -> float:
+    prefix = sample + " "
+    line = next((row for row in text.splitlines() if row.startswith(prefix)), None)
+    if line is None:
+        raise AssertionError(f"missing Prometheus sample: {sample}")
+    return float(line[len(prefix):])
+
+
 def post(url: str, payload: dict[str, object]) -> dict[str, object]:
     request = urllib.request.Request(
         url,
@@ -108,6 +116,20 @@ def run_mode(mode: str, port: int, swap_path: str, fault: str = "none") -> dict[
     expected_failures = 0 if fault == "none" else 1
     if f"llamacpp:kv_store_failures_total {expected_failures}" not in prometheus:
         raise AssertionError(f"unexpected store failure counter for fault={fault}")
+    if metric_value(prometheus, 'llamacpp:kv_action_decisions_total{action="paged"}') != 0:
+        raise AssertionError("evidence-gated Paged action entered the production path")
+    if metric_value(prometheus, "llamacpp:kv_action_invalid_features_total") != 0:
+        raise AssertionError("real store service produced an invalid action snapshot")
+    if fault == "next-restore":
+        if metric_value(prometheus, 'llamacpp:kv_action_decisions_total{action="recompute"}') < 1:
+            raise AssertionError("failed store restore did not select the Recompute fallback")
+        if metric_value(prometheus, 'llamacpp:kv_action_observations_total{action="recompute"}') < 1:
+            raise AssertionError("Recompute fallback did not reach the full action-cost boundary")
+    elif fault == "none":
+        if metric_value(prometheus, 'llamacpp:kv_action_decisions_total{action="host_swap"}') < 1:
+            raise AssertionError("unified policy did not execute transactional store restore")
+        if metric_value(prometheus, 'llamacpp:kv_action_observations_total{action="host_swap"}') < 1:
+            raise AssertionError("store restore did not reach the full action-cost observation boundary")
     first_prompt = first.get("timings", {}).get("prompt_n", 0)  # type: ignore[union-attr]
     restored_prompt = restored.get("timings", {}).get("prompt_n", 0)  # type: ignore[union-attr]
     if not isinstance(restored_prompt, int):

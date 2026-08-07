@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "protocol_version": "1.0.0",
+  "claim_id": "H4-adaptive-action-policy",
+  "cost_boundary": "scheduler snapshot ready through next useful decode runnable",
+  "production_actions": ["direct", "device_swap", "host_swap", "recompute"],
+  "evidence_gated_actions": {
+    "remap": "operator exists but no complete-action llama_decode adapter",
+    "paged": "H3 K1 regressed 10.41%-13.05% in every medium/long regime and has no production adapter"
+  },
+  "models": ["H0", "A1", "T1", "L1"],
+  "split": {
+    "unit": "trace_id",
+    "group_fields": ["session_id", "prefix_family"],
+    "ordering": "training traces precede evaluation traces",
+    "minimum_train_traces": 8,
+    "minimum_evaluation_traces": 4,
+    "row_randomization_prohibited": true
+  },
+  "features": [
+    "context_tokens",
+    "batch",
+    "page_runs",
+    "kv_pressure",
+    "kv_bytes",
+    "reuse_distance"
+  ],
+  "table_buckets": {
+    "context_tokens": [64, 256, 1024, 4096],
+    "batch": [1, 2, 4],
+    "page_runs": [1, 4, 16, 64],
+    "kv_pressure": [0.5, 0.8, 0.95]
+  },
+  "learned": {
+    "ridge_lambda": 1.0,
+    "confidence_beta": 1.0,
+    "switch_margin_ms": 0.25,
+    "minimum_action_observations": 4
+  },
+  "harm": {
+    "relative_to_h0_percent": 3.0
+  },
+  "overhead_gates": {
+    "p99_choose_microseconds_max": 50.0,
+    "measured_max_choose_microseconds_report_only": true,
+    "scheduler_cpu_ratio_p99_max": 0.01,
+    "hot_loop_allocations": 0,
+    "cuda_synchronizations": 0
+  },
+  "confirmatory": {
+    "minimum_pairs_per_regime": 20,
+    "bootstrap_samples": 10000,
+    "bootstrap_seed": 6042026,
+    "negative_results_retained": true
+  }
+}
