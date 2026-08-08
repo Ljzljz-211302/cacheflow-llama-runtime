@@ -73,6 +73,7 @@ class ShortLivedAcceptance:
     performance_status: str
     paired_regression: float
     choose_p99_us: float
+    choose_samples: int
     cacheflow_decisions: int
     non_probe_cacheflow_decisions: int
     violation: str = ""
@@ -97,6 +98,9 @@ def evaluate_short_lived_acceptance(
         float(row["upstream_regression_ratio"]) for row in learned_rows
     )
     choose_p99_us = max(float(row["benefit_choose_p99_us"]) for row in learned_rows)
+    choose_samples = round(
+        sum(float(row["benefit_choose_samples"]) for row in learned_rows)
+    )
     cacheflow_decisions = round(
         sum(float(row["cacheflow_decisions"]) for row in learned_rows)
     )
@@ -104,12 +108,24 @@ def evaluate_short_lived_acceptance(
         sum(float(row["exploration_decisions"]) for row in learned_rows)
     )
     non_probe = max(0, cacheflow_decisions - exploration_decisions)
+    if choose_samples <= 0:
+        return ShortLivedAcceptance(
+            False,
+            "chooser_evidence_missing",
+            paired_regression,
+            choose_p99_us,
+            choose_samples,
+            cacheflow_decisions,
+            non_probe,
+            "choose latency histogram has no learned-policy samples",
+        )
     if choose_p99_us > maximum_choose_p99_us:
         return ShortLivedAcceptance(
             False,
             "chooser_over_budget",
             paired_regression,
             choose_p99_us,
+            choose_samples,
             cacheflow_decisions,
             non_probe,
             f"choose P99 {choose_p99_us:.1f} us exceeds {maximum_choose_p99_us:.1f} us",
@@ -120,6 +136,7 @@ def evaluate_short_lived_acceptance(
             "non_regressed",
             paired_regression,
             choose_p99_us,
+            choose_samples,
             cacheflow_decisions,
             non_probe,
         )
@@ -129,6 +146,7 @@ def evaluate_short_lived_acceptance(
             "inconclusive_no_intervention",
             paired_regression,
             choose_p99_us,
+            choose_samples,
             cacheflow_decisions,
             non_probe,
         )
@@ -137,6 +155,7 @@ def evaluate_short_lived_acceptance(
         "regressed_with_intervention",
         paired_regression,
         choose_p99_us,
+        choose_samples,
         cacheflow_decisions,
         non_probe,
         f"paired median regression {paired_regression:.1%} exceeds {maximum_regression:.1%}",

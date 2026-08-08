@@ -62,12 +62,14 @@ llamacpp:benefit_choose_duration_us_bucket{backend="cuda",le="+Inf"} 100
                 "upstream_regression_ratio": 0.08,
                 "cacheflow_decisions": 0.0,
                 "exploration_decisions": 0.0,
+                "benefit_choose_samples": 10.0,
                 "benefit_choose_p99_us": 20.0,
             },
             {
                 "upstream_regression_ratio": 0.06,
                 "cacheflow_decisions": 0.0,
                 "exploration_decisions": 0.0,
+                "benefit_choose_samples": 10.0,
                 "benefit_choose_p99_us": 50.0,
             },
         ]
@@ -91,6 +93,7 @@ llamacpp:benefit_choose_duration_us_bucket{backend="cuda",le="+Inf"} 100
                 "upstream_regression_ratio": 0.06,
                 "cacheflow_decisions": 4.0,
                 "exploration_decisions": 1.0,
+                "benefit_choose_samples": 10.0,
                 "benefit_choose_p99_us": 20.0,
             }
         ]

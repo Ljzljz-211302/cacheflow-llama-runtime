@@ -156,6 +156,19 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
     backend_label = "cuda" if cuda else "cpu"
     short_ttft = [float(row["ttft_ms"]) for row in rows if row["kind"] == "short_decode"]
     objective = percentile(short_ttft, 0.95) + 0.25 * burst_ms
+    benefit_choose_samples = metric(
+        prometheus, "benefit_choose_duration_us_count", {"backend": backend_label}
+    )
+    benefit_choose_p99_us = (
+        prometheus_histogram_quantile_upper_bound(
+            prometheus,
+            "benefit_choose_duration_us",
+            {"backend": backend_label},
+            0.99,
+        )
+        if benefit_choose_samples > 0
+        else 0.0
+    )
     return {
         "backend": backend,
         "mode": mode,
@@ -184,12 +197,8 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
             prometheus, "benefit_reason_total",
             {"backend": backend_label, "reason": "insufficient_evidence"},
         ),
-        "benefit_choose_p99_us": prometheus_histogram_quantile_upper_bound(
-            prometheus,
-            "benefit_choose_duration_us",
-            {"backend": backend_label},
-            0.99,
-        ),
+        "benefit_choose_samples": benefit_choose_samples,
+        "benefit_choose_p99_us": benefit_choose_p99_us,
         "oracle_objective_ms": "",
         "oracle_regret_ratio": "",
         "upstream_regression_ratio": "",
@@ -264,6 +273,7 @@ def main() -> None:
                 "cacheflow_decisions": sum(float(row["cacheflow_decisions"]) for row in group),
                 "exploration_decisions": sum(float(row["exploration_decisions"]) for row in group),
                 "positive_lower_bound_decisions": sum(float(row["positive_lower_bound_decisions"]) for row in group),
+                "benefit_choose_samples": sum(float(row["benefit_choose_samples"]) for row in group),
                 "benefit_choose_p99_us": max(float(row["benefit_choose_p99_us"]) for row in group),
                 "exact_hash_match_ratio": statistics.median(float(row["exact_hash_match_ratio"]) for row in group),
                 "paired_upstream_regression_ratio": (
@@ -294,6 +304,7 @@ def main() -> None:
             "cacheflow_decisions": 0.0,
             "exploration_decisions": 0.0,
             "positive_lower_bound_decisions": 0.0,
+            "benefit_choose_samples": 0.0,
             "benefit_choose_p99_us": 0.0,
             "exact_hash_match_ratio": 1.0,
             "paired_upstream_regression_ratio": "",
