@@ -9,6 +9,9 @@ from typing import Any
 
 from production_journey import ROOT, cuda_environment, get_text, metric, request_json, wait_ready
 
+
+CROSS_PAGE_PROMPT = " one" * 17
+
 def stop_process(process: subprocess.Popen[bytes], launcher: list[str] | None) -> None:
     if not launcher:
         process.terminate()
@@ -51,7 +54,7 @@ def run_mode(
     label: str = "journey",
     launcher: list[str] | None = None,
     flash_attention: bool = True,
-    prompt: str = "Briefly say hello.",
+    prompt: str = CROSS_PAGE_PROMPT,
     n_probs: int = 0,
     launcher_manages_lifetime: bool = False,
 ) -> tuple[dict[str, Any], str, Path]:
@@ -154,6 +157,13 @@ def main() -> None:
     )
     if direct["content"] != paged["content"]:
         raise AssertionError("production Paged output differs from deterministic Direct output")
+    paged_context_tokens = int(paged["timings"]["cache_n"]) + int(
+        paged["timings"]["prompt_n"]
+    )
+    if paged_context_tokens != 17:
+        raise AssertionError(
+            f"production Paged request did not cross the page-16 boundary: {paged_context_tokens}"
+        )
     if direct["content"] != direct_reference["content"]:
         raise AssertionError("native Flash and non-Flash references select different top-1 tokens")
     direct_probs = direct.get("completion_probabilities", [{}])[0].get("top_logprobs", [])
@@ -215,6 +225,7 @@ def main() -> None:
         "paged_calls": paged_calls,
         "paged_fallbacks": paged_fallbacks,
         "paged_reason_decisions": paged_reason_decisions,
+        "paged_context_tokens": paged_context_tokens,
         "top_logprob_count": len(direct_by_id),
         "paged_top_logprob_overlap": len(paged_common),
         "max_logprob_error": max_logprob_error,

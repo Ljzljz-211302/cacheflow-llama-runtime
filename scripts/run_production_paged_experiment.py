@@ -132,6 +132,13 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
     by_pair = {pair: {} for pair in range(1, pairs + 1)}
     for row in rows:
         by_pair[int(row["pair"])][str(row["action"])] = row
+        expected_order = ("direct", "paged") if int(row["pair"]) % 2 else ("paged", "direct")
+        order_in_pair = int(row.get("order_in_pair", 0))
+        if order_in_pair not in (1, 2) or row["action"] != expected_order[order_in_pair - 1]:
+            raise AssertionError("artifact trial order differs from preregistered AB/BA order")
+        expected_context = int(protocol["production_envelope"]["measured_context_tokens"])
+        if int(row["cache_tokens"]) + int(row["prompt_tokens"]) != expected_context:
+            raise AssertionError("artifact trial did not cross the registered page boundary")
         if row["action"] == "paged" and (row["paged_calls"] < 1 or row["paged_fallbacks"] != 0):
             raise AssertionError("artifact contains a Paged trial outside the production graph")
         if row["action_observations"] < 1:
@@ -149,18 +156,68 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
         raise AssertionError("Paged summary is not derived from raw trials")
     if summary["paired_paged_minus_direct_ms"] != summarize(effects):
         raise AssertionError("paired effect summary is not derived from raw trials")
+    bootstrap_interval = bootstrap_median_interval(
+        effects, int(protocol["random_seed"]), resamples=10000,
+    )
+    p95_regression = (
+        summary["paged_client_elapsed_ms"]["p95"]
+        / summary["direct_client_elapsed_ms"]["p95"] - 1.0
+    ) * 100.0
+    promotion_limit = float(
+        protocol["acceptance"]["promotion_latency_p95_maximum_regression_percent"]
+    )
+    expected_conclusions = {
+        "schema_version": 1,
+        "protocol_version": protocol["protocol_version"],
+        "paired_trials": pairs,
+        "paired_median_bootstrap_95_ms": bootstrap_interval,
+        "p95_regression_percent": p95_regression,
+        "promotion_limit_percent": promotion_limit,
+        "promotion_passed": p95_regression <= promotion_limit,
+        "correctness_passed": all(
+            pair["direct"]["content"] == pair["paged"]["content"]
+            for pair in by_pair.values()
+        ),
+        "production_graph_entries": int(sum(
+            row["paged_calls"] for row in rows if row["action"] == "paged"
+        )),
+        "paged_fallbacks": int(sum(
+            row["paged_fallbacks"] for row in rows if row["action"] == "paged"
+        )),
+    }
+    for field, expected in expected_conclusions.items():
+        if summary.get(field) != expected:
+            raise AssertionError(f"{field} is not derived from raw trials and protocol")
+    if not summary.get("worktree_clean_before_run"):
+        raise AssertionError("formal artifact was not collected from a clean worktree")
+    expected_device = protocol["device"]
+    observed_device = summary.get("device", {})
+    if any(observed_device.get(field) != expected_device[field]
+           for field in ("name", "compute_capability")):
+        raise AssertionError("artifact device differs from the preregistered device")
     mechanism = json.loads((output / "mechanism.json").read_text(encoding="utf-8"))
+    reparsed_mechanism = parse_nsys_sqlite(
+        output / "profile/production-paged.sqlite",
+        kernel_patterns=("cacheflow_paged_decode_fattn_k1",),
+    )
+    for field, expected in reparsed_mechanism.items():
+        if mechanism.get(field) != expected:
+            raise AssertionError(f"mechanism {field} is not derived from the NSYS SQLite")
     if mechanism["kernel_launches"] != 24 or not any(
         "cacheflow_paged_decode_fattn_k1" in name for name in mechanism["kernel_names"]
     ):
         raise AssertionError("profile does not contain one production Paged kernel per model layer")
+    if summary.get("nsys_production_paged_kernel_launches") != mechanism["kernel_launches"]:
+        raise AssertionError("summary kernel launch count differs from mechanism evidence")
+    if summary.get("nsys_production_paged_kernel_duration_ms_non_primary") != mechanism["kernel_duration_ms"]:
+        raise AssertionError("summary kernel duration differs from mechanism evidence")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--protocol", type=Path,
-        default=ROOT / "config/production_paged_protocol.json",
+        default=ROOT / "config/production_paged_protocol_v1.1.json",
     )
     parser.add_argument(
         "--server", type=Path,
@@ -172,7 +229,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--output", type=Path,
-        default=ROOT / "results/research/h7-production-paged-v1.0.0",
+        default=ROOT / "results/research/h7-production-paged-v1.1.0",
     )
     parser.add_argument("--port-base", type=int, default=8140)
     parser.add_argument("--validate-only", action="store_true")
@@ -203,7 +260,7 @@ def main() -> None:
             label = f"experiment-pair-{pair:02d}-{order_in_pair}"
             result, metrics, log_path = run_mode(
                 args.server, args.model, args.port_base + (pair - 1) * 2 + order_in_pair - 1,
-                action, label,
+                action, label, prompt=str(protocol["request"]["prompt"]),
             )
             artifact_log = raw_output / f"{action}-pair-{pair:02d}-{order_in_pair}.log"
             shutil.copy2(log_path, artifact_log)
@@ -268,6 +325,7 @@ def main() -> None:
     profile_result, _, profile_log = run_mode(
         args.server, args.model, args.port_base + pairs * 2, "paged", "formal-nsys",
         launcher=nsys_launcher, launcher_manages_lifetime=True,
+        prompt=str(protocol["request"]["prompt"]),
     )
     report_source = raw_prefix.with_suffix(".nsys-rep")
     if not report_source.exists():

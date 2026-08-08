@@ -18,10 +18,10 @@ index 9e7b125..6195e3f 100644
  license_add_file("llama.cpp" "LICENSE")
  
 diff --git a/common/arg.cpp b/common/arg.cpp
-index 8382c1d..127808f 100644
+index 8382c1d..f393937 100644
 --- a/common/arg.cpp
 +++ b/common/arg.cpp
-@@ -3256,6 +3256,312 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3256,6 +3256,341 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
              params.slot_prompt_similarity = std::stof(value);
          }
      ).set_examples({LLAMA_EXAMPLE_SERVER}));
@@ -214,6 +214,35 @@ index 8382c1d..127808f 100644
 +        }
 +    ).set_examples({LLAMA_EXAMPLE_SERVER}));
 +    add_opt(common_arg(
++        {"--kv-paged-decode"},
++        "enable the evidence-gated production paged-decode capability",
++        [](common_params & params) {
++            params.kv_paged_decode = true;
++            params.kv_block_runtime = true;
++            params.kv_block_size = 16;
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
++        {"--kv-action-override"}, "none|direct|remap|paged|recompute",
++        "controlled action selection for correctness and application-journey tests",
++        [](common_params & params, const std::string & value) {
++            using override = common_params::kv_action_override;
++            if (value == "none") {
++                params.kv_action_override_mode = override::none;
++            } else if (value == "direct") {
++                params.kv_action_override_mode = override::direct;
++            } else if (value == "remap") {
++                params.kv_action_override_mode = override::remap;
++            } else if (value == "paged") {
++                params.kv_action_override_mode = override::paged;
++            } else if (value == "recompute") {
++                params.kv_action_override_mode = override::recompute;
++            } else {
++                throw std::invalid_argument("KV action override is invalid");
++            }
++        }
++    ).set_examples({LLAMA_EXAMPLE_SERVER}));
++    add_opt(common_arg(
 +        {"--kv-action-min-observations"}, "N",
 +        "completed observations required per action before learned comparison",
 +        [](common_params & params, int value) {
@@ -334,7 +363,7 @@ index 8382c1d..127808f 100644
      add_opt(common_arg(
          {"--lora-init-without-apply"},
          string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),
-@@ -3413,6 +3719,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
+@@ -3413,6 +3748,53 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
  
      //
      // speculative parameters
@@ -389,10 +418,10 @@ index 8382c1d..127808f 100644
  
      add_opt(common_arg(
 diff --git a/common/common.h b/common/common.h
-index 0b284cb..a2897c0 100644
+index 0b284cb..4f5be0a 100644
 --- a/common/common.h
 +++ b/common/common.h
-@@ -653,6 +653,40 @@ struct common_params {
+@@ -653,6 +653,49 @@ struct common_params {
      std::string media_path; // path to directory for loading media files
  
      float slot_prompt_similarity = 0.1f;
@@ -426,6 +455,15 @@ index 0b284cb..a2897c0 100644
 +    int32_t kv_swap_budget_mib = 0;
 +    std::string kv_swap_fault = "none";
 +    std::string kv_action_policy = "learned-shadow";
++    bool kv_paged_decode = false;
++    enum class kv_action_override : uint8_t {
++        none,
++        direct,
++        remap,
++        paged,
++        recompute,
++    };
++    kv_action_override kv_action_override_mode = kv_action_override::none;
 +    int32_t kv_action_min_observations = 8;
 +    float kv_action_confidence_beta = 1.0f;
 +    float kv_action_switch_margin_ms = 0.25f;
@@ -433,8 +471,354 @@ index 0b284cb..a2897c0 100644
  
      // batched-bench params
      bool is_pp_shared   = false;
+diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
+index d6807b6..35379c7 100644
+--- a/ggml/include/ggml.h
++++ b/ggml/include/ggml.h
+@@ -2427,6 +2427,15 @@ extern "C" {
+             struct ggml_tensor * a,
+             struct ggml_tensor * sinks);
+ 
++    // Restricted decode-only paged KV mode. block_table contains physical KV
++    // cell bases (one per logical block); context_lengths contains one length
++    // per sequence. Backends that cannot honor this contract must reject op.
++    GGML_API void ggml_flash_attn_ext_set_paged(
++            struct ggml_tensor * a,
++            struct ggml_tensor * block_table,
++            struct ggml_tensor * context_lengths,
++            int32_t              page_size);
++
+     // TODO: needs to be adapted to ggml_flash_attn_ext
+     GGML_API struct ggml_tensor * ggml_flash_attn_back(
+            struct ggml_context * ctx,
+diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
+index 74611dc..cd041e6 100644
+--- a/ggml/src/ggml-cpu/ops.cpp
++++ b/ggml/src/ggml-cpu/ops.cpp
+@@ -8317,6 +8317,31 @@ void ggml_compute_forward_top_k(
+     }
+ }
+ 
++static int64_t ggml_flash_attn_ext_logical_kv_count(const ggml_tensor * dst) {
++    if (dst->src[6] == nullptr) {
++        return dst->src[1]->ne[1];
++    }
++    GGML_ASSERT(dst->src[5] != nullptr);
++    GGML_ASSERT(dst->src[6]->type == GGML_TYPE_I32);
++    const int64_t count = ((const int32_t *) dst->src[6]->data)[0];
++    GGML_ASSERT(count > 0 && count <= dst->src[1]->ne[1]);
++    return count;
++}
++
++static int64_t ggml_flash_attn_ext_physical_kv_cell(
++        const ggml_tensor * dst, int64_t logical_cell) {
++    if (dst->src[5] == nullptr) {
++        return logical_cell;
++    }
++    const int32_t page_size = ggml_get_op_params_i32(dst, 4);
++    const int32_t * block_table = (const int32_t *) dst->src[5]->data;
++    GGML_ASSERT(page_size > 0);
++    const int64_t physical_cell =
++        block_table[logical_cell / page_size] + logical_cell % page_size;
++    GGML_ASSERT(physical_cell >= 0 && physical_cell < dst->src[1]->ne[1]);
++    return physical_cell;
++}
++
+ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
+         const ggml_compute_params * params,
+         ggml_tensor * dst,
+@@ -8449,7 +8474,9 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
+ 
+             float s; // KQ value
+ 
+-            const char * k_data = (const char *) k->data + ( ic*nbk1 + ik2*nbk2 + ik3*nbk3);
++            const int64_t physical_cell = ggml_flash_attn_ext_physical_kv_cell(dst, ic);
++            const char * k_data = (const char *) k->data +
++                (physical_cell*nbk1 + ik2*nbk2 + ik3*nbk3);
+             kq_vec_dot(DK, &s, 0, k_data, 0, Q_q, 0, 1);
+ 
+             s = s*scale; // scale KQ value
+@@ -8465,7 +8492,8 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
+             float ms = 1.0f; // upon new higher max val, scale VKQ and KQ sum with this value
+             float vs = 1.0f; // post-softmax KQ value, expf(s - M)
+ 
+-            const char * v_data = ((const char *) v->data + (ic*nbv1 + iv2*nbv2 + iv3*nbv3));
++            const char * v_data = ((const char *) v->data +
++                (physical_cell*nbv1 + iv2*nbv2 + iv3*nbv3));
+ 
+             if (v->type == GGML_TYPE_F16) {
+                 if (s > M) {
+@@ -8698,8 +8726,9 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
+         memset(K_f32, 0, DK * KV_TILE_SZ * sizeof(float));
+         memset(V32,   0, KV_TILE_SZ * DV * sizeof(float));
+ 
+-        for (int64_t ic = 0; ic < nek1; ic += KV_TILE_SZ) {
+-            const int kv_tile = (int)std::min((int64_t)KV_TILE_SZ, nek1 - ic);
++        const int64_t logical_kv_count = ggml_flash_attn_ext_logical_kv_count(dst);
++        for (int64_t ic = 0; ic < logical_kv_count; ic += KV_TILE_SZ) {
++            const int kv_tile = (int)std::min((int64_t)KV_TILE_SZ, logical_kv_count - ic);
+ 
+             // skip the tile entirely if all the masks are -inf
+             if (mask) {
+@@ -8726,7 +8755,10 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
+             // Pack K tile transposed: K_f32[dk][kv] so KV_TILE is contiguous (SIMD dim)
+             // Zero-pad the last tile so the GEMM always operates on KV_TILE_SZ columns
+             for (int tk = 0; tk < kv_tile; tk++) {
+-                const char * k_data = (const char *)k->data + (ic + tk)*nbk1 + ik2*nbk2 + ik3*nbk3;
++                const int64_t physical_cell =
++                    ggml_flash_attn_ext_physical_kv_cell(dst, ic + tk);
++                const char * k_data = (const char *)k->data +
++                    physical_cell*nbk1 + ik2*nbk2 + ik3*nbk3;
+                 if (kv_type == GGML_TYPE_F16) {
+                     const ggml_fp16_t * k_f16 = (const ggml_fp16_t *)k_data;
+                     for (int64_t dk = 0; dk < DK; dk++) {
+@@ -8791,7 +8823,10 @@ static void ggml_compute_forward_flash_attn_ext_tiled(
+             // V accumulation: VKQ32 += softmax(KQ) * V
+             // Pack V tile to contiguous F32, zero-padded
+             for (int tk = 0; tk < kv_tile; tk++) {
+-                const char * v_data = (const char *)v->data + (ic + tk)*nbv1 + iv2*nbv2 + iv3*nbv3;
++                const int64_t physical_cell =
++                    ggml_flash_attn_ext_physical_kv_cell(dst, ic + tk);
++                const char * v_data = (const char *)v->data +
++                    physical_cell*nbv1 + iv2*nbv2 + iv3*nbv3;
+                 if (kv_type == GGML_TYPE_F16) {
+                     ggml_fp16_to_fp32_row((const ggml_fp16_t *)v_data, V32 + tk * DV, DV);
+                 } else {
+@@ -8964,22 +8999,23 @@ static void ggml_compute_forward_flash_attn_ext_f16(
+     const bool use_ref = params->use_ref;
+ 
+     const bool kv_is_f32_or_f16 = (k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16);
+-    const bool use_split_kv_path = !use_ref && (neq1 == 1 && neq3 == 1) && kv_is_f32_or_f16 && (k->type == v->type) && q->type == GGML_TYPE_F32 && nek1 >= 512;
++    const int64_t logical_kv_count = ggml_flash_attn_ext_logical_kv_count(dst);
++    const bool use_split_kv_path = !use_ref && (neq1 == 1 && neq3 == 1) && kv_is_f32_or_f16 && (k->type == v->type) && q->type == GGML_TYPE_F32 && logical_kv_count >= 512;
+ 
+     if (use_split_kv_path) {
+-        const int64_t chunk_size = (nek1 + nth - 1) / nth;
++        const int64_t chunk_size = (logical_kv_count + nth - 1) / nth;
+ 
+         // Partials buffer layout: [q_head][kv_chunk][M, S, VKQ]
+         const int64_t partial_size  = 2 + DV;
+         float *       partials_base = (float *) params->wdata + nth * (DK + 2*DV + CACHE_LINE_SIZE_F32);
+ 
+         const int64_t ic_start = ith * chunk_size;
+-        const int64_t ic_end   = std::min(ic_start + chunk_size, nek1);
++        const int64_t ic_end   = std::min(ic_start + chunk_size, logical_kv_count);
+ 
+         const int64_t partial_stride = nth * partial_size;
+         float *       chunk_partials = partials_base + ith * partial_size;
+ 
+-        if (ic_start < nek1) {
++        if (ic_start < logical_kv_count) {
+             for (int64_t q_head = 0; q_head < neq2; q_head++) {
+                 ggml_compute_forward_flash_attn_ext_f16_one_chunk(
+                     params, dst, q_head, q_head + 1, ic_start, ic_end,
+@@ -9043,7 +9079,8 @@ static void ggml_compute_forward_flash_attn_ext_f16(
+             if (use_tiled) {
+                 ggml_compute_forward_flash_attn_ext_tiled(params, dst, ir0, ir1);
+             } else {
+-                ggml_compute_forward_flash_attn_ext_f16_one_chunk(params, dst, ir0, ir1, 0, nek1, nullptr, 0);
++                ggml_compute_forward_flash_attn_ext_f16_one_chunk(
++                    params, dst, ir0, ir1, 0, logical_kv_count, nullptr, 0);
+             }
+ 
+             current_chunk = ggml_threadpool_chunk_add(params->threadpool, 1);
+diff --git a/ggml/src/ggml-cuda/fattn-paged.cuh b/ggml/src/ggml-cuda/fattn-paged.cuh
+new file mode 100644
+index 0000000..8b7d386
+--- /dev/null
++++ b/ggml/src/ggml-cuda/fattn-paged.cuh
+@@ -0,0 +1,122 @@
++#pragma once
++
++#include "common.cuh"
++
++#include <cfloat>
++#include <type_traits>
++
++template<int head_dim, typename query_type>
++static __global__ void cacheflow_paged_decode_fattn_k1(
++        const char * query,
++        const char * key,
++        const char * value,
++        const int32_t * block_table,
++        const int32_t * context_lengths,
++        float * output,
++        uint64_t q_head_stride,
++        uint64_t k_token_stride,
++        uint64_t k_head_stride,
++        uint64_t v_token_stride,
++        uint64_t v_head_stride,
++        int32_t query_heads,
++        int32_t kv_heads,
++        int32_t max_blocks,
++        int32_t page_size,
++        float scale) {
++    const int32_t query_head = blockIdx.x;
++    const int32_t dim = threadIdx.x;
++    const int32_t kv_head = query_head / (query_heads / kv_heads);
++    const int32_t context = context_lengths[0];
++    const query_type * q = reinterpret_cast<const query_type *>(query + query_head * q_head_stride);
++    float accumulator = 0.0f;
++
++    __shared__ float reduction[head_dim];
++    __shared__ float online[4];
++    if (dim == 0) {
++        online[0] = -FLT_MAX;
++        online[1] = 0.0f;
++    }
++    __syncthreads();
++
++    for (int32_t token = 0; token < context; ++token) {
++        const int32_t logical_block = token / page_size;
++        if (logical_block >= max_blocks) return;
++        const int32_t cell = block_table[logical_block] + token % page_size;
++        const __half * k = reinterpret_cast<const __half *>(
++                key + (uint64_t) cell * k_token_stride + (uint64_t) kv_head * k_head_stride);
++        const __half * v = reinterpret_cast<const __half *>(
++                value + (uint64_t) cell * v_token_stride + (uint64_t) kv_head * v_head_stride);
++        float query_value;
++        if constexpr (std::is_same<query_type, __half>::value) {
++            query_value = __half2float(q[dim]);
++        } else {
++            query_value = q[dim];
++        }
++        reduction[dim] = query_value * __half2float(k[dim]);
++        __syncthreads();
++        for (int32_t stride = head_dim / 2; stride > 0; stride /= 2) {
++            if (dim < stride) reduction[dim] += reduction[dim + stride];
++            __syncthreads();
++        }
++        if (dim == 0) {
++            const float score = reduction[0] * scale;
++            const float next_max = fmaxf(online[0], score);
++            const float alpha = online[1] == 0.0f ? 0.0f : expf(online[0] - next_max);
++            const float beta = expf(score - next_max);
++            online[0] = next_max;
++            online[1] = online[1] * alpha + beta;
++            online[2] = alpha;
++            online[3] = beta;
++        }
++        __syncthreads();
++        accumulator = accumulator * online[2] + online[3] * __half2float(v[dim]);
++        __syncthreads();
++    }
++    output[(uint64_t) query_head * head_dim + dim] = accumulator / online[1];
++}
++
++static bool ggml_cuda_paged_fattn_supported(const ggml_tensor * dst) {
++    const ggml_tensor * q = dst->src[0];
++    const ggml_tensor * k = dst->src[1];
++    const ggml_tensor * v = dst->src[2];
++    const ggml_tensor * table = dst->src[5];
++    const ggml_tensor * lengths = dst->src[6];
++    if (!table) return false;
++    const int32_t page_size = ggml_get_op_params_i32(dst, 4);
++    float max_bias = 0.0f;
++    float softcap = 0.0f;
++    memcpy(&max_bias, (const float *) dst->op_params + 1, sizeof(float));
++    memcpy(&softcap, (const float *) dst->op_params + 2, sizeof(float));
++    return lengths && (q->type == GGML_TYPE_F16 || q->type == GGML_TYPE_F32) &&
++            k->type == GGML_TYPE_F16 &&
++            v->type == GGML_TYPE_F16 && table->type == GGML_TYPE_I32 &&
++            lengths->type == GGML_TYPE_I32 && (q->ne[0] == 64 || q->ne[0] == 128) &&
++            q->ne[1] == 1 && q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1 &&
++            q->ne[2] % k->ne[2] == 0 && k->ne[2] == v->ne[2] &&
++            q->ne[0] == k->ne[0] && q->ne[0] == v->ne[0] && page_size == 16 &&
++            max_bias == 0.0f && softcap == 0.0f && dst->src[4] == nullptr;
++}
++
++static void ggml_cuda_paged_fattn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * q = dst->src[0];
++    const ggml_tensor * k = dst->src[1];
++    const ggml_tensor * v = dst->src[2];
++    float scale = 0.0f;
++    memcpy(&scale, dst->op_params, sizeof(float));
++    const int32_t page_size = ggml_get_op_params_i32(dst, 4);
++    const int32_t max_blocks = (int32_t) dst->src[5]->ne[0];
++#define CACHEFLOW_PAGED_LAUNCH(D, Q) cacheflow_paged_decode_fattn_k1<D, Q><<<q->ne[2], D, 0, ctx.stream()>>>( \
++        (const char *) q->data, (const char *) k->data, (const char *) v->data, \
++        (const int32_t *) dst->src[5]->data, (const int32_t *) dst->src[6]->data, \
++        (float *) dst->data, q->nb[2], k->nb[1], k->nb[2], v->nb[1], v->nb[2], \
++        (int32_t) q->ne[2], (int32_t) k->ne[2], max_blocks, page_size, scale)
++    if (q->type == GGML_TYPE_F16) {
++        if (q->ne[0] == 64) CACHEFLOW_PAGED_LAUNCH(64, __half);
++        else CACHEFLOW_PAGED_LAUNCH(128, __half);
++    } else {
++        if (q->ne[0] == 64) CACHEFLOW_PAGED_LAUNCH(64, float);
++        else CACHEFLOW_PAGED_LAUNCH(128, float);
++    }
++#undef CACHEFLOW_PAGED_LAUNCH
++    CUDA_CHECK(cudaGetLastError());
++}
+diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
+index d6c501b..5f97b41 100644
+--- a/ggml/src/ggml-cuda/fattn.cu
++++ b/ggml/src/ggml-cuda/fattn.cu
+@@ -5,6 +5,7 @@
+ #include "fattn-vec.cuh"
+ #include "fattn-wmma-f16.cuh"
+ #include "fattn.cuh"
++#include "fattn-paged.cuh"
+ 
+ template <int DKQ, int DV, int ncols2>
+ static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+@@ -540,6 +541,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
+ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * dst) {
+     GGML_ASSERT(dst->op == GGML_OP_FLASH_ATTN_EXT);
+ 
++    // Paged K1 needs no scratch beyond the ordinary output tensor, but the
++    // buffer allocator still requires the output bytes themselves.
++    if (dst->src[5]) return ggml_nbytes(dst);
+     const ggml_tensor * K = dst->src[1];
+     const ggml_tensor * V = dst->src[2];
+ 
+@@ -574,6 +578,11 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
+ 
+ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+     ggml_cuda_set_device(ctx.device);
++    if (dst->src[5]) {
++        GGML_ASSERT(ggml_cuda_paged_fattn_supported(dst));
++        ggml_cuda_paged_fattn(ctx, dst);
++        return;
++    }
+     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+         case BEST_FATTN_KERNEL_NONE:
+             GGML_ABORT("fatal error");
+@@ -593,5 +602,6 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
+ }
+ 
+ bool ggml_cuda_flash_attn_ext_supported(int device, const ggml_tensor * dst) {
++    if (dst->src[5]) return ggml_cuda_paged_fattn_supported(dst);
+     return ggml_cuda_get_best_fattn_kernel(device, dst) != BEST_FATTN_KERNEL_NONE;
+ }
+diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index b43016c..149ca39 100644
+--- a/ggml/src/ggml.c
++++ b/ggml/src/ggml.c
+@@ -5442,6 +5442,21 @@ void ggml_flash_attn_ext_add_sinks(
+     a->src[4] = sinks;
+ }
+ 
++void ggml_flash_attn_ext_set_paged(
++        struct ggml_tensor * a,
++        struct ggml_tensor * block_table,
++        struct ggml_tensor * context_lengths,
++        int32_t              page_size) {
++    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
++    GGML_ASSERT(a->src[4] == NULL);
++    GGML_ASSERT(block_table && block_table->type == GGML_TYPE_I32);
++    GGML_ASSERT(context_lengths && context_lengths->type == GGML_TYPE_I32);
++    GGML_ASSERT(page_size > 0);
++    a->src[5] = block_table;
++    a->src[6] = context_lengths;
++    ggml_set_op_params_i32(a, 4, page_size);
++}
++
+ // ggml_flash_attn_back
+ 
+ struct ggml_tensor * ggml_flash_attn_back(
 diff --git a/include/llama.h b/include/llama.h
-index 27e4806..224cea0 100644
+index 27e4806..c2708a5 100644
 --- a/include/llama.h
 +++ b/include/llama.h
 @@ -730,6 +730,37 @@ extern "C" {
@@ -475,11 +859,60 @@ index 27e4806..224cea0 100644
      // Removes all tokens that do not belong to the specified sequence
      LLAMA_API void llama_memory_seq_keep(
              llama_memory_t mem,
+@@ -978,6 +1009,40 @@ extern "C" {
+     // If set to true, the model will only attend to the past tokens
+     LLAMA_API void llama_set_causal_attn(struct llama_context * ctx, bool causal_attn);
+ 
++    enum llama_kv_execution_action {
++        LLAMA_KV_EXECUTION_ACTION_DIRECT = 0,
++        LLAMA_KV_EXECUTION_ACTION_REMAP  = 1,
++        LLAMA_KV_EXECUTION_ACTION_PAGED  = 2,
++    };
++
++    // Stable, public reason codes for a requested Paged action becoming
++    // Direct before any KV mutation.
++    enum llama_kv_execution_fallback_reason {
++        LLAMA_KV_EXECUTION_FALLBACK_NONE                 = 0,
++        LLAMA_KV_EXECUTION_FALLBACK_INVALID_PAGE_SIZE    = 1,
++        LLAMA_KV_EXECUTION_FALLBACK_EMPTY_SEQUENCE       = 2,
++        LLAMA_KV_EXECUTION_FALLBACK_MISSING_POSITION     = 3,
++        LLAMA_KV_EXECUTION_FALLBACK_DUPLICATE_POSITION   = 4,
++        LLAMA_KV_EXECUTION_FALLBACK_NON_CONTIGUOUS_BLOCK = 5,
++        LLAMA_KV_EXECUTION_FALLBACK_UNSUPPORTED_REQUEST  = 6,
++        LLAMA_KV_EXECUTION_FALLBACK_UNSUPPORTED_MODEL    = 7,
++    };
++
++    struct llama_kv_execution_status {
++        enum llama_kv_execution_action requested;
++        enum llama_kv_execution_action effective;
++        enum llama_kv_execution_fallback_reason fallback_reason;
++        uint64_t paged_decode_calls;
++        uint64_t paged_decode_fallbacks;
++    };
++
++    LLAMA_API void llama_set_kv_execution_action(
++            struct llama_context * ctx,
++            enum llama_kv_execution_action action);
++
++    LLAMA_API struct llama_kv_execution_status llama_get_kv_execution_status(
++            const struct llama_context * ctx);
++
+     // Set whether the model is in warmup mode or not
+     // If true, all model tensors are activated during llama_decode() to load and cache their weights.
+     //
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index d15ccfd..eb17aab 100644
+index d15ccfd..1d8da05 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -54,6 +54,13 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
+@@ -23,6 +23,7 @@ add_library(llama
+             llama-impl.cpp
+             llama-io.cpp
+             llama-kv-cache.cpp
++            llama-paged-decode-layout.cpp
+             llama-kv-cache-iswa.cpp
+             llama-kv-cache-dsa.cpp
+             llama-memory.cpp
+@@ -54,6 +55,13 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
  
  target_link_libraries(llama PUBLIC ggml)
  
@@ -494,10 +927,112 @@ index d15ccfd..eb17aab 100644
      set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
      target_compile_definitions(llama PRIVATE LLAMA_BUILD)
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 168dbab..24b25ec 100644
+index 168dbab..f5e8a69 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -3849,6 +3849,31 @@ void llama_memory_seq_cp(
+@@ -6,6 +6,7 @@
+ #include "llama-impl.h"
+ #include "llama-batch.h"
+ #include "llama-io.h"
++#include "llama-kv-cache.h"
+ #include "llama-memory.h"
+ #include "llama-mmap.h"
+ #include "llama-model.h"
+@@ -1168,6 +1169,14 @@ void llama_context::set_causal_attn(bool value) {
+     sched_need_reserve = true;
+ }
+ 
++void llama_context::set_kv_execution_action(enum llama_kv_execution_action action) {
++    kv_execution_status.requested = action;
++}
++
++llama_kv_execution_status llama_context::get_kv_execution_status() const {
++    return kv_execution_status;
++}
++
+ void llama_context::set_warmup(bool value) {
+     LLAMA_LOG_DEBUG("%s: value = %d\n", __func__, value);
+ 
+@@ -1818,6 +1827,53 @@ int llama_context::decode(const llama_batch & batch_inp) {
+     do {
+         const auto & ubatch = mctx->get_ubatch();
+ 
++        paged_decode_effective = false;
++        kv_execution_status.effective = kv_execution_status.requested;
++        kv_execution_status.fallback_reason = LLAMA_KV_EXECUTION_FALLBACK_NONE;
++        if (kv_execution_status.requested == LLAMA_KV_EXECUTION_ACTION_PAGED) {
++            llama_paged_decode_layout layout;
++            const auto * kv_mctx = dynamic_cast<llama_kv_cache_context *>(mctx.get());
++            const auto layout_status = kv_mctx ? kv_mctx->build_paged_decode_layout(ubatch, layout) :
++                    llama_paged_decode_layout_status::unsupported_request;
++            const bool model_supported = model.arch == LLM_ARCH_QWEN2 &&
++                    model.hparams.n_head() == 14 && model.hparams.n_head_kv() == 2 &&
++                    model.hparams.n_embd_head_k() == 64 && model.hparams.n_layer() == 24 &&
++                    model.hparams.f_max_alibi_bias == 0.0f && !model.hparams.attn_soft_cap &&
++                    model.n_gpu_layers() > model.hparams.n_layer();
++            paged_decode_effective = layout_status == llama_paged_decode_layout_status::success &&
++                    layout.context_length <= 17 && model_supported && cparams.flash_attn &&
++                    cparams.causal_attn;
++            if (paged_decode_effective) {
++                kv_execution_status.paged_decode_calls++;
++            } else {
++                kv_execution_status.effective = LLAMA_KV_EXECUTION_ACTION_DIRECT;
++                switch (layout_status) {
++                    case llama_paged_decode_layout_status::success:
++                        kv_execution_status.fallback_reason = LLAMA_KV_EXECUTION_FALLBACK_UNSUPPORTED_MODEL;
++                        break;
++                    case llama_paged_decode_layout_status::invalid_page_size:
++                        kv_execution_status.fallback_reason = LLAMA_KV_EXECUTION_FALLBACK_INVALID_PAGE_SIZE;
++                        break;
++                    case llama_paged_decode_layout_status::empty_sequence:
++                        kv_execution_status.fallback_reason = LLAMA_KV_EXECUTION_FALLBACK_EMPTY_SEQUENCE;
++                        break;
++                    case llama_paged_decode_layout_status::missing_position:
++                        kv_execution_status.fallback_reason = LLAMA_KV_EXECUTION_FALLBACK_MISSING_POSITION;
++                        break;
++                    case llama_paged_decode_layout_status::duplicate_position:
++                        kv_execution_status.fallback_reason = LLAMA_KV_EXECUTION_FALLBACK_DUPLICATE_POSITION;
++                        break;
++                    case llama_paged_decode_layout_status::non_contiguous_block:
++                        kv_execution_status.fallback_reason = LLAMA_KV_EXECUTION_FALLBACK_NON_CONTIGUOUS_BLOCK;
++                        break;
++                    case llama_paged_decode_layout_status::unsupported_request:
++                        kv_execution_status.fallback_reason = LLAMA_KV_EXECUTION_FALLBACK_UNSUPPORTED_REQUEST;
++                        break;
++                }
++                kv_execution_status.paged_decode_fallbacks++;
++            }
++        }
++
+         // count the outputs in this ubatch
+         {
+             int32_t n_outputs_new = 0;
+@@ -2401,6 +2457,7 @@ llm_graph_params llama_context::graph_params(
+         /*.cparams     =*/ cparams,
+         /*.ubatch      =*/ ubatch,
+         /*.gtype       =*/ gtype,
++        /*.paged_decode=*/ paged_decode_effective,
+         /*.sched       =*/ sched.get(),
+         /*.backend_cpu =*/ backend_cpu,
+         /*.cvec        =*/ cvec.get(),
+@@ -3645,6 +3702,16 @@ void llama_set_causal_attn(llama_context * ctx, bool causal_attn) {
+     ctx->set_causal_attn(causal_attn);
+ }
+ 
++void llama_set_kv_execution_action(
++        llama_context * ctx,
++        enum llama_kv_execution_action action) {
++    ctx->set_kv_execution_action(action);
++}
++
++struct llama_kv_execution_status llama_get_kv_execution_status(const llama_context * ctx) {
++    return ctx->get_kv_execution_status();
++}
++
+ void llama_set_warmup(llama_context * ctx, bool warmup) {
+     ctx->set_warmup(warmup);
+ }
+@@ -3849,6 +3916,31 @@ void llama_memory_seq_cp(
      mem->seq_cp(seq_id_src, seq_id_dst, p0, p1);
  }
  
@@ -529,6 +1064,200 @@ index 168dbab..24b25ec 100644
  void llama_memory_seq_keep(
          llama_memory_t mem,
            llama_seq_id seq_id) {
+diff --git a/src/llama-context.h b/src/llama-context.h
+index 853052b..1512159 100644
+--- a/src/llama-context.h
++++ b/src/llama-context.h
+@@ -116,6 +116,8 @@ struct llama_context {
+     void set_embeddings_nextn(bool value, bool masked);
+     void set_embeddings_layer_inp(uint32_t lid, bool enable);
+     void set_causal_attn(bool value);
++    void set_kv_execution_action(enum llama_kv_execution_action action);
++    llama_kv_execution_status get_kv_execution_status() const;
+     void set_warmup(bool value);
+ 
+     void set_adapters_lora(llama_adapter_lora ** adapters, size_t n_adapters, float * scales);
+@@ -373,6 +375,15 @@ private:
+     // env: LLAMA_GRAPH_REUSE_DISABLE
+     bool graph_reuse_disable = false;
+ 
++    llama_kv_execution_status kv_execution_status {
++        LLAMA_KV_EXECUTION_ACTION_DIRECT,
++        LLAMA_KV_EXECUTION_ACTION_DIRECT,
++        LLAMA_KV_EXECUTION_FALLBACK_NONE,
++        0,
++        0,
++    };
++    bool paged_decode_effective = false;
++
+     // perf
+     mutable int64_t t_start_us  = 0;
+     mutable int64_t t_load_us   = 0;
+diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 7468bd9..bdd9061 100644
+--- a/src/llama-graph.cpp
++++ b/src/llama-graph.cpp
+@@ -495,6 +495,9 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
+     if (self_v_rot) {
+         mctx->set_input_v_rot(self_v_rot);
+     }
++    if (self_paged_decode_table) {
++        mctx->set_input_paged_decode(self_paged_decode_table, self_paged_decode_length, ubatch);
++    }
+ }
+ 
+ bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
+@@ -1030,6 +1033,7 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
+     hparams          (params.hparams),
+     cparams          (params.cparams),
+     ubatch           (params.ubatch),
++    paged_decode     (params.paged_decode),
+     n_embd           (hparams.n_embd),
+     n_layer          (hparams.n_layer()),
+     n_layer_nextn    (hparams.n_layer_nextn),
+@@ -2059,7 +2063,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+          ggml_tensor * sinks,
+          ggml_tensor * v_mla,
+                float   kq_scale,
+-                 int   il) const {
++                 int   il,
++       ggml_tensor * paged_decode_table,
++       ggml_tensor * paged_decode_length) const {
+     const bool v_trans = v->nb[1] > v->nb[2];
+ 
+     // split the batch into streams if needed
+@@ -2090,12 +2096,20 @@ ggml_tensor * llm_graph_context::build_attn_mha(
+             v = ggml_cast(ctx0, v, GGML_TYPE_F16);
+         }
+ 
++        if (paged_decode_table && q->type != GGML_TYPE_F16) {
++            q = ggml_cast(ctx0, q, GGML_TYPE_F16);
++        }
++
+         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
+                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
+         cb(cur, LLAMA_TENSOR_NAME_FATTN, il);
+ 
+         ggml_flash_attn_ext_add_sinks(cur, sinks);
+         ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
++        if (paged_decode_table) {
++            GGML_ASSERT(sinks == nullptr);
++            ggml_flash_attn_ext_set_paged(cur, paged_decode_table, paged_decode_length, 16);
++        }
+ 
+         if (v_mla) {
+ #if 0
+@@ -2264,10 +2278,11 @@ ggml_tensor * llm_graph_context::build_attn(
+ 
+ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
+            ggml_context * ctx0,
+-     const llama_ubatch & ubatch,
++    const llama_ubatch & ubatch,
+     const llama_hparams & hparams,
+     const llama_cparams & cparams,
+-    const llama_kv_cache_context * mctx_cur) {
++    const llama_kv_cache_context * mctx_cur,
++    bool paged_decode) {
+ 
+     auto inp = std::make_unique<llm_graph_input_attn_kv>(hparams, cparams, mctx_cur);
+ 
+@@ -2279,6 +2294,10 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
+ 
+         inp->self_kq_mask = build_attn_inp_kq_mask(ctx0, mctx_cur, ubatch, cparams);
+         inp->self_kq_mask_cnv = inp->self_kq_mask;
++        if (paged_decode) {
++            inp->self_paged_decode_table  = mctx_cur->build_input_paged_decode_table(ctx0);
++            inp->self_paged_decode_length = mctx_cur->build_input_paged_decode_length(ctx0);
++        }
+     }
+ 
+     inp->self_k_rot = mctx_cur->build_input_k_rot(ctx0);
+@@ -2290,7 +2309,7 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
+ llm_graph_input_attn_kv * llm_graph_context::build_attn_inp_kv() const {
+     const auto * mctx_cur = static_cast<const llama_kv_cache_context *>(mctx);
+ 
+-    auto inp = build_attn_inp_kv_impl(ctx0, ubatch, hparams, cparams, mctx_cur);
++    auto inp = build_attn_inp_kv_impl(ctx0, ubatch, hparams, cparams, mctx_cur, paged_decode);
+ 
+     return (llm_graph_input_attn_kv *) res->add_input(std::move(inp));
+ }
+@@ -2343,7 +2362,8 @@ ggml_tensor * llm_graph_context::build_attn(
+     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+ 
+-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
++    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il,
++            inp->get_paged_decode_table(), inp->get_paged_decode_length());
+     cb(cur, "kqv_out", il);
+ 
+     if (inp->self_v_rot) {
+@@ -2866,7 +2886,7 @@ llm_graph_input_mem_hybrid * llm_graph_context::build_inp_mem_hybrid() const {
+     const auto * mctx_cur = static_cast<const llama_memory_hybrid_context *>(mctx);
+ 
+     auto inp_rs   = build_rs_inp_impl     (ctx0, ubatch, mctx_cur->get_recr());
+-    auto inp_attn = build_attn_inp_kv_impl(ctx0, ubatch, hparams, cparams, mctx_cur->get_attn());
++    auto inp_attn = build_attn_inp_kv_impl(ctx0, ubatch, hparams, cparams, mctx_cur->get_attn(), false);
+ 
+     auto inp = std::make_unique<llm_graph_input_mem_hybrid>(cparams, std::move(inp_attn), std::move(inp_rs), mctx_cur);
+ 
+diff --git a/src/llama-graph.h b/src/llama-graph.h
+index cc5cfe5..b64b850 100644
+--- a/src/llama-graph.h
++++ b/src/llama-graph.h
+@@ -320,6 +320,8 @@ public:
+ 
+     ggml_tensor * get_k_idxs() const { return self_k_idxs; }
+     ggml_tensor * get_v_idxs() const { return self_v_idxs; }
++    ggml_tensor * get_paged_decode_table()  const { return self_paged_decode_table; }
++    ggml_tensor * get_paged_decode_length() const { return self_paged_decode_length; }
+ 
+     ggml_tensor * get_kq_mask() const { return self_kq_mask_cnv; }
+ 
+@@ -332,6 +334,8 @@ public:
+     // note: assumes v_rot^2 == I
+     ggml_tensor * self_k_rot = nullptr;
+     ggml_tensor * self_v_rot = nullptr;
++    ggml_tensor * self_paged_decode_table  = nullptr;
++    ggml_tensor * self_paged_decode_length = nullptr;
+ 
+     // note: these have to be copies because in order to be able to reuse a graph, its inputs
+     //       need to carry these parameters with them. otherwise, they can point to freed
+@@ -595,6 +599,8 @@ struct llm_graph_params {
+ 
+     llm_graph_type gtype;
+ 
++    bool paged_decode = false;
++
+     ggml_backend_sched_t sched;
+     ggml_backend_t backend_cpu;
+ 
+@@ -685,6 +691,7 @@ struct llm_graph_params {
+         return
+             cparams.embeddings  == other.cparams.embeddings  &&
+             cparams.causal_attn == other.cparams.causal_attn &&
++            paged_decode        == other.paged_decode        &&
+             arch  == other.arch  &&
+             gtype == other.gtype &&
+             cvec  == other.cvec  &&
+@@ -785,6 +792,7 @@ struct llm_graph_context {
+     const llama_hparams & hparams;
+     const llama_cparams & cparams;
+     const llama_ubatch  & ubatch;
++    const bool paged_decode;
+ 
+     const int64_t n_embd;
+     const int64_t n_layer;
+@@ -968,7 +976,9 @@ struct llm_graph_context {
+             ggml_tensor * sinks,   // [n_head_q]
+             ggml_tensor * v_mla,   // [n_embd_head_v_mla, n_embd_head_v, n_head_v]
+                   float   kq_scale,
+-                    int   il) const;
++                    int   il,
++            ggml_tensor * paged_decode_table = nullptr,
++            ggml_tensor * paged_decode_length = nullptr) const;
+ 
+     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
+ 
 diff --git a/src/llama-kv-cache-paged.cu b/src/llama-kv-cache-paged.cu
 new file mode 100644
 index 0000000..81ee336
@@ -904,7 +1633,7 @@ index 0000000..81ee336
 +    return success;
 +}
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 2802103..c74d73f 100644
+index 2802103..7df286d 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
 @@ -376,6 +376,63 @@ llama_kv_cache::llama_kv_cache(
@@ -1044,11 +1773,113 @@ index 2802103..c74d73f 100644
      if (do_shift) {
          if (!get_can_shift()) {
              GGML_ABORT("The current KV cache / model configuration does not support K-shift");
+@@ -2603,6 +2673,20 @@ ggml_tensor * llama_kv_cache_context::build_input_v_rot(ggml_context * ctx) cons
+     return kv->build_input_v_rot(ctx);
+ }
+ 
++ggml_tensor * llama_kv_cache_context::build_input_paged_decode_table(ggml_context * ctx) const {
++    auto * table = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (n_kv + 15) / 16);
++    ggml_set_input(table);
++    ggml_set_name(table, "paged_decode_block_table");
++    return table;
++}
++
++ggml_tensor * llama_kv_cache_context::build_input_paged_decode_length(ggml_context * ctx) const {
++    auto * length = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
++    ggml_set_input(length);
++    ggml_set_name(length, "paged_decode_context_length");
++    return length;
++}
++
+ void llama_kv_cache_context::set_input_k_shift(ggml_tensor * dst) const {
+     kv->set_input_k_shift(dst);
+ }
+@@ -2630,3 +2714,72 @@ void llama_kv_cache_context::set_input_k_rot(ggml_tensor * dst) const {
+ void llama_kv_cache_context::set_input_v_rot(ggml_tensor * dst) const {
+     kv->set_input_v_rot(dst);
+ }
++
++void llama_kv_cache_context::set_input_paged_decode(
++        ggml_tensor * table,
++        ggml_tensor * length,
++        const llama_ubatch * ubatch) const {
++    GGML_ASSERT(table && length);
++    GGML_ASSERT(ggml_backend_buffer_is_host(table->buffer));
++    GGML_ASSERT(ggml_backend_buffer_is_host(length->buffer));
++    llama_paged_decode_layout layout;
++    GGML_ASSERT(build_paged_decode_layout(*ubatch, layout) == llama_paged_decode_layout_status::success);
++    GGML_ASSERT(layout.block_table.size() <= static_cast<size_t>(table->ne[0]));
++    auto * table_data = static_cast<int32_t *>(table->data);
++    std::fill(table_data, table_data + table->ne[0], 0);
++    for (size_t i = 0; i < layout.block_table.size(); ++i) {
++        table_data[i] = static_cast<int32_t>(layout.block_table[i]);
++    }
++    static_cast<int32_t *>(length->data)[0] = static_cast<int32_t>(layout.context_length);
++}
++
++llama_paged_decode_layout_status llama_kv_cache_context::build_paged_decode_layout(
++        const llama_ubatch & ubatch,
++        llama_paged_decode_layout & output) const {
++    return kv->build_paged_decode_layout(ubatch, sinfos[i_cur], output);
++}
++
++llama_paged_decode_layout_status llama_kv_cache::build_paged_decode_layout(
++        const llama_ubatch & ubatch,
++        const slot_info & sinfo,
++        llama_paged_decode_layout & output) const {
++    output = {};
++    if (cacheflow_block_tokens_ != 16 || type_k() != GGML_TYPE_F16 ||
++            type_v() != GGML_TYPE_F16 || v_trans || ubatch.n_tokens != 1 ||
++            ubatch.n_seqs != 1 || ubatch.n_seq_id[0] != 1) {
++        return llama_paged_decode_layout_status::unsupported_request;
++    }
++
++    const llama_seq_id seq_id = ubatch.seq_id[0][0];
++    if (seq_id < 0 || static_cast<size_t>(seq_id) >= seq_to_stream.size()) {
++        return llama_paged_decode_layout_status::unsupported_request;
++    }
++    const uint32_t stream = seq_to_stream[seq_id];
++    const auto & cells = v_cells[stream];
++    std::vector<llama_paged_decode_cell> sequence_cells;
++    sequence_cells.reserve(cells.get_used() + 1);
++    for (uint32_t cell = 0; cell < cells.size(); ++cell) {
++        if (!cells.is_empty(cell) && cells.seq_has(cell, seq_id)) {
++            const llama_pos position = cells.pos_get(cell);
++            if (position >= 0 && position <= ubatch.pos[0]) {
++                sequence_cells.push_back({ static_cast<uint32_t>(position), cell });
++            }
++        }
++    }
++
++    // prepare() selected the physical destination but has not committed its
++    // metadata yet. Overlay it so capability checking remains pre-mutation.
++    if (sinfo.n_stream() != 1 || sinfo.idxs[0].size() != 1) {
++        return llama_paged_decode_layout_status::unsupported_request;
++    }
++    // A cached tail at the same logical position is intentionally recomputed
++    // by the server. prepare() may choose a different physical cell, so the
++    // pending destination must replace stale metadata rather than merely fill
++    // a missing position.
++    sequence_cells.erase(std::remove_if(sequence_cells.begin(), sequence_cells.end(),
++            [&ubatch](const llama_paged_decode_cell & item) {
++                return item.logical_position == static_cast<uint32_t>(ubatch.pos[0]);
++            }), sequence_cells.end());
++    sequence_cells.push_back({ static_cast<uint32_t>(ubatch.pos[0]), sinfo.idxs[0][0] });
++    return llama_paged_decode_build_layout(sequence_cells, cacheflow_block_tokens_, output);
++}
 diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
-index 3d68f98..757fa0b 100644
+index 3d68f98..50a90db 100644
 --- a/src/llama-kv-cache.h
 +++ b/src/llama-kv-cache.h
-@@ -22,11 +22,13 @@ public:
+@@ -4,6 +4,7 @@
+ #include "llama-graph.h"
+ #include "llama-kv-cells.h"
+ #include "llama-memory.h"
++#include "llama-paged-decode-layout.h"
+ 
+ #include <unordered_map>
+ #include <vector>
+@@ -22,11 +23,13 @@ public:
      struct stream_copy_info {
          bool empty() const {
              assert(ssrc.size() == sdst.size());
@@ -1062,7 +1893,7 @@ index 3d68f98..757fa0b 100644
      };
  
      // for each ubatch, create a slot_info that contains information about where the ubatch should be inserted in the
-@@ -114,7 +116,7 @@ public:
+@@ -114,7 +117,7 @@ public:
          const  layer_reuse_cb & reuse,
          const  layer_share_cb & share);
  
@@ -1071,7 +1902,7 @@ index 3d68f98..757fa0b 100644
  
      //
      // llama_memory_i
-@@ -142,6 +144,13 @@ public:
+@@ -142,6 +145,13 @@ public:
      llama_pos seq_pos_min(llama_seq_id seq_id) const override;
      llama_pos seq_pos_max(llama_seq_id seq_id) const override;
  
@@ -1085,7 +1916,7 @@ index 3d68f98..757fa0b 100644
      std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const override;
  
      // state write/load
-@@ -185,6 +194,17 @@ public:
+@@ -185,6 +195,17 @@ public:
  
      bool update(llama_context * lctx, bool do_shift, const stream_copy_info & sc_info);
  
@@ -1103,9 +1934,18 @@ index 3d68f98..757fa0b 100644
      // find a slot of kv cells that can hold the ubatch
      // if cont == true, then the slot must be continuous
      // return empty slot_info on failure
-@@ -215,6 +235,9 @@ public:
+@@ -214,7 +235,18 @@ public:
+     void set_input_k_rot(ggml_tensor * dst) const;
      void set_input_v_rot(ggml_tensor * dst) const;
  
++    // Builds the production block table from the current real KV cell map.
++    // Restricted to one sequence and one decode token. The returned layout
++    // includes the pending token selected by prepare(), without mutating KV.
++    llama_paged_decode_layout_status build_paged_decode_layout(
++            const llama_ubatch & ubatch,
++            const slot_info & sinfo,
++            llama_paged_decode_layout & output) const;
++
  private:
 +    void * paged_cuda_swap_store_ = nullptr;
 +    mutable llama_cacheflow_cuda_stats cuda_stats_{};
@@ -1113,6 +1953,30 @@ index 3d68f98..757fa0b 100644
      const llama_model & model;
      const llama_hparams & hparams;
  
+@@ -385,6 +417,8 @@ public:
+ 
+     ggml_tensor * build_input_k_rot(ggml_context * ctx) const;
+     ggml_tensor * build_input_v_rot(ggml_context * ctx) const;
++    ggml_tensor * build_input_paged_decode_table(ggml_context * ctx) const;
++    ggml_tensor * build_input_paged_decode_length(ggml_context * ctx) const;
+ 
+     void set_input_k_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+     void set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+@@ -395,6 +429,14 @@ public:
+ 
+     void set_input_k_rot(ggml_tensor * dst) const;
+     void set_input_v_rot(ggml_tensor * dst) const;
++    void set_input_paged_decode(
++            ggml_tensor * table,
++            ggml_tensor * length,
++            const llama_ubatch * ubatch) const;
++
++    llama_paged_decode_layout_status build_paged_decode_layout(
++            const llama_ubatch & ubatch,
++            llama_paged_decode_layout & output) const;
+ 
+ private:
+     llama_memory_status status;
 diff --git a/src/llama-kv-remap-cuda.cuh b/src/llama-kv-remap-cuda.cuh
 new file mode 100644
 index 0000000..60efe29
@@ -1630,11 +2494,96 @@ index 0000000..7b912cb
 +
 +const llama_paged_decode_config & llama_paged_decode_plan_config(
 +        const llama_paged_decode_plan * plan);
+diff --git a/src/llama-paged-decode-layout.cpp b/src/llama-paged-decode-layout.cpp
+new file mode 100644
+index 0000000..d32b273
+--- /dev/null
++++ b/src/llama-paged-decode-layout.cpp
+@@ -0,0 +1,41 @@
++#include "llama-paged-decode-layout.h"
++
++#include <algorithm>
++
++llama_paged_decode_layout_status llama_paged_decode_build_layout(
++        const std::vector<llama_paged_decode_cell> & cells,
++        uint32_t page_size,
++        llama_paged_decode_layout & output) {
++    output = {};
++    if (page_size == 0) {
++        return llama_paged_decode_layout_status::invalid_page_size;
++    }
++    if (cells.empty()) {
++        return llama_paged_decode_layout_status::empty_sequence;
++    }
++
++    auto ordered = cells;
++    std::sort(ordered.begin(), ordered.end(), [](const auto & lhs, const auto & rhs) {
++        return lhs.logical_position < rhs.logical_position;
++    });
++
++    output.block_table.reserve((ordered.size() + page_size - 1) / page_size);
++    for (uint32_t position = 0; position < ordered.size(); ++position) {
++        if (ordered[position].logical_position < position) {
++            output = {};
++            return llama_paged_decode_layout_status::duplicate_position;
++        }
++        if (ordered[position].logical_position != position) {
++            output = {};
++            return llama_paged_decode_layout_status::missing_position;
++        }
++        if (position % page_size == 0) {
++            output.block_table.push_back(ordered[position].cell_index);
++        } else if (ordered[position].cell_index != output.block_table.back() + position % page_size) {
++            output = {};
++            return llama_paged_decode_layout_status::non_contiguous_block;
++        }
++    }
++    output.context_length = static_cast<uint32_t>(ordered.size());
++    return llama_paged_decode_layout_status::success;
++}
+diff --git a/src/llama-paged-decode-layout.h b/src/llama-paged-decode-layout.h
+new file mode 100644
+index 0000000..27a639e
+--- /dev/null
++++ b/src/llama-paged-decode-layout.h
+@@ -0,0 +1,32 @@
++#pragma once
++
++#include <cstdint>
++#include <vector>
++
++struct llama_paged_decode_cell {
++    uint32_t logical_position;
++    uint32_t cell_index;
++};
++
++enum class llama_paged_decode_layout_status {
++    success,
++    invalid_page_size,
++    empty_sequence,
++    missing_position,
++    duplicate_position,
++    non_contiguous_block,
++    unsupported_request,
++};
++
++struct llama_paged_decode_layout {
++    std::vector<uint32_t> block_table;
++    uint32_t context_length = 0;
++};
++
++// Converts the logical token order of one sequence into the physical KV block
++// bases consumed by paged decode. Each logical block must be physically
++// contiguous; otherwise the caller must use Remap or Direct.
++llama_paged_decode_layout_status llama_paged_decode_build_layout(
++        const std::vector<llama_paged_decode_cell> & cells,
++        uint32_t page_size,
++        llama_paged_decode_layout & output);
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index e284a58..3d152f1 100644
+index e284a58..f5f7563 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
-@@ -116,6 +116,156 @@ function(llama_build_and_test source)
+@@ -116,6 +116,161 @@ function(llama_build_and_test source)
      set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})
  endfunction()
  
@@ -1681,6 +2630,11 @@ index e284a58..3d152f1 100644
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-action-policy.cpp)
 +target_include_directories(test-kv-action-policy PRIVATE ${PROJECT_SOURCE_DIR}/tools/server)
 +llama_test(test-kv-action-policy)
++
++llama_build(test-paged-decode-layout.cpp
++    ${PROJECT_SOURCE_DIR}/src/llama-paged-decode-layout.cpp)
++target_include_directories(test-paged-decode-layout PRIVATE ${PROJECT_SOURCE_DIR}/src)
++llama_test(test-paged-decode-layout)
 +
 +llama_build(bench-kv-action-policy.cpp
 +    ${PROJECT_SOURCE_DIR}/tools/server/server-kv-action-policy.cpp)
@@ -2647,6 +3601,102 @@ index 0000000..0d28c8e
 +    }
 +    return 0;
 +}
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index 00d90fc..a4e3b6f 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -6601,6 +6601,83 @@ struct test_flash_attn_ext : public test_case {
+     }
+ };
+ 
++// Restricted production Paged path: two logical pages are deliberately mapped
++// out of physical order with a gap. CPU and CUDA both consume the public Paged
++// operator contract, so a CUDA implementation that ignores block_table cannot
++// match the CPU oracle.
++struct test_flash_attn_ext_paged : public test_case {
++    std::string vars() override {
++        return "hsk=64,nh=14,nkv=2,kv=17,context=17,page=16";
++    }
++
++    double max_nmse_err() override {
++        return 5e-4;
++    }
++
++    ggml_tensor * build_graph(ggml_context * ctx) override {
++        ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 64, 1, 14, 1);
++        ggml_tensor * k = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, 64, 48, 2, 1);
++        ggml_tensor * v = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, 64, 48, 2, 1);
++        ggml_tensor * block_table = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2);
++        ggml_tensor * context_lengths = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
++        ggml_set_name(q, "q");
++        ggml_set_name(k, "k");
++        ggml_set_name(v, "v");
++        ggml_set_name(block_table, "block_table");
++        ggml_set_name(context_lengths, "context_lengths");
++        ggml_tensor * out = ggml_flash_attn_ext(ctx, q, k, v, nullptr, 1.0f/sqrtf(64), 0.0f, 0.0f);
++        ggml_flash_attn_ext_set_paged(out, block_table, context_lengths, 16);
++        ggml_set_name(out, "out");
++        return out;
++    }
++
++    void initialize_tensors(ggml_context * ctx) override {
++        for (ggml_tensor * tensor = ggml_get_first_tensor(ctx); tensor != nullptr;
++                tensor = ggml_get_next_tensor(ctx, tensor)) {
++            if (strcmp(tensor->name, "block_table") == 0) {
++                const int32_t values[] = {32, 0};
++                ggml_backend_tensor_set(tensor, values, 0, sizeof(values));
++            } else if (strcmp(tensor->name, "context_lengths") == 0) {
++                const int32_t value = 17;
++                ggml_backend_tensor_set(tensor, &value, 0, sizeof(value));
++            } else if (strcmp(tensor->name, "q") == 0) {
++                std::vector<float> values(ggml_nelements(tensor), 1.0f);
++                ggml_backend_tensor_set(tensor, values.data(), 0, values.size() * sizeof(values[0]));
++            } else if (strcmp(tensor->name, "k") == 0) {
++                std::vector<ggml_fp16_t> values(ggml_nelements(tensor),
++                                                ggml_fp32_to_fp16(-50.0f));
++                for (int head = 0; head < 2; ++head) {
++                    for (int token = 0; token < 17; ++token) {
++                        const int physical = token < 16 ? 32 + token : token - 16;
++                        for (int dim = 0; dim < 64; ++dim) {
++                            const size_t index = dim + 64 * physical + 64 * 48 * head;
++                            values[index] = ggml_fp32_to_fp16(
++                                    0.01f * (token + 1) + 0.001f * head + 0.00001f * dim);
++                        }
++                    }
++                }
++                ggml_backend_tensor_set(tensor, values.data(), 0, values.size() * sizeof(values[0]));
++            } else if (strcmp(tensor->name, "v") == 0) {
++                std::vector<ggml_fp16_t> values(ggml_nelements(tensor),
++                                                ggml_fp32_to_fp16(-1000.0f));
++                for (int head = 0; head < 2; ++head) {
++                    for (int token = 0; token < 17; ++token) {
++                        const int physical = token < 16 ? 32 + token : token - 16;
++                        for (int dim = 0; dim < 64; ++dim) {
++                            const size_t index = dim + 64 * physical + 64 * 48 * head;
++                            values[index] = ggml_fp32_to_fp16(
++                                    static_cast<float>(token + 100 * head) + 0.001f * dim);
++                        }
++                    }
++                }
++                ggml_backend_tensor_set(tensor, values.data(), 0, values.size() * sizeof(values[0]));
++            } else {
++                init_tensor_uniform(tensor);
++            }
++        }
++    }
++};
++
+ // GGML_OP_CROSS_ENTROPY_LOSS
+ struct test_cross_entropy_loss : public test_case {
+     const ggml_type type;
+@@ -9109,6 +9186,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+     test_cases.emplace_back(new test_flash_attn_ext(128, 64, 4, {1, 1}, 128, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q1_0, GGML_TYPE_Q4_0));
+     test_cases.emplace_back(new test_flash_attn_ext(64, 128, 4, {1, 1}, 128, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q1_0));
+     test_cases.emplace_back(new test_flash_attn_ext(128, 64, 4, {1, 1}, 64, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q1_0, GGML_TYPE_F16));
++    test_cases.emplace_back(new test_flash_attn_ext_paged());
+ 
+     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {   10, 5, 4, 3}));
+     test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {30000, 1, 1, 1}));
 diff --git a/tests/test-benefit-checkpoint.cpp b/tests/test-benefit-checkpoint.cpp
 new file mode 100644
 index 0000000..910e019
@@ -3301,10 +4351,10 @@ index 0000000..dd36bec
 +}
 diff --git a/tests/test-kv-action-policy.cpp b/tests/test-kv-action-policy.cpp
 new file mode 100644
-index 0000000..d77f438
+index 0000000..4c9b5f7
 --- /dev/null
 +++ b/tests/test-kv-action-policy.cpp
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,191 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -3314,6 +4364,7 @@ index 0000000..d77f438
 +#include <cassert>
 +#include <cmath>
 +#include <limits>
++#include <string>
 +
 +static server_kv_action_request baseline_request() {
 +    server_kv_action_request request;
@@ -3439,7 +4490,18 @@ index 0000000..d77f438
 +    assert(snapshot.action_decisions[static_cast<size_t>(server_kv_action::recompute)] == 3);
 +    assert(snapshot.safe_fallbacks == 2);
 +    assert(snapshot.invalid_feature_fallbacks == 1);
++    assert(snapshot.reason_decisions[static_cast<size_t>(
++            server_kv_action_reason::invalid_features)] == 1);
++    assert(snapshot.action_reason_decisions[static_cast<size_t>(server_kv_action::recompute)]
++            [static_cast<size_t>(server_kv_action_reason::invalid_features)] == 1);
++    assert(std::string(server_kv_action_name(server_kv_action::paged)) == "paged");
++    assert(std::string(server_kv_action_reason_name(server_kv_action_reason::cold_start)) ==
++            "cold_start");
 +    assert(snapshot.total_decision_nanoseconds >= snapshot.maximum_decision_nanoseconds);
++
++    const auto failed = policy.choose(baseline_request(), capabilities);
++    policy.observe(failed, {failed.action, 3.0, true});
++    assert(policy.snapshot().action_failures[static_cast<size_t>(failed.action)] == 1);
 +
 +    server_kv_action_policy_config learned_config;
 +    learned_config.model = server_kv_action_model::learned;
@@ -4853,6 +5915,63 @@ index 0000000..d26a09c
 +    test_unsupported_and_invalid_shapes_fail_closed();
 +    return 0;
 +}
+diff --git a/tests/test-paged-decode-layout.cpp b/tests/test-paged-decode-layout.cpp
+new file mode 100644
+index 0000000..f3a10c2
+--- /dev/null
++++ b/tests/test-paged-decode-layout.cpp
+@@ -0,0 +1,51 @@
++#ifdef NDEBUG
++#undef NDEBUG
++#endif
++
++#include "llama-paged-decode-layout.h"
++
++#include <cassert>
++#include <cstdint>
++#include <vector>
++
++int main() {
++    std::vector<llama_paged_decode_cell> cells;
++    for (uint32_t token = 0; token < 16; ++token) {
++        cells.push_back({ token, 32 + token });
++    }
++    cells.push_back({ 16, 4 });
++
++    llama_paged_decode_layout layout;
++    auto status = llama_paged_decode_build_layout(cells, 16, layout);
++    assert(status == llama_paged_decode_layout_status::success);
++    assert(layout.context_length == 17);
++    assert((layout.block_table == std::vector<uint32_t>{ 32, 4 }));
++
++    // A block table stores one physical base per logical block.  A hole
++    // inside a block must fail closed instead of silently becoming a
++    // token-indirection table.
++    cells[7].cell_index = 99;
++    status = llama_paged_decode_build_layout(cells, 16, layout);
++    assert(status == llama_paged_decode_layout_status::non_contiguous_block);
++    assert(layout.block_table.empty());
++    assert(layout.context_length == 0);
++
++    cells.clear();
++    assert(llama_paged_decode_build_layout(cells, 16, layout) ==
++            llama_paged_decode_layout_status::empty_sequence);
++    cells = {{0, 4}};
++    assert(llama_paged_decode_build_layout(cells, 0, layout) ==
++            llama_paged_decode_layout_status::invalid_page_size);
++
++    cells = {{0, 4}, {2, 6}};
++    assert(llama_paged_decode_build_layout(cells, 16, layout) ==
++            llama_paged_decode_layout_status::missing_position);
++    assert(layout.block_table.empty());
++
++    cells = {{0, 4}, {0, 5}};
++    assert(llama_paged_decode_build_layout(cells, 16, layout) ==
++            llama_paged_decode_layout_status::duplicate_position);
++    assert(layout.block_table.empty());
++
++    return 0;
++}
 diff --git a/tests/test-runtime-adapter.cpp b/tests/test-runtime-adapter.cpp
 new file mode 100644
 index 0000000..383e0c5
@@ -6077,7 +7196,7 @@ index 0000000..9e4bc3b
 +    checkpoint_restore_result restore_checkpoint(const std::string & payload);
 +};
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..0bb345c 100644
+index 986b2f1..14064c9 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -4,6 +4,14 @@
@@ -6120,7 +7239,7 @@ index 986b2f1..0bb345c 100644
  enum server_state {
      SERVER_STATE_LOADING_MODEL,  // Server is starting up, model not fully loaded yet
      SERVER_STATE_READY,          // Server is ready and model is loaded
-@@ -126,9 +125,16 @@ struct server_slot {
+@@ -126,9 +125,17 @@ struct server_slot {
      std::string stopping_word;
  
      // state
@@ -6133,12 +7252,13 @@ index 986b2f1..0bb345c 100644
 +    server_kv_swap_handle store_swap_handle = 0;
 +    size_t kv_action_bytes = 0;
 +    server_kv_action_decision pending_kv_action;
++    server_kv_action pending_kv_action_effective = server_kv_action::recompute;
 +    int64_t pending_kv_action_started_us = 0;
 +    bool has_pending_kv_action = false;
  
      bool prompt_save(server_prompt_cache & prompt_cache) const {
          if (prompt.tokens.size() == 0) {
-@@ -212,6 +218,7 @@ struct server_slot {
+@@ -212,6 +219,7 @@ struct server_slot {
          SLT_DBG(*this, "%s", "\n");
  
          n_prompt_tokens_cache = 0;
@@ -6146,7 +7266,7 @@ index 986b2f1..0bb345c 100644
  
          last_nl_pos    = 0;
          generated_text = "";
-@@ -325,7 +332,7 @@ struct server_slot {
+@@ -325,7 +333,7 @@ struct server_slot {
      }
  
      bool is_processing() const {
@@ -6155,7 +7275,7 @@ index 986b2f1..0bb345c 100644
      }
  
      bool can_speculate() const {
-@@ -403,8 +410,6 @@ struct server_slot {
+@@ -403,8 +411,6 @@ struct server_slot {
              t_last_used        =  ggml_time_us();
              t_token_generation = (ggml_time_us() - t_start_generation) / 1e3;
  
@@ -6164,7 +7284,7 @@ index 986b2f1..0bb345c 100644
              // do not keep context of the child slots - the parent's context is enough
              if (task->is_child()) {
                  prompt_clear(false);
-@@ -570,7 +575,7 @@ struct server_slot {
+@@ -570,7 +576,7 @@ struct server_slot {
      }
  
      void copy_state_to(server_slot & other) const {
@@ -6173,7 +7293,7 @@ index 986b2f1..0bb345c 100644
  
          common_context_seq_rm(ctx_tgt, other.id,     -1, -1);
          common_context_seq_cp(ctx_tgt, id, other.id, -1, -1);
-@@ -685,6 +690,7 @@ struct server_metrics {
+@@ -685,6 +691,7 @@ struct server_metrics {
      int64_t t_start = 0;
  
      uint64_t n_prompt_tokens_processed_total = 0;
@@ -6181,7 +7301,7 @@ index 986b2f1..0bb345c 100644
      uint64_t t_prompt_processing_total       = 0;
      uint64_t n_tokens_predicted_total        = 0;
      uint64_t t_tokens_generation_total       = 0;
-@@ -692,6 +698,7 @@ struct server_metrics {
+@@ -692,6 +699,7 @@ struct server_metrics {
      uint64_t n_tokens_max = 0;
  
      uint64_t n_prompt_tokens_processed = 0;
@@ -6189,7 +7309,7 @@ index 986b2f1..0bb345c 100644
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -700,6 +707,33 @@ struct server_metrics {
+@@ -700,6 +708,33 @@ struct server_metrics {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -6223,7 +7343,7 @@ index 986b2f1..0bb345c 100644
      void init() {
          t_start = ggml_time_us();
      }
-@@ -707,6 +741,8 @@ struct server_metrics {
+@@ -707,6 +742,8 @@ struct server_metrics {
      void on_prompt_eval(const server_slot & slot) {
          n_prompt_tokens_processed_total += slot.n_prompt_tokens_processed;
          n_prompt_tokens_processed       += slot.n_prompt_tokens_processed;
@@ -6232,7 +7352,7 @@ index 986b2f1..0bb345c 100644
          t_prompt_processing             += slot.t_prompt_processing;
          t_prompt_processing_total       += slot.t_prompt_processing;
  
-@@ -730,8 +766,63 @@ struct server_metrics {
+@@ -730,8 +767,63 @@ struct server_metrics {
          }
      }
  
@@ -6296,7 +7416,7 @@ index 986b2f1..0bb345c 100644
          t_prompt_processing       = 0;
          n_tokens_predicted        = 0;
          t_tokens_generation       = 0;
-@@ -816,8 +907,7 @@ private:
+@@ -816,8 +908,7 @@ private:
      json json_ui_settings = json::object();    // Primary: new name
      json json_webui_settings = json::object();    // Deprecated: use json_ui_settings instead (kept for compat)
  
@@ -6306,7 +7426,7 @@ index 986b2f1..0bb345c 100644
  
      std::string model_name; // name of the loaded model, to be used by API
      std::set<std::string> model_aliases; // additional names for the model
-@@ -864,6 +954,10 @@ private:
+@@ -864,6 +955,10 @@ private:
  
          params_base = params;
          params_base.n_outputs_max = server_n_outputs_max(params_base);
@@ -6317,7 +7437,7 @@ index 986b2f1..0bb345c 100644
  
          std::string & mmproj_path = params_base.mmproj.path;
          bool has_mmproj = !mmproj_path.empty();
-@@ -1114,8 +1208,123 @@ private:
+@@ -1114,8 +1209,123 @@ private:
  
          n_swa = params_base.swa_full ? 0 : llama_model_n_swa(model_tgt);
  
@@ -6443,7 +7563,7 @@ index 986b2f1..0bb345c 100644
  
          // setup slots
          SRV_INF("initializing slots, n_slots = %d\n", params_base.n_parallel);
-@@ -1178,6 +1387,9 @@ private:
+@@ -1178,6 +1388,9 @@ private:
              SLT_INF(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
  
              slot.callback_on_release = [this](int id_slot) {
@@ -6453,7 +7573,118 @@ index 986b2f1..0bb345c 100644
                  queue_tasks.pop_deferred_task(id_slot);
              };
  
-@@ -1383,9 +1595,10 @@ private:
+@@ -1378,14 +1591,121 @@ private:
+         return nullptr;
+     }
+ 
++    struct server_kv_action_inputs {
++        server_kv_action_request request;
++        server_kv_action_capabilities capabilities;
++    };
++
++    void restrict_kv_capabilities_to_override(server_kv_action_capabilities & capabilities) const {
++        using override = common_params::kv_action_override;
++        if (params_base.kv_action_override_mode == override::none) return;
++        server_kv_action_capabilities forced;
++        forced.recompute = true;
++        switch (params_base.kv_action_override_mode) {
++            case override::none: break;
++            case override::direct: forced.direct = capabilities.direct; break;
++            case override::remap: forced.remap = capabilities.remap; break;
++            case override::paged: forced.paged = capabilities.paged; break;
++            case override::recompute: break;
++        }
++        capabilities = forced;
++    }
++
++    server_kv_action_inputs build_kv_action_inputs(
++            server_slot & target, const server_task & task) {
++        const size_t resident_prefix = target.prompt.tokens.get_common_prefix(task.tokens);
++        size_t donor_prefix = 0;
++        const server_slot * donor = nullptr;
++        for (const auto & candidate : slots) {
++            if (candidate.id == target.id || candidate.is_processing()) continue;
++            const size_t candidate_prefix = candidate.prompt.tokens.get_common_prefix(task.tokens);
++            if (candidate_prefix > donor_prefix) {
++                donor_prefix = candidate_prefix;
++                donor = &candidate;
++            }
++        }
++        const size_t cached_tokens = std::max({
++            resident_prefix,
++            donor_prefix,
++            target.cuda_swapped_tokens.size(),
++            target.store_swapped_tokens.size(),
++        });
++        server_kv_action_inputs result;
++        auto & request = result.request;
++        request.phase = server_kv_action_phase::serve;
++        request.direct_legal = resident_prefix > 0 &&
++                target.cuda_swapped_tokens.empty() && target.store_swapped_tokens.empty();
++        request.cached_tokens = cached_tokens;
++        request.expected_decode_tokens = task.params.n_predict > 0 ?
++                static_cast<size_t>(task.params.n_predict) : 128;
++        request.kv_bytes = donor && donor_prefix > resident_prefix ? donor->kv_action_bytes : target.kv_action_bytes;
++        if (request.kv_bytes == 0 && cached_tokens > 0) {
++            request.kv_bytes = llama_state_seq_get_size_ext(
++                    ctx_tgt, donor && donor_prefix > resident_prefix ? donor->id : target.id,
++                    LLAMA_STATE_SEQ_FLAGS_NONE);
++        }
++        const size_t block_size = (size_t) std::max(1, params_base.kv_block_size);
++        request.page_count = (cached_tokens + block_size - 1) / block_size;
++        request.contiguous_pages = request.direct_legal ? request.page_count : 0;
++        request.reuse_distance = target.t_last_used < 0 ? 0 :
++                (uint64_t) std::max<int64_t>(0, ggml_time_us() - target.t_last_used);
++        request.device_bandwidth_bytes_per_ms = 100.0 * 1024 * 1024;
++        request.host_bandwidth_bytes_per_ms = 12.0 * 1024 * 1024;
++        request.launch_ms = 0.01;
++        const auto measured = inference_engine.scheduler().state().cost;
++        request.prefill_ms_per_token = measured.prefill_ms_per_token > 0.0 ?
++                measured.prefill_ms_per_token : 0.03;
++        request.decode_ms_per_token = measured.decode_ms_per_token > 0.0 ?
++                measured.decode_ms_per_token : 0.02;
++
++        if (const auto * runtime = inference_engine.kv_runtime()) {
++            const auto blocks = runtime->snapshot().blocks;
++            if (blocks.capacity_blocks > 0) {
++                request.kv_pressure = (double) (blocks.allocated_blocks + blocks.reserved_blocks) /
++                        blocks.capacity_blocks;
++            }
++        }
++        const auto prefix_matches = [&task](const llama_tokens & cached) {
++            if (cached.empty() || task.tokens.size() < cached.size()) return false;
++            for (size_t i = 0; i < cached.size(); ++i) {
++                if (cached[i] != task.tokens[i]) return false;
++            }
++            return true;
++        };
++        auto & capabilities = result.capabilities;
++        capabilities.direct = request.direct_legal;
++        capabilities.remap = params_base.kv_block_runtime && donor_prefix > resident_prefix;
++        capabilities.paged = params_base.kv_paged_decode && resident_prefix > 0 &&
++                resident_prefix <= 17 && params_base.kv_block_size == 16;
++        capabilities.device_swap = prefix_matches(target.cuda_swapped_tokens);
++        capabilities.host_swap = target.store_swap_handle != 0 &&
++                prefix_matches(target.store_swapped_tokens);
++        capabilities.recompute = true;
++        return result;
++    }
++
++    void choose_explicit_kv_action(server_slot & target, const server_task & task) {
++        if (params_base.kv_action_override_mode == common_params::kv_action_override::none) return;
++        auto inputs = build_kv_action_inputs(target, task);
++        restrict_kv_capabilities_to_override(inputs.capabilities);
++        const int64_t started = ggml_time_us();
++        const auto decision = inference_engine.kv_action_policy().choose(
++                inputs.request, inputs.capabilities);
++        target.pending_kv_action = decision;
++        target.pending_kv_action_effective = decision.action;
++        target.pending_kv_action_started_us = started;
++        target.has_pending_kv_action = true;
++    }
++
+     server_slot * get_available_slot(const server_task & task) {
+         server_slot * ret = nullptr;
  
          bool update_cache = false;
  
@@ -6467,7 +7698,7 @@ index 986b2f1..0bb345c 100644
  
              for (server_slot & slot : slots) {
                  // skip the slot if it is not available
-@@ -1393,29 +1606,41 @@ private:
+@@ -1393,29 +1713,41 @@ private:
                      continue;
                  }
  
@@ -6529,7 +7760,7 @@ index 986b2f1..0bb345c 100644
  
                  // if we are about to lose a large portion of the existing context - save it in the prompt cache
                  if (f_keep < 0.5f) {
-@@ -1443,12 +1668,97 @@ private:
+@@ -1443,12 +1775,43 @@ private:
  
              if (ret != nullptr) {
                  SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
@@ -6540,65 +7771,10 @@ index 986b2f1..0bb345c 100644
          }
  
          if (ret) {
-+            const auto prefix_matches = [&task](const llama_tokens & cached) {
-+                if (cached.empty() || task.tokens.size() < cached.size()) return false;
-+                for (size_t i = 0; i < cached.size(); ++i) {
-+                    if (cached[i] != task.tokens[i]) return false;
-+                }
-+                return true;
-+            };
-+            const size_t resident_prefix = ret->prompt.tokens.get_common_prefix(task.tokens);
-+            const size_t cached_tokens = std::max({
-+                resident_prefix,
-+                ret->cuda_swapped_tokens.size(),
-+                ret->store_swapped_tokens.size(),
-+            });
-+            size_t kv_bytes = ret->kv_action_bytes;
-+            if (kv_bytes == 0 && resident_prefix > 0) {
-+                kv_bytes = llama_state_seq_get_size_ext(
-+                        ctx_tgt, ret->id, LLAMA_STATE_SEQ_FLAGS_NONE);
-+            }
-+            const size_t block_size = (size_t) std::max(1, params_base.kv_block_size);
-+            const size_t pages = (cached_tokens + block_size - 1) / block_size;
-+            double kv_pressure = 0.0;
-+            if (const auto * runtime = inference_engine.kv_runtime()) {
-+                const auto blocks = runtime->snapshot().blocks;
-+                if (blocks.capacity_blocks > 0) {
-+                    kv_pressure = (double) (blocks.allocated_blocks + blocks.reserved_blocks) /
-+                            blocks.capacity_blocks;
-+                }
-+            }
-+            const auto measured_cost = inference_engine.scheduler().state().cost;
-+            server_kv_action_request action_request;
-+            action_request.phase = server_kv_action_phase::serve;
-+            action_request.direct_legal = resident_prefix > 0 &&
-+                    ret->cuda_swapped_tokens.empty() && ret->store_swapped_tokens.empty();
-+            action_request.cached_tokens = cached_tokens;
-+            action_request.expected_decode_tokens = task.params.n_predict > 0
-+                    ? (size_t) task.params.n_predict : 128;
-+            action_request.kv_bytes = kv_bytes;
-+            action_request.page_count = pages;
-+            action_request.contiguous_pages = action_request.direct_legal ? pages : 0;
-+            action_request.reuse_distance = ret->t_last_used < 0 ? 0 :
-+                    (uint64_t) std::max<int64_t>(0, ggml_time_us() - ret->t_last_used);
-+            action_request.kv_pressure = kv_pressure;
-+            action_request.device_bandwidth_bytes_per_ms = 100.0 * 1024 * 1024;
-+            action_request.host_bandwidth_bytes_per_ms = 12.0 * 1024 * 1024;
-+            action_request.launch_ms = 0.01;
-+            action_request.prefill_ms_per_token = measured_cost.prefill_ms_per_token > 0.0
-+                    ? measured_cost.prefill_ms_per_token : 0.03;
-+            action_request.decode_ms_per_token = measured_cost.decode_ms_per_token > 0.0
-+                    ? measured_cost.decode_ms_per_token : 0.02;
-+
-+            server_kv_action_capabilities action_capabilities;
-+            action_capabilities.direct = action_request.direct_legal;
-+            // The operator prototypes are not yet wired to llama_decode.
-+            action_capabilities.remap = false;
-+            action_capabilities.paged = false;
-+            action_capabilities.device_swap = prefix_matches(ret->cuda_swapped_tokens);
-+            action_capabilities.host_swap = ret->store_swap_handle != 0 &&
-+                    prefix_matches(ret->store_swapped_tokens);
-+            action_capabilities.recompute = true;
++            auto inputs = build_kv_action_inputs(*ret, task);
++            auto & action_request = inputs.request;
++            auto & action_capabilities = inputs.capabilities;
++            restrict_kv_capabilities_to_override(action_capabilities);
 +            const int64_t action_started_us = ggml_time_us();
 +            auto action_decision = inference_engine.kv_action_policy().choose(
 +                    action_request, action_capabilities);
@@ -6621,13 +7797,14 @@ index 986b2f1..0bb345c 100644
 +                        action_request, recompute_only);
 +            }
 +            ret->pending_kv_action = action_decision;
++            ret->pending_kv_action_effective = action_decision.action;
 +            ret->pending_kv_action_started_us = action_started_us;
 +            ret->has_pending_kv_action = true;
 +            if (store_restored || cuda_restored) update_cache = false;
              update_cache = update_cache && prompt_cache;
  
              // cache prompts only for completion tasks
-@@ -1469,41 +1779,114 @@ private:
+@@ -1469,41 +1832,114 @@ private:
  
                  SRV_INF("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
              }
@@ -6763,7 +7940,7 @@ index 986b2f1..0bb345c 100644
      }
  
      std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
-@@ -1519,7 +1902,244 @@ private:
+@@ -1519,7 +1955,244 @@ private:
          return output;
      }
  
@@ -7008,7 +8185,7 @@ index 986b2f1..0bb345c 100644
          // process per-request lora adapters
          if (!task.params.lora.empty()) {
              auto task_loras = construct_lora_list(task.params.lora);
-@@ -1590,6 +2210,8 @@ private:
+@@ -1590,6 +2263,8 @@ private:
              return false;
          }
  
@@ -7017,7 +8194,7 @@ index 986b2f1..0bb345c 100644
          SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
  
          // initialize samplers
-@@ -1629,9 +2251,10 @@ private:
+@@ -1629,9 +2304,10 @@ private:
  
          slot.task = std::make_unique<const server_task>(std::move(task));
  
@@ -7029,7 +8206,7 @@ index 986b2f1..0bb345c 100644
  
          // reset server kill-switch counter
          n_empty_consecutive = 0;
-@@ -1966,6 +2589,7 @@ private:
+@@ -1966,6 +2642,7 @@ private:
  
          res->generation_params = slot.task->params; // copy the parameters
  
@@ -7037,7 +8214,34 @@ index 986b2f1..0bb345c 100644
          queue_results.send(std::move(res));
      }
  
-@@ -2214,12 +2838,14 @@ private:
+@@ -2200,13 +2877,23 @@ private:
+                             queue_tasks.defer(std::move(task));
+                             break;
+                         }
++                        if (id_slot != -1) {
++                            choose_explicit_kv_action(*slot, task);
++                        }
+                         if (!launch_slots_with_parent_task(*slot, child_slots, std::move(task))) {
++                            slot->has_pending_kv_action = false;
+                             SRV_ERR("failed to launch slot with parent task, id_task = %d\n", id_task);
+                             break; // drop the task
+                         }
+-                    } else if (!launch_slot_with_task(*slot, std::move(task))) {
+-                        SRV_ERR("failed to launch slot with task, id_task = %d\n", id_task);
+-                        break; // drop the task
++                    } else {
++                        if (id_slot != -1) {
++                            choose_explicit_kv_action(*slot, task);
++                        }
++                        if (!launch_slot_with_task(*slot, std::move(task))) {
++                            slot->has_pending_kv_action = false;
++                            SRV_ERR("failed to launch slot with task, id_task = %d\n", id_task);
++                            break; // drop the task
++                        }
+                     }
+ 
+                     if (params_base.cache_idle_slots) {
+@@ -2214,12 +2901,14 @@ private:
                              if (!slot.is_processing()) {
                                  SLT_INF(slot, "%s", "saving idle slot to prompt cache\n");
  
@@ -7054,7 +8258,7 @@ index 986b2f1..0bb345c 100644
                                      // [TAG_IDLE_SLOT_CLEAR]
                                      slot.prompt_clear(false);
                                  }
-@@ -2301,6 +2927,7 @@ private:
+@@ -2301,6 +2990,7 @@ private:
                      res->t_start             = metrics.t_start;
  
                      res->n_prompt_tokens_processed_total = metrics.n_prompt_tokens_processed_total;
@@ -7062,7 +8266,7 @@ index 986b2f1..0bb345c 100644
                      res->t_prompt_processing_total       = metrics.t_prompt_processing_total;
                      res->n_tokens_predicted_total        = metrics.n_tokens_predicted_total;
                      res->t_tokens_generation_total       = metrics.t_tokens_generation_total;
-@@ -2308,12 +2935,100 @@ private:
+@@ -2308,12 +2998,101 @@ private:
                      res->n_tokens_max = metrics.n_tokens_max;
  
                      res->n_prompt_tokens_processed = metrics.n_prompt_tokens_processed;
@@ -7108,6 +8312,7 @@ index 986b2f1..0bb345c 100644
 +                    res->benefit_cuda = engine_snapshot.cuda_benefit;
 +                    res->benefit_persistence = engine_snapshot.benefit_persistence;
 +                    res->kv_action_policy = engine_snapshot.kv_action_policy;
++                    res->kv_execution_status = llama_get_kv_execution_status(ctx_tgt);
 +                    res->time_to_first_token = metrics.time_to_first_token;
 +                    res->time_per_output_token = metrics.time_per_output_token;
 +                    res->request_latency = metrics.request_latency;
@@ -7163,7 +8368,7 @@ index 986b2f1..0bb345c 100644
  
                      if (task.metrics_reset_bucket) {
                          metrics.reset_bucket();
-@@ -2479,7 +3194,7 @@ private:
+@@ -2479,7 +3258,7 @@ private:
          }
      }
  
@@ -7172,7 +8377,7 @@ index 986b2f1..0bb345c 100644
          // check if all slots are idle
          {
              bool all_idle = true;
-@@ -2494,7 +3209,7 @@ private:
+@@ -2494,7 +3273,7 @@ private:
              if (all_idle) {
                  SRV_INF("%s", "all slots are idle\n");
  
@@ -7181,7 +8386,7 @@ index 986b2f1..0bb345c 100644
              }
          }
  
-@@ -2509,7 +3224,7 @@ private:
+@@ -2509,7 +3288,7 @@ private:
          // apply context-shift if needed
          // TODO: simplify and improve
          for (server_slot & slot : slots) {
@@ -7190,7 +8395,7 @@ index 986b2f1..0bb345c 100644
                  if (!params_base.ctx_shift) {
                      // this check is redundant (for good)
                      // we should never get here, because generation should already stopped in process_token()
-@@ -2572,6 +3287,10 @@ private:
+@@ -2572,6 +3351,10 @@ private:
              }
          }
  
@@ -7201,7 +8406,7 @@ index 986b2f1..0bb345c 100644
          // start populating the batch for this iteration
          common_batch_clear(batch);
  
-@@ -2583,7 +3302,7 @@ private:
+@@ -2583,7 +3366,7 @@ private:
  
          // determine which slots are generating and drafting
          for (auto & slot : slots) {
@@ -7210,7 +8415,7 @@ index 986b2f1..0bb345c 100644
                  continue;
              }
  
-@@ -2602,7 +3321,9 @@ private:
+@@ -2602,7 +3385,9 @@ private:
                  const bool use_ckpt_tgt = ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
                  const bool use_ckpt_dft = ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
  
@@ -7221,7 +8426,7 @@ index 986b2f1..0bb345c 100644
  
                  if (n_draft_max > 0) {
                      GGML_ASSERT(slot.can_speculate());
-@@ -2643,7 +3364,12 @@ private:
+@@ -2643,7 +3428,12 @@ private:
  
          // generate the actual drafts (if any)
          {
@@ -7234,7 +8439,7 @@ index 986b2f1..0bb345c 100644
          }
  
          // make checkpoints if needed
-@@ -2705,6 +3431,91 @@ private:
+@@ -2705,6 +3495,91 @@ private:
          int32_t n_batch  = llama_n_batch(ctx_tgt);
          int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
  
@@ -7326,7 +8531,7 @@ index 986b2f1..0bb345c 100644
          float  alora_scale       = -1.0f;
          size_t alora_disabled_id = 0;
  
-@@ -2721,24 +3532,33 @@ private:
+@@ -2721,24 +3596,33 @@ private:
                  }
  
                  // check if this is a child slot
@@ -7364,7 +8569,7 @@ index 986b2f1..0bb345c 100644
  
                          SLT_TRC(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
                                  slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
-@@ -3110,7 +3930,9 @@ private:
+@@ -3110,7 +3994,9 @@ private:
                      const bool n_before_user_known = n_before_user > 0;
  
                      // add prompt tokens for processing in the current batch
@@ -7375,7 +8580,7 @@ index 986b2f1..0bb345c 100644
                          // get next token to process
                          llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                          if (cur_tok == LLAMA_TOKEN_NULL) {
-@@ -3173,7 +3995,8 @@ private:
+@@ -3173,7 +4059,8 @@ private:
  
                      // entire prompt has been processed
                      if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
@@ -7385,7 +8590,7 @@ index 986b2f1..0bb345c 100644
  
                          GGML_ASSERT(batch.n_tokens > 0);
  
-@@ -3249,6 +4072,13 @@ private:
+@@ -3249,6 +4136,13 @@ private:
  
          SRV_DBG("decoding batch, n_tokens = %d\n", batch.n_tokens);
  
@@ -7399,17 +8604,35 @@ index 986b2f1..0bb345c 100644
          auto accept_special_token = [&](server_slot & slot, llama_token token) {
              return params_base.special ||
                  slot.task->params.sampling.preserved_tokens.find(token) != slot.task->params.sampling.preserved_tokens.end();
-@@ -3294,7 +4124,8 @@ private:
+@@ -3294,7 +4188,26 @@ private:
                  batch.logits   + i,
              };
  
 -            const int ret = llama_decode(ctx_tgt, batch_view);
++            enum llama_kv_execution_action llama_action = LLAMA_KV_EXECUTION_ACTION_DIRECT;
++            for (const auto & slot : slots) {
++                if (slot.i_batch < i || slot.i_batch >= i + n_tokens || !slot.has_pending_kv_action) continue;
++                if (slot.pending_kv_action.action == server_kv_action::paged && n_tokens == 1) {
++                    llama_action = LLAMA_KV_EXECUTION_ACTION_PAGED;
++                } else if (slot.pending_kv_action.action == server_kv_action::remap) {
++                    llama_action = LLAMA_KV_EXECUTION_ACTION_REMAP;
++                }
++            }
++            llama_set_kv_execution_action(ctx_tgt, llama_action);
 +            const auto decode_result = inference_engine.runtime().decode(ctx_tgt, batch_view);
++            const auto llama_action_status = llama_get_kv_execution_status(ctx_tgt);
++            for (auto & slot : slots) {
++                if (slot.i_batch < i || slot.i_batch >= i + n_tokens || !slot.has_pending_kv_action) continue;
++                if (slot.pending_kv_action.action == server_kv_action::paged &&
++                        llama_action_status.effective != LLAMA_KV_EXECUTION_ACTION_PAGED) {
++                    slot.pending_kv_action_effective = server_kv_action::direct;
++                }
++            }
 +            const int ret = decode_result.code;
  
              metrics.on_decoded(slots);
  
-@@ -3320,10 +4151,20 @@ private:
+@@ -3320,10 +4233,20 @@ private:
                      // TODO: handle ret == 2 (abort) when we start aborting
  
                      if (!err.empty()) {
@@ -7421,7 +8644,7 @@ index 986b2f1..0bb345c 100644
 +                                if (slot.has_pending_kv_action) {
 +                                    inference_engine.kv_action_policy().observe(
 +                                            slot.pending_kv_action, {
-+                                                slot.pending_kv_action.action,
++                                                slot.pending_kv_action_effective,
 +                                                (ggml_time_us() - slot.pending_kv_action_started_us) / 1000.0,
 +                                                true,
 +                                            });
@@ -7430,7 +8653,7 @@ index 986b2f1..0bb345c 100644
                                  send_error(slot, err);
                                  slot.release();
  
-@@ -3394,6 +4235,7 @@ private:
+@@ -3394,6 +4317,7 @@ private:
              //}
              if (!common_speculative_process(spec.get(), batch_view)) {
                  SRV_ERR("%s", "failed to process speculative batch\n");
@@ -7438,7 +8661,7 @@ index 986b2f1..0bb345c 100644
  
                  // TODO: handle error
                  break;
-@@ -3407,10 +4249,11 @@ private:
+@@ -3407,10 +4331,11 @@ private:
  
              // handle `n_cmpl > 1` tasks - when the main prompt is processed, activate all child tasks too
              for (auto & slot : slots) {
@@ -7452,7 +8675,7 @@ index 986b2f1..0bb345c 100644
                              children.push_back(&other);
                          }
                      }
-@@ -3420,17 +4263,19 @@ private:
+@@ -3420,17 +4345,19 @@ private:
                      for (auto & child : children) {
                          SLT_INF(slot, " - copying state to child %d\n", child->id);
  
@@ -7475,7 +8698,7 @@ index 986b2f1..0bb345c 100644
                      if (slot.task->params.stream && slot.task->params.return_progress) {
                          send_partial_response(slot, {}, true);
                      }
-@@ -3440,7 +4285,19 @@ private:
+@@ -3440,7 +4367,19 @@ private:
                      continue; // continue loop of slots
                  }
  
@@ -7485,7 +8708,7 @@ index 986b2f1..0bb345c 100644
 +                // been deferred by batching and must remain unobserved.
 +                if (slot.has_pending_kv_action) {
 +                    inference_engine.kv_action_policy().observe(slot.pending_kv_action, {
-+                        slot.pending_kv_action.action,
++                        slot.pending_kv_action_effective,
 +                        (ggml_time_us() - slot.pending_kv_action_started_us) / 1000.0,
 +                        false,
 +                    });
@@ -7496,7 +8719,7 @@ index 986b2f1..0bb345c 100644
                      if (slot.task->type == SERVER_TASK_TYPE_EMBEDDING) {
                          // prompt evaluated for embedding
                          send_embedding(slot, batch_view);
-@@ -3459,12 +4316,12 @@ private:
+@@ -3459,12 +4398,12 @@ private:
                      GGML_ASSERT(slot.task->need_sampling());
  
                      // prompt evaluated for next-token prediction
@@ -7511,7 +8734,7 @@ index 986b2f1..0bb345c 100644
                      continue; // continue loop of slots
                  }
  
-@@ -3517,7 +4374,8 @@ private:
+@@ -3517,7 +4456,8 @@ private:
  
              // speculative decoding - main model sample and accept
              for (auto & slot : slots) {
@@ -7521,7 +8744,7 @@ index 986b2f1..0bb345c 100644
                      continue;
                  }
  
-@@ -3593,6 +4451,13 @@ private:
+@@ -3593,6 +4533,13 @@ private:
  
                  // update how many tokens out of those tested were accepted
                  slot.n_draft_accepted += ids.size() - 1;
@@ -7535,7 +8758,7 @@ index 986b2f1..0bb345c 100644
  
                  // add accepted tokens to the prompt
                  slot.prompt.tokens.keep_first(slot.prompt.n_tokens() - n_draft);
-@@ -3631,11 +4496,51 @@ private:
+@@ -3631,11 +4578,51 @@ private:
  
                  SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) ids.size() - 1, (int) n_draft, slot.prompt.n_tokens());
              }
@@ -7587,7 +8810,7 @@ index 986b2f1..0bb345c 100644
      int get_slot_n_ctx() {
          return slots.back().n_ctx;
      }
-@@ -4127,6 +5032,159 @@ void server_routes::init_routes() {
+@@ -4127,6 +5114,159 @@ void server_routes::init_routes() {
                      {"name",  "prompt_tokens_total"},
                      {"help",  "Number of prompt tokens processed."},
                      {"value",  (uint64_t) res_task->n_prompt_tokens_processed_total}
@@ -7747,7 +8970,7 @@ index 986b2f1..0bb345c 100644
              }, {
                      {"name",  "prompt_seconds_total"},
                      {"help",  "Prompt process time"},
-@@ -4149,6 +5207,18 @@ void server_routes::init_routes() {
+@@ -4149,6 +5289,18 @@ void server_routes::init_routes() {
                      {"value",  res_task->n_tokens_max}
              }}},
              {"gauge", {{
@@ -7766,7 +8989,7 @@ index 986b2f1..0bb345c 100644
                      {"name",  "prompt_tokens_seconds"},
                      {"help",  "Average prompt throughput in tokens/s."},
                      {"value",  res_task->n_prompt_tokens_processed ? 1.e3 / res_task->t_prompt_processing * res_task->n_prompt_tokens_processed : 0.}
-@@ -4156,6 +5226,115 @@ void server_routes::init_routes() {
+@@ -4156,6 +5308,115 @@ void server_routes::init_routes() {
                      {"name",  "predicted_tokens_seconds"},
                      {"help",  "Average generation throughput in tokens/s."},
                      {"value",  res_task->n_tokens_predicted ? 1.e3 / res_task->t_tokens_generation * res_task->n_tokens_predicted : 0.}
@@ -7882,7 +9105,7 @@ index 986b2f1..0bb345c 100644
              },{
                      {"name",  "requests_processing"},
                      {"help",  "Number of requests processing."},
-@@ -4188,6 +5367,160 @@ void server_routes::init_routes() {
+@@ -4188,6 +5449,197 @@ void server_routes::init_routes() {
              }
          }
  
@@ -7937,25 +9160,50 @@ index 986b2f1..0bb345c 100644
 +        append_benefit("cuda", res_task->benefit_cuda);
 +
 +        const auto & kv_actions = res_task->kv_action_policy;
-+        static constexpr const char * kv_action_names[] = {
-+            "direct", "remap", "paged", "device_swap", "host_swap", "recompute",
-+        };
 +        prometheus << "# HELP llamacpp:kv_action_decisions_total Unified KV execution decisions by selected action.\n"
 +                   << "# TYPE llamacpp:kv_action_decisions_total counter\n";
 +        for (size_t i = 0; i < server_kv_action_count; ++i) {
-+            prometheus << "llamacpp:kv_action_decisions_total{action=\"" << kv_action_names[i]
++            prometheus << "llamacpp:kv_action_decisions_total{action=\""
++                       << server_kv_action_name(static_cast<server_kv_action>(i))
 +                       << "\"} " << kv_actions.action_decisions[i] << "\n";
++        }
++        prometheus << "# HELP llamacpp:kv_action_decision_reasons_total Unified KV decisions by reason.\n"
++                   << "# TYPE llamacpp:kv_action_decision_reasons_total counter\n";
++        for (size_t i = 0; i < server_kv_action_reason_count; ++i) {
++            prometheus << "llamacpp:kv_action_decision_reasons_total{reason=\""
++                       << server_kv_action_reason_name(static_cast<server_kv_action_reason>(i))
++                       << "\"} " << kv_actions.reason_decisions[i] << "\n";
++        }
++        prometheus << "# HELP llamacpp:kv_action_decisions_by_reason_total Unified KV decisions by action and reason.\n"
++                   << "# TYPE llamacpp:kv_action_decisions_by_reason_total counter\n";
++        for (size_t action = 0; action < server_kv_action_count; ++action) {
++            for (size_t reason = 0; reason < server_kv_action_reason_count; ++reason) {
++                prometheus << "llamacpp:kv_action_decisions_by_reason_total{action=\""
++                           << server_kv_action_name(static_cast<server_kv_action>(action))
++                           << "\",reason=\""
++                           << server_kv_action_reason_name(static_cast<server_kv_action_reason>(reason))
++                           << "\"} " << kv_actions.action_reason_decisions[action][reason] << "\n";
++            }
 +        }
 +        prometheus << "# HELP llamacpp:kv_action_observations_total Completed action observations by executed action.\n"
 +                   << "# TYPE llamacpp:kv_action_observations_total counter\n";
 +        for (size_t i = 0; i < server_kv_action_count; ++i) {
-+            prometheus << "llamacpp:kv_action_observations_total{action=\"" << kv_action_names[i]
++            prometheus << "llamacpp:kv_action_observations_total{action=\""
++                       << server_kv_action_name(static_cast<server_kv_action>(i))
 +                       << "\"} " << kv_actions.observations[i] << "\n";
++        }
++        prometheus << "# HELP llamacpp:kv_action_failures_total Failed executions by selected action.\n"
++                   << "# TYPE llamacpp:kv_action_failures_total counter\n";
++        for (size_t i = 0; i < server_kv_action_count; ++i) {
++            prometheus << "llamacpp:kv_action_failures_total{action=\""
++                       << server_kv_action_name(static_cast<server_kv_action>(i))
++                       << "\"} " << kv_actions.action_failures[i] << "\n";
 +        }
 +        prometheus << "# HELP llamacpp:kv_action_observation_seconds_total Complete internal action cost by executed action.\n"
 +                   << "# TYPE llamacpp:kv_action_observation_seconds_total counter\n";
 +        for (size_t i = 0; i < server_kv_action_count; ++i) {
-+            prometheus << "llamacpp:kv_action_observation_seconds_total{action=\"" << kv_action_names[i]
++            prometheus << "llamacpp:kv_action_observation_seconds_total{action=\""
++                       << server_kv_action_name(static_cast<server_kv_action>(i))
 +                       << "\"} " << kv_actions.observation_total_milliseconds[i] / 1.e3 << "\n";
 +        }
 +        prometheus << "# HELP llamacpp:kv_action_last_model_feature Last normalized production model feature.\n"
@@ -7987,6 +9235,18 @@ index 986b2f1..0bb345c 100644
 +                   << "# TYPE llamacpp:kv_action_decision_seconds_max gauge\n"
 +                   << "llamacpp:kv_action_decision_seconds_max "
 +                   << kv_actions.maximum_decision_nanoseconds / 1.e9 << "\n";
++
++        const auto & llama_kv_status = res_task->kv_execution_status;
++        prometheus << "# HELP llamacpp:paged_decode_calls_total Decode calls that entered the production paged graph.\n"
++                   << "# TYPE llamacpp:paged_decode_calls_total counter\n"
++                   << "llamacpp:paged_decode_calls_total " << llama_kv_status.paged_decode_calls << "\n"
++                   << "# HELP llamacpp:paged_decode_fallbacks_total Paged requests rejected before KV mutation.\n"
++                   << "# TYPE llamacpp:paged_decode_fallbacks_total counter\n"
++                   << "llamacpp:paged_decode_fallbacks_total " << llama_kv_status.paged_decode_fallbacks << "\n"
++                   << "# HELP llamacpp:paged_decode_last_fallback_reason Last fail-closed reason code (0 means none).\n"
++                   << "# TYPE llamacpp:paged_decode_last_fallback_reason gauge\n"
++                   << "llamacpp:paged_decode_last_fallback_reason "
++                   << static_cast<int32_t>(llama_kv_status.fallback_reason) << "\n";
 +
 +        const auto & checkpoint = res_task->benefit_persistence;
 +        prometheus << "# HELP llamacpp:benefit_checkpoint_restore_total Benefit checkpoint startup outcomes.\n"
@@ -8782,10 +10042,10 @@ index 0000000..ac22980
 +};
 diff --git a/tools/server/server-kv-action-policy.cpp b/tools/server/server-kv-action-policy.cpp
 new file mode 100644
-index 0000000..af2fc9b
+index 0000000..ba38f00
 --- /dev/null
 +++ b/tools/server/server-kv-action-policy.cpp
-@@ -0,0 +1,361 @@
+@@ -0,0 +1,383 @@
 +#include "server-kv-action-policy.h"
 +
 +#include <algorithm>
@@ -8883,6 +10143,25 @@ index 0000000..af2fc9b
 +}
 +
 +} // namespace
++
++const char * server_kv_action_name(server_kv_action action) {
++    static constexpr const char * names[] = {
++        "direct", "remap", "paged", "device_swap", "host_swap", "recompute",
++    };
++    static_assert(std::size(names) == server_kv_action_count);
++    const size_t index = index_of(action);
++    return index < std::size(names) ? names[index] : "unknown";
++}
++
++const char * server_kv_action_reason_name(server_kv_action_reason reason) {
++    static constexpr const char * names[] = {
++        "minimum_estimated_cost", "fixed_rule", "no_optimized_action", "invalid_features",
++        "cold_start", "uncertainty_fallback", "positive_lower_bound", "shadow_baseline",
++    };
++    static_assert(std::size(names) == server_kv_action_reason_count);
++    const size_t index = static_cast<size_t>(reason);
++    return index < std::size(names) ? names[index] : "unknown";
++}
 +
 +const server_kv_action_estimate & server_kv_action_decision::estimate(
 +        server_kv_action candidate) const {
@@ -9000,6 +10279,8 @@ index 0000000..af2fc9b
 +                std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
 +        snapshot_.decisions++;
 +        snapshot_.action_decisions[index_of(value.action)]++;
++        snapshot_.reason_decisions[static_cast<size_t>(value.reason)]++;
++        snapshot_.action_reason_decisions[index_of(value.action)][static_cast<size_t>(value.reason)]++;
 +        snapshot_.safe_fallbacks += value.safe_fallback_used ? 1 : 0;
 +        snapshot_.invalid_feature_fallbacks +=
 +                value.reason == server_kv_action_reason::invalid_features ? 1 : 0;
@@ -9145,14 +10426,15 @@ index 0000000..af2fc9b
 +    if (!std::isfinite(cost) || cost < 0.0) return;
 +    learned_[action].observe(decision.model_features, cost);
 +    snapshot_.observations[action]++;
++    snapshot_.action_failures[action] += feedback.execution_failed ? 1 : 0;
 +    snapshot_.observation_total_milliseconds[action] += cost;
 +}
 diff --git a/tools/server/server-kv-action-policy.h b/tools/server/server-kv-action-policy.h
 new file mode 100644
-index 0000000..e273b3f
+index 0000000..7d2f671
 --- /dev/null
 +++ b/tools/server/server-kv-action-policy.h
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,174 @@
 +#pragma once
 +
 +#include <array>
@@ -9200,6 +10482,10 @@ index 0000000..e273b3f
 +
 +constexpr size_t server_kv_action_count = 6;
 +constexpr size_t server_kv_action_feature_count = 9;
++constexpr size_t server_kv_action_reason_count = 8;
++
++const char * server_kv_action_name(server_kv_action action);
++const char * server_kv_action_reason_name(server_kv_action_reason reason);
 +
 +struct server_kv_action_capabilities {
 +    bool direct = false;
@@ -9272,12 +10558,16 @@ index 0000000..e273b3f
 +struct server_kv_action_policy_snapshot {
 +    uint64_t decisions = 0;
 +    std::array<uint64_t, server_kv_action_count> action_decisions{};
++    std::array<uint64_t, server_kv_action_reason_count> reason_decisions{};
++    std::array<std::array<uint64_t, server_kv_action_reason_count>, server_kv_action_count>
++            action_reason_decisions{};
 +    uint64_t safe_fallbacks = 0;
 +    uint64_t invalid_feature_fallbacks = 0;
 +    uint64_t cold_start_fallbacks = 0;
 +    uint64_t uncertainty_fallbacks = 0;
 +    uint64_t shadow_decisions = 0;
 +    std::array<uint64_t, server_kv_action_count> observations{};
++    std::array<uint64_t, server_kv_action_count> action_failures{};
 +    std::array<double, server_kv_action_count> observation_total_milliseconds{};
 +    std::array<double, server_kv_action_feature_count> last_model_features{};
 +    uint64_t total_decision_nanoseconds = 0;
@@ -11688,13 +12978,14 @@ index 0000000..a5cc17d
 +};
 diff --git a/tools/server/server-runtime-adapter.cpp b/tools/server/server-runtime-adapter.cpp
 new file mode 100644
-index 0000000..056ed91
+index 0000000..d0eb84d
 --- /dev/null
 +++ b/tools/server/server-runtime-adapter.cpp
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,80 @@
 +#include "server-runtime-adapter.h"
 +
 +#include "ggml.h"
++#include "log.h"
 +
 +#include <algorithm>
 +#include <chrono>
@@ -11713,6 +13004,12 @@ index 0000000..056ed91
 +        if (const char * value = std::getenv("CACHEFLOW_TEST_DECODE_FAILURE_CODE")) {
 +            failure_code_ = std::atoi(value);
 +        }
++        if (const char * value = std::getenv("CACHEFLOW_TEST_POST_SUCCESS_FAILURES")) {
++            post_success_failures_remaining_ = std::max(0, std::atoi(value));
++        }
++        if (const char * value = std::getenv("CACHEFLOW_TEST_POST_SUCCESS_FAILURE_AFTER")) {
++            post_success_failure_after_ = std::max(0, std::atoi(value));
++        }
 +    }
 +
 +    server_runtime_decode_result decode(llama_context * context, llama_batch batch) override {
@@ -11723,6 +13020,13 @@ index 0000000..056ed91
 +            code = failure_code_;
 +        } else {
 +            code = llama_decode(context, batch);
++            if (code == 0 && post_success_failures_remaining_ > 0) {
++                if (successful_decodes_++ >= post_success_failure_after_) {
++                    --post_success_failures_remaining_;
++                    LOG_WRN("CacheFlow test injected a late CUDA failure after successful llama_decode\n");
++                    code = failure_code_;
++                }
++            }
 +        }
 +        return { code, code == 0, (uint64_t) (ggml_time_us() - started) };
 +    }
@@ -11730,6 +13034,9 @@ index 0000000..056ed91
 +private:
 +    int failures_remaining_ = 0;
 +    int failure_code_ = 1;
++    int post_success_failures_remaining_ = 0;
++    int post_success_failure_after_ = 0;
++    int successful_decodes_ = 0;
 +};
 +
 +} // namespace
@@ -11963,10 +13270,49 @@ index 0000000..3b0b46a
 +    server_speculation_state & get_or_create(int sequence_id);
 +};
 diff --git a/tools/server/server-task.cpp b/tools/server/server-task.cpp
-index 72a4bd0..5c404c6 100644
+index 72a4bd0..e957514 100644
 --- a/tools/server/server-task.cpp
 +++ b/tools/server/server-task.cpp
-@@ -1895,6 +1895,7 @@ json server_task_result_metrics::to_json() {
+@@ -1887,6 +1887,38 @@ json server_task_result_error::to_json() {
+ //
+ // server_task_result_metrics
+ //
++static json server_kv_action_policy_to_json(const server_kv_action_policy_snapshot & snapshot) {
++    json result = {
++        { "decisions", snapshot.decisions },
++        { "safe_fallbacks", snapshot.safe_fallbacks },
++        { "invalid_feature_fallbacks", snapshot.invalid_feature_fallbacks },
++        { "cold_start_fallbacks", snapshot.cold_start_fallbacks },
++        { "uncertainty_fallbacks", snapshot.uncertainty_fallbacks },
++        { "shadow_decisions", snapshot.shadow_decisions },
++        { "total_decision_nanoseconds", snapshot.total_decision_nanoseconds },
++        { "maximum_decision_nanoseconds", snapshot.maximum_decision_nanoseconds },
++        { "reasons", json::object() },
++        { "action_reasons", json::object() },
++        { "observations", json::object() },
++    };
++    for (size_t action_index = 0; action_index < server_kv_action_count; ++action_index) {
++        const auto action = static_cast<server_kv_action>(action_index);
++        const char * action_name = server_kv_action_name(action);
++        result[action_name] = snapshot.action_decisions[action_index];
++        result["observations"][action_name] = snapshot.observations[action_index];
++        for (size_t reason_index = 0; reason_index < server_kv_action_reason_count; ++reason_index) {
++            const auto reason = static_cast<server_kv_action_reason>(reason_index);
++            result["action_reasons"][action_name][server_kv_action_reason_name(reason)] =
++                    snapshot.action_reason_decisions[action_index][reason_index];
++        }
++    }
++    for (size_t reason_index = 0; reason_index < server_kv_action_reason_count; ++reason_index) {
++        const auto reason = static_cast<server_kv_action_reason>(reason_index);
++        result["reasons"][server_kv_action_reason_name(reason)] = snapshot.reason_decisions[reason_index];
++    }
++    return result;
++}
++
+ json server_task_result_metrics::to_json() {
+     return json {
+         { "idle",                            n_idle_slots },
+@@ -1895,6 +1927,7 @@ json server_task_result_metrics::to_json() {
          { "t_start",                         t_start },
  
          { "n_prompt_tokens_processed_total", n_prompt_tokens_processed_total },
@@ -11974,7 +13320,7 @@ index 72a4bd0..5c404c6 100644
          { "t_tokens_generation_total",       t_tokens_generation_total },
          { "n_tokens_predicted_total",        n_tokens_predicted_total },
          { "t_prompt_processing_total",       t_prompt_processing_total },
-@@ -1902,6 +1903,7 @@ json server_task_result_metrics::to_json() {
+@@ -1902,6 +1935,7 @@ json server_task_result_metrics::to_json() {
          { "n_tokens_max",                    n_tokens_max },
  
          { "n_prompt_tokens_processed",       n_prompt_tokens_processed },
@@ -11982,7 +13328,7 @@ index 72a4bd0..5c404c6 100644
          { "t_prompt_processing",             t_prompt_processing },
          { "n_tokens_predicted",              n_tokens_predicted },
          { "t_tokens_generation",             t_tokens_generation },
-@@ -1909,6 +1911,83 @@ json server_task_result_metrics::to_json() {
+@@ -1909,6 +1943,60 @@ json server_task_result_metrics::to_json() {
          { "n_decode_total",                  n_decode_total },
          { "n_busy_slots_total",              n_busy_slots_total },
  
@@ -12031,30 +13377,7 @@ index 72a4bd0..5c404c6 100644
 +            { "predicted_benefit_ms", benefit_cuda.last_predicted_benefit_ms },
 +            { "uncertainty_ms", benefit_cuda.last_uncertainty_ms }
 +        } },
-+        { "kv_action_policy", {
-+            { "decisions", kv_action_policy.decisions },
-+            { "direct", kv_action_policy.action_decisions[(size_t) server_kv_action::direct] },
-+            { "remap", kv_action_policy.action_decisions[(size_t) server_kv_action::remap] },
-+            { "paged", kv_action_policy.action_decisions[(size_t) server_kv_action::paged] },
-+            { "device_swap", kv_action_policy.action_decisions[(size_t) server_kv_action::device_swap] },
-+            { "host_swap", kv_action_policy.action_decisions[(size_t) server_kv_action::host_swap] },
-+            { "recompute", kv_action_policy.action_decisions[(size_t) server_kv_action::recompute] },
-+            { "safe_fallbacks", kv_action_policy.safe_fallbacks },
-+            { "invalid_feature_fallbacks", kv_action_policy.invalid_feature_fallbacks },
-+            { "cold_start_fallbacks", kv_action_policy.cold_start_fallbacks },
-+            { "uncertainty_fallbacks", kv_action_policy.uncertainty_fallbacks },
-+            { "shadow_decisions", kv_action_policy.shadow_decisions },
-+            { "observations", {
-+                { "direct", kv_action_policy.observations[(size_t) server_kv_action::direct] },
-+                { "remap", kv_action_policy.observations[(size_t) server_kv_action::remap] },
-+                { "paged", kv_action_policy.observations[(size_t) server_kv_action::paged] },
-+                { "device_swap", kv_action_policy.observations[(size_t) server_kv_action::device_swap] },
-+                { "host_swap", kv_action_policy.observations[(size_t) server_kv_action::host_swap] },
-+                { "recompute", kv_action_policy.observations[(size_t) server_kv_action::recompute] }
-+            } },
-+            { "total_decision_nanoseconds", kv_action_policy.total_decision_nanoseconds },
-+            { "maximum_decision_nanoseconds", kv_action_policy.maximum_decision_nanoseconds }
-+        } },
++        { "kv_action_policy", server_kv_action_policy_to_json(kv_action_policy) },
 +
 +        { "kv_cache_tokens",                 kv_cache_tokens },
 +        { "kv_cache_capacity_tokens",        kv_cache_capacity_tokens },
@@ -12067,7 +13390,7 @@ index 72a4bd0..5c404c6 100644
      };
  }
 diff --git a/tools/server/server-task.h b/tools/server/server-task.h
-index bdadcff..0988699 100644
+index bdadcff..8f6a46d 100644
 --- a/tools/server/server-task.h
 +++ b/tools/server/server-task.h
 @@ -10,6 +10,12 @@
@@ -12139,7 +13462,7 @@ index bdadcff..0988699 100644
      uint64_t t_prompt_processing       = 0;
  
      uint64_t n_tokens_predicted  = 0;
-@@ -532,6 +559,61 @@ struct server_task_result_metrics : server_task_result {
+@@ -532,6 +559,62 @@ struct server_task_result_metrics : server_task_result {
      uint64_t n_decode_total     = 0;
      uint64_t n_busy_slots_total = 0;
  
@@ -12170,6 +13493,7 @@ index bdadcff..0988699 100644
 +    server_benefit_snapshot benefit_cuda;
 +    server_benefit_persistence_snapshot benefit_persistence;
 +    server_kv_action_policy_snapshot kv_action_policy;
++    llama_kv_execution_status kv_execution_status {};
 +
 +    uint64_t kv_cache_tokens          = 0;
 +    uint64_t kv_cache_capacity_tokens = 0;
