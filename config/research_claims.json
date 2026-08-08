@@ -298,16 +298,17 @@
       ],
       "evidence_sources": [
         "config/production_paged_protocol.json",
-        "results/research/h7-production-paged-v1.0.0/manifest.json",
-        "results/research/h7-production-paged-v1.0.0/summary.json",
-        "results/research/h7-production-paged-v1.0.0/trials.json",
-        "results/research/h7-production-paged-v1.0.0/mechanism.json"
+        "results/research/h7-production-paged-v1.1.0/manifest.json",
+        "results/research/h7-production-paged-v1.1.0/summary.json",
+        "results/research/h7-production-paged-v1.1.0/trials.json",
+        "results/research/h7-production-paged-v1.1.0/mechanism.json"
       ],
       "observed_results": [
-        "All ten AB/BA pairs produced exact matching content; Paged entered the production graph ten times with zero fallbacks.",
+        "The v1.0 artifact is superseded because its five-token request did not cross a physical page boundary; it is retained under results/research/superseded for audit only.",
+        "All ten v1.1 AB/BA pairs used a measured 17-token cross-page context and produced exact matching content; Paged entered the production graph ten times with zero fallbacks.",
         "A method-isolated PID-filtered NSYS replay recorded exactly 24 cacheflow_paged_decode_fattn_k1<64> launches, one per Qwen2.5-0.5B layer; profiler timing is non-primary.",
-        "Direct client latency was median/P95 9.100/29.160 ms and Paged was 30.118/37.861 ms. The paired Paged-minus-Direct median was +10.886 ms with a bootstrap 95% interval of +0.952 to +22.929 ms.",
-        "Paged P95 regressed by 29.84%, exceeding the preregistered +5% limit. Correctness passed, production promotion failed, and Paged remains opt-in and excluded from default policy selection."
+        "Direct client latency was median/P95 16.054/27.354 ms and Paged was 21.404/29.210 ms. The paired Paged-minus-Direct median was +2.705 ms with a bootstrap 95% interval of -1.185 to +12.019 ms.",
+        "Paged P95 regressed by 6.78%, exceeding the preregistered +5% limit. Correctness passed, production promotion failed, and Paged remains opt-in and excluded from default policy selection."
       ],
       "scope_limits": [
         "Qwen2.5-0.5B, FP16 KV, D64, page 16, batch/query token 1, context no greater than 17, complete CUDA offload",

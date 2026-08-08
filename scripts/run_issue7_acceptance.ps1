@@ -5,6 +5,9 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 
 Push-Location $projectRoot
 try {
+    python scripts\run_production_paged_experiment.py --validate-only
+    if ($LASTEXITCODE -ne 0) { throw "formal production Paged artifact validation failed" }
+
     python scripts\run_production_paged_journey.py
     if ($LASTEXITCODE -ne 0) { throw "Direct/Paged production journey failed" }
 

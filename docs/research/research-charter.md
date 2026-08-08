@@ -84,7 +84,7 @@ Issue #5 的 H3 v1.0.0 已得到受限混合结果：K1 直接分页 kernel 在�
 
 Issue #6 的 v1.0.0 至 v1.2.0 均因后续审计发现的证据合同问题而否决并完整保留。v1.3.0 保存并语义校验 200 组原始 Prometheus/响应 observation，每个 regime 独立采集 Recompute，按真实 observation 顺序 replay，强制完整 trace cluster，并量化各动作服务器相对 H0 锚点的状态特征偏差。H0/A1/L1 的 median/P95/cumulative regret 均为 0/1.953/15.543 ms、harmful 0；离线 T1 为 0/1.516/5.506 ms、harmful 0，paired trace-cluster CI [-0.5285, -0.0511] ms。由于动作服务器并非克隆同一内存状态，只称本次 matched-workload replay 中 T1 低于 H0，不作因果反事实或生产在线收益声明。
 
-Issue #6 的正式 replay 动作仍只包含 Direct、CUDA-managed Swap、transactional host Swap 与 Recompute；它不被事后改写。Issue #7 另行增加真实 CUDA Remap 和默认关闭的受限 Paged production adapter：Paged 只对 Qwen2.5-0.5B、FP16 KV、page 16、D64、单 token/batch 1、context ≤ 17、完整 GPU offload开放，超出范围在 KV mutation 前回退。Issue #7 的 10 组正式 AB/BA 配对证明正确性与生产图接入，但 Paged client P95 相对 Direct 回退 29.84%，配对差中位数 +10.886 ms，bootstrap 95% 区间 [+0.952, +22.929] ms，故 +5% promotion gate 失败并保持 opt-in。Issue #6 的 500 万次 choose 结果与 hash-bound artifact 仍位于 `results/research/h4-kv-action-v1.3.0/`，不冒充 Issue #7 在线收益。
+Issue #6 的正式 replay 动作仍只包含 Direct、CUDA-managed Swap、transactional host Swap 与 Recompute；它不被事后改写。Issue #7 另行增加真实 CUDA Remap 和默认关闭的受限 Paged production adapter：Paged 只对 Qwen2.5-0.5B、FP16 KV、page 16、D64、单 token/batch 1、context ≤ 17、完整 GPU offload开放，超出范围在 KV mutation 前回退。Issue #7 v1.1 的 10 组 17-token 跨页 AB/BA 配对证明正确性与生产图接入，但 Paged client P95 相对 Direct 回退 6.78%，配对差中位数 +2.705 ms，bootstrap 95% 区间 [-1.185, +12.019] ms，故 +5% promotion gate 失败并保持 opt-in；未跨页的 v1.0 降级为 superseded。Issue #6 的 500 万次 choose 结果与 hash-bound artifact 仍位于 `results/research/h4-kv-action-v1.3.0/`，不冒充 Issue #7 在线收益。
 
 ## 7. H5：已观察到的反向因果链
 

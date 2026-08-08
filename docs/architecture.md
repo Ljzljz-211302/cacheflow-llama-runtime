@@ -1238,7 +1238,7 @@ Remap 只有在真实 donor prefix 大于目标 slot 的 resident prefix 时才�
 
 统一入口 `scripts/run_issue7_acceptance.ps1` 覆盖 Direct、真实 CUDA Remap、Paged、out-of-envelope Recompute、容量压力回收和晚到 CUDA failure 后完整重算；Paged 还与原生 Flash/non-Flash backend envelope 做端到端 top-logprob 差分，并要求动作计数可由 `{action,reason}` 联合指标完整归因。算子级独立 oracle 继续使用 `atol=rtol=1e-3`。性能只采用预注册的 paired no-profiler 服务实验；若 +5% P95 promotion gate 失败，Paged 保持 opt-in，不因功能正确而默认启用。
 
-正式 `h7-production-paged-v1.0.0` 工件在干净外层提交 `b62305d`、vendor 提交 `8f999df` 上完成 10 组 AB/BA：Direct/Paged 输出全部一致，Paged graph entry 10、fallback 0，机制 replay 的 24 个 K1 launch 与 24 层模型一致。Paged client P95 37.861 ms 相对 Direct 29.160 ms 回退 29.84%；配对差中位数 +10.886 ms，bootstrap 95% 区间 [+0.952, +22.929] ms。故策略 capability 可以描述“可执行”，但 promotion 状态必须为 false；H0/L1 都不得把 Paged 当成默认性能动作。该边界仅适用于 Qwen2.5-0.5B、batch 1、短 context。
+正式 `h7-production-paged-v1.1.0` 工件在干净外层提交 `9182882`、vendor 提交 `130bd22` 上完成 10 组 17-token 跨页 AB/BA：Direct/Paged 输出全部一致，Paged graph entry 10、fallback 0，机制 replay 的 24 个 K1 launch 与 24 层模型一致。Paged client P95 29.210 ms 相对 Direct 27.354 ms 回退 6.78%；配对差中位数 +2.705 ms，bootstrap 95% 区间 [-1.185, +12.019] ms。故策略 capability 可以描述“可执行”，但 promotion 状态必须为 false；H0/L1 都不得把 Paged 当成默认性能动作。v1.0 因请求没有跨过物理 page boundary 而仅保留为 superseded 审计记录。该边界仅适用于 Qwen2.5-0.5B、batch 1、17-token context。
 
 ### 26.5 正式证据与边界
 
