@@ -1210,10 +1210,10 @@ Issue #4 在这条服务因果链下新增 H2 算子机制切片。`bench-kv-blo
 | CUDA-managed Swap | 是 | 是 | pinned-host snapshot 恢复后进入 decode |
 | Transactional host Swap | 是 | 是 | memory/file store 恢复后进入 decode |
 | Recompute | 是 | 是 | 重新 prefill 后进入 decode |
-| Remap | 否 | 否 | 算子存在，但缺少完整 `llama_decode` action adapter |
-| Paged | 否 | 否 | H3 长上下文负结果且缺少生产 dispatch adapter |
+| Remap | 是（真实跨 stream prefix adoption） | 是 | donor 已确定且 block runtime 可执行真实 CUDA 映射 |
+| Paged | 是（opt-in 受限 envelope） | 是 | Qwen2.5-0.5B、FP16 KV、D64、page 16、batch/query token 1、context ≤ 17、全层 CUDA |
 
-Remap/Paged 在生产快照中的 capability 为 false；正式 CUDA 证据要求 Paged decision counter 恒为 0。可运行的 microbenchmark 不等于服务动作已经可用。
+Remap 只有在真实 donor prefix 大于目标 slot 的 resident prefix 时才声明 capability；Paged 默认关闭，必须显式使用 `--kv-paged-decode`，任何 shape、dtype、page、mask、offload 或 context 不满足均在 KV mutation 前 fail closed。H3 的中长 context 负结果仍保留，所以生产 Paged 不扩展到中长 context，也不默认启用。
 
 ### 26.3 H0/A1/T1/L1
 
@@ -1226,7 +1226,17 @@ Remap/Paged 在生产快照中的 capability 为 false；正式 CUDA 证据要�
 
 ### 26.4 服务集成与可观测性
 
-`server_context::get_available_slot` 生成真实动作快照；slot 保存 pending decision，直到下一次成功提交 decode 才 `observe`。Prometheus 暴露逐动作 decision/observation、safe fallback、invalid/cold/uncertainty/shadow、总决策时间与最大决策时间。CLI 为 `--kv-action-policy fixed|analytical|learned-shadow|learned`，并提供最小样本、confidence beta 和 switch margin。Direct、两类 Swap、Recompute 的真实 smoke 均验证 selected/observed 各增加 1；恢复失败必须转为 Recompute。
+`server_context::get_available_slot` 与显式 slot 请求共用同一个动作快照/能力构造器；override 只在该结果上做最终过滤，不能另写一套 capability。slot 保存 pending decision，直到下一次成功提交 decode 才 `observe`。Prometheus 暴露逐动作 decision/observation/failure/完整 cost、`{action,reason}` 联合 decision、逐 reason 汇总、safe fallback、invalid/cold/uncertainty/shadow、总决策时间与最大决策时间。CLI 为 `--kv-action-policy fixed|analytical|learned-shadow|learned`，并提供 `--kv-action-override` 受控验收入口、最小样本、confidence beta 和 switch margin。Direct、Remap、受限 Paged、两类 Swap、Recompute 的真实用户链路均要求 selected/observed 与实际执行一致；恢复或 CUDA 执行失败必须按原动作记录失败，再清理受影响状态。
+
+## 27. Production Paged Dispatch 与故障原子性（Issue #7）
+
+生产路径不是调用 H3 benchmark。`llama_kv_cache::build_paged_decode_layout` 从真实 cell metadata 和当前 `prepare()` destination 构造 block table；重算缓存尾 token 时，pending destination 必须覆盖相同 logical position 的旧 cell。该布局通过 `GGML_OP_FLASH_ATTN_EXT` 的额外输入进入每一层 attention，CUDA K1 直接使用真实 K/V tensor stride 和物理 cell base，不生成 contiguous K/V 临时副本，输出继续进入原有 `wo`、logits 与 sampler。Paged 分支的 CUDA buffer size 必须至少包含普通输出 tensor bytes，即使额外 scratch 为零；`test-backend-ops` 用 F32 Q/FP16 KV 与 CPU Flash Attention 交叉验证，独立 CUDA oracle 继续覆盖生产 F16 Q。
+
+`llama_context` 在 `mctx->apply()` 前完成 envelope 与布局检查。只有 Qwen2.5-0.5B `24L/14Q/2KV/D64`、page 16、FP16 K/V、非转置 V、单 sequence/单 query token、context ≤ 17、causal Flash Attention、无 ALiBi/softcap/sink、完整 GPU offload 才设置 Paged graph topology；其余请求保持 Direct/Recompute。graph reuse key 包含 Paged topology，避免复用错误图。
+
+真实服务动作边界从 policy snapshot 开始，到下一次有用 decode 返回。成功、fallback 和 failure 分开计数；测试注入可在真实 `llama_decode` 已成功后模拟异步 CUDA 错误被晚发现，服务必须返回错误、按失败动作记录 penalty、清理整个受影响 sequence，并让下一请求完整重算。压力链路另由 capacity planner 在共享 KV 超容量前选择 idle victim，记录 pressure/eviction/reclaimed/failure 指标，不把主动回收冒充 Paged 成功。
+
+统一入口 `scripts/run_issue7_acceptance.ps1` 覆盖 Direct、真实 CUDA Remap、Paged、out-of-envelope Recompute、容量压力回收和晚到 CUDA failure 后完整重算；Paged 还与原生 Flash/non-Flash backend envelope 做端到端 top-logprob 差分，并要求动作计数可由 `{action,reason}` 联合指标完整归因。算子级独立 oracle 继续使用 `atol=rtol=1e-3`。性能只采用预注册的 paired no-profiler 服务实验；若 +5% P95 promotion gate 失败，Paged 保持 opt-in，不因功能正确而默认启用。
 
 ### 26.5 正式证据与边界
 

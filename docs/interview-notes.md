@@ -219,7 +219,7 @@ CUDA mixed workload 缺少 backend-aware policy guard；Hybrid/Recurrent 只有 
 
 - 不说“重写 llama.cpp”或把上游行数算个人贡献；
 - 不把 N-gram speculation 说成 draft Transformer；
-- 不把 logical block 支持说成所有 memory 类型的物理 paged KV；
+- 不把受限 Qwen2.5-0.5B Paged Decode 说成所有 memory 类型、模型、context 或 prefill 都支持；
 - 不把 phase trace 说成 sampled-stack profiler；
 - 不说 CacheFlow 在 CUDA workload 普遍更快；
 - 不用单次 trial 或微基准代替端到端结论；

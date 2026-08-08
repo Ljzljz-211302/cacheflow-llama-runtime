@@ -166,8 +166,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 
 ## Unified KV Action Policy 验收
 
-- 生产动作：Direct、CUDA-managed Swap、事务型 host Swap、Recompute 均走真实服务路径；每条正式 row 的 selected/observed counter 均精确增加 1，restore 失败显式转 Recompute。
-- 能力门禁：Remap/Paged 没有完整 `llama_decode` adapter，因此正式生产 capability 为 false；Paged decision 为 0，不把 H3 microbenchmark 冒充生产 dispatch。
+- 生产动作：Direct、真实 CUDA Remap、受限 opt-in Paged、CUDA-managed Swap、事务型 host Swap、Recompute 均走真实服务路径；selected/observed counter 与实际动作一致，`{action,reason}` 联合计数可解释每个动作为何被选中，restore/CUDA 失败按原动作记录失败并清理状态。
+- 能力门禁：Remap 只在真实 donor prefix 可执行时开放；Paged 只支持 Qwen2.5-0.5B、FP16 KV、page 16、D64、单 token/batch 1、context ≤ 17、完整 GPU offload，默认关闭。超出 envelope 的受控用户请求回退 Recompute，不把 H3 microbenchmark 当作生产证据。
+- 验收入口：`scripts/run_issue7_acceptance.ps1` 串行执行 Direct/Paged differential、真实 Remap、KV pressure fallback、晚到 CUDA failure/recovery；CUDA build gate 另执行 `test-backend-ops` 的 Paged Flash Attention CPU/CUDA 交叉验证、独立 F16 CUDA oracle、策略与 block-table 单测。
 - 算法：H0 固定安全规则、A1 解析模型、T1 分桶查表、L1 置信约束 Ridge 使用相同 snapshot 和完整动作边界；无效/OOD/冷启动/不确定性均 fail closed。
 - 数据隔离：20 个 trace group 按时间顺序切为 12 train / 8 evaluation，session、prefix family 与 trace 均无交叉；16 个 held-out resident/preempted snapshot 采用 paired action observation。
 - v1.0.0 因错误使用 HTTP 往返计时且 L1 合同与生产不一致而被否决，仅保留在 `results/research/superseded/`。v1.1.0 从干净提交 `32c8fe7` 重采集：40 trace 按时间切为 20 train/20 evaluation，resident/preempted 各 20 个 held-out pair。

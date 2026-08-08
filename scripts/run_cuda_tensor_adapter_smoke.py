@@ -31,6 +31,7 @@ def main() -> None:
         "-c", "2048", "-np", "2", "-t", "8", "-ngl", "99",
         "--no-kv-unified", "--no-cache-idle-slots", "--no-warmup", "-lv", "4",
         "--kv-block-runtime", "--kv-block-size", "16", "--metrics",
+        "--kv-action-policy", "analytical", "--kv-action-override", "remap",
     ]
     environment = os.environ.copy()
     cuda_bin = ROOT / "runtime/cuda-dev/Library/bin"
@@ -114,6 +115,10 @@ def main() -> None:
                       if line.startswith("llamacpp:cuda_kv_remap_vectorized_bytes_total ")]
     if not vector_metrics or float(vector_metrics[-1].split()[-1]) <= 0:
         raise AssertionError("production CUDA vectorized KV remap metric did not advance")
+    remap_decisions = [line for line in prometheus.splitlines()
+                       if line.startswith('llamacpp:kv_action_decisions_total{action="remap"}')]
+    if not remap_decisions or float(remap_decisions[-1].split()[-1]) <= 0:
+        raise AssertionError("real user request did not select the Remap action")
     if not results[-1].get("content"):
         raise AssertionError("destination response is empty")
     if results[-1].get("content") != cold_result.get("content"):
@@ -121,6 +126,7 @@ def main() -> None:
     print(json.dumps({"evidence_log": evidence[-1], "prefix_log": prefix_evidence[-1],
         "cow_log": cow_evidence[-1],
         "vectorized_remap_bytes": float(vector_metrics[-1].split()[-1]),
+        "remap_decisions": float(remap_decisions[-1].split()[-1]),
         "log": str(log_path)}, ensure_ascii=False))
 
 

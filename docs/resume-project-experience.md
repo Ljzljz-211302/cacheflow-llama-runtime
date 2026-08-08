@@ -30,7 +30,7 @@
 
 ## 禁止使用的夸大表述
 
-- “实现了 FlashAttention/PagedAttention”——当前没有；
+- “实现了通用 FlashAttention/PagedAttention”——当前仅实现并接入受限 Qwen2.5-0.5B 单 token Paged Decode K1，不能外推通用模型、长上下文或 prefill；
 - “端到端推理加速 53.33%”——该数字仅属于 KV Remap 微基准；
 - “支持生产级公网多租户”——当前定位为单机可信环境；
 - “科研成果/论文成果”——除非后续确有导师、立项、论文或投稿事实。

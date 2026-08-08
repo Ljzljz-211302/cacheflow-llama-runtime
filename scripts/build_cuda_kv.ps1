@@ -10,6 +10,9 @@ $vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\
 $testExe = Join-Path $buildRoot "bin\test-kv-block-cuda.exe"
 $remapTestExe = Join-Path $buildRoot "bin\test-kv-remap-cuda.exe"
 $pagedTestExe = Join-Path $buildRoot "bin\test-paged-decode-cuda.exe"
+$backendOpsExe = Join-Path $buildRoot "bin\test-backend-ops.exe"
+$policyTestExe = Join-Path $buildRoot "bin\test-kv-action-policy.exe"
+$layoutTestExe = Join-Path $buildRoot "bin\test-paged-decode-layout.exe"
 $realSwapExe = Join-Path $buildRoot "bin\test-kv-real-cuda-swap.exe"
 $model = Join-Path $projectRoot "models\qwen2.5-0.5b-instruct-q4_k_m.gguf"
 
@@ -37,7 +40,7 @@ $configure = @(
 & cmd.exe /d /c $configure
 if ($LASTEXITCODE -ne 0) { throw "CUDA configure failed" }
 
-$build = "call `"$vcvars`" && cmake --build $buildCmake --target test-kv-block-cuda test-kv-remap-cuda test-paged-decode-cuda test-kv-real-cuda-swap bench-kv-block-cuda bench-kv-cow-cuda bench-paged-decode-cuda llama-server -j 4"
+$build = "call `"$vcvars`" && cmake --build $buildCmake --target test-kv-block-cuda test-kv-remap-cuda test-paged-decode-cuda test-kv-real-cuda-swap test-backend-ops test-kv-action-policy test-paged-decode-layout bench-kv-block-cuda bench-kv-cow-cuda bench-paged-decode-cuda llama-server -j 4"
 & cmd.exe /d /c $build
 if ($LASTEXITCODE -ne 0) { throw "CUDA KV target build failed" }
 
@@ -48,6 +51,12 @@ if ($LASTEXITCODE -ne 0) { throw "CPU/CUDA KV correctness matrix failed" }
 if ($LASTEXITCODE -ne 0) { throw "vectorized CUDA KV remap correctness matrix failed" }
 & $pagedTestExe
 if ($LASTEXITCODE -ne 0) { throw "restricted paged decode differential tests failed" }
+& $backendOpsExe -b CUDA0 -o FLASH_ATTN_EXT -p "context=17"
+if ($LASTEXITCODE -ne 0) { throw "production paged Flash Attention backend-op differential test failed" }
+& $policyTestExe
+if ($LASTEXITCODE -ne 0) { throw "unified KV action policy tests failed" }
+& $layoutTestExe
+if ($LASTEXITCODE -ne 0) { throw "production Paged block-table layout tests failed" }
 & $realSwapExe $model
 if ($LASTEXITCODE -ne 0) { throw "real llama CUDA KV swap test failed" }
 

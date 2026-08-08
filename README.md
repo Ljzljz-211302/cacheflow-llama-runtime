@@ -58,7 +58,7 @@ flowchart LR
 
 ### Unified KV Action Policy
 
-服务现在用同一个 fail-closed 接口比较 Direct、CUDA-managed Swap、事务型 host Swap 与 Recompute；Remap/Paged 在缺少完整服务 adapter 时由 capability gate 禁止进入生产选择。策略包含固定 H0、解析 A1、分桶查表 T1 与带置信边界/H0 fallback 的 L1，并通过 Prometheus 分开记录推荐、实际执行和完整动作反馈。
+服务现在用同一个 fail-closed 接口比较 Direct、真实 CUDA Remap、受限 opt-in Paged Decode、CUDA-managed Swap、事务型 host Swap 与 Recompute。Paged 只开放 Qwen2.5-0.5B、FP16 KV、page 16、D64、单 token/batch 1、context ≤ 17 的全 GPU 路径；其他请求在 KV mutation 前回退。策略包含固定 H0、解析 A1、分桶查表 T1 与带置信边界/H0 fallback 的 L1，Prometheus 分开记录选择原因、实际动作、完整成本和失败次数。
 
 正式 Qwen2.5-0.5B CUDA v1.3 matched-workload replay 使用 40 个隔离 trace（20 train/20 evaluation），保存并语义校验 200 组原始 Prometheus/响应 observation，按真实 observation 顺序训练并按完整 trace 聚类 bootstrap。H0/A1/L1 的 median/P95/cumulative regret 均为 `0/1.953/15.543 ms`、harmful 0；L1 未切换。离线 T1 为 `0/1.516/5.506 ms`、harmful 0，paired trace-cluster mean-regret delta 95% CI `[-0.5285, -0.0511] ms`，在本次 matched-workload replay 中低于 H0，但不外推为克隆状态下的因果收益或生产在线收益。500 万次 choose 的最差 p99 1.000 us、decision/action ratio p99 0.0644%、零 allocation；源码审计仅确认未发现直接 CUDA 同步符号或后端 include，raw max 1997.800 us 只作 Windows 抢占诊断。v1.0.0 至 v1.2.0 均仅保留在 `results/research/superseded/`。
 

@@ -66,7 +66,7 @@
 
 - 上表是 KV Remap 微基准，不等价于 TTFT、TPS 或端到端延迟提升；
 - 实验只覆盖单台 RTX 4050 Laptop GPU 和指定 FP16 KV 布局，不能外推到 A100/H100 或多 GPU；
-- 当前实现属于模型 KV 数据移动算子，不是 FlashAttention、GEMM 或完整 Paged Attention；
+- 当前实现包含 KV 数据移动算子与受限 Qwen2.5-0.5B 单 token Paged Decode K1；它不是通用 FlashAttention、GEMM、prefill PagedAttention 或任意模型实现；
 - 真实应用指标证明算子被调用，不能证明已有外部用户或线上采用率。
 - 本次增量的确定性功能、Sanitizer、真实模型与 Remap 性能门禁均通过；仓库全量套件的既有在线学习统计门禁在两次运行中分别出现不同的时序敏感失败，因此不能声称 Full 当前稳定绿灯。
 
