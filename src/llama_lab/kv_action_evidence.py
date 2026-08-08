@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+import os
 import random
 import re
 import statistics
 import subprocess
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Iterable
@@ -83,12 +85,11 @@ def make_balanced_action_orders(
     return result
 
 
-def audit_kv_action_policy_no_cuda_sync(path: Path) -> dict[str, Any]:
-    paths = (path, path.with_suffix(".h"))
-    sources = {candidate.name: candidate.read_text(encoding="utf-8") for candidate in paths}
+def _audit_kv_action_policy_sources(sources: dict[str, bytes]) -> dict[str, Any]:
+    decoded = {name: source.decode("utf-8") for name, source in sources.items()}
     includes = {
         name: re.findall(r"^\s*#\s*include\s+([^\s]+)", source, flags=re.MULTILINE)
-        for name, source in sources.items()
+        for name, source in decoded.items()
     }
     unexpected = {
         name: [include for include in observed if include not in POLICY_ALLOWED_INCLUDES[name]]
@@ -97,12 +98,14 @@ def audit_kv_action_policy_no_cuda_sync(path: Path) -> dict[str, Any]:
     }
     matches = [
         {"file": name, "symbol": symbol}
-        for name, source in sources.items()
+        for name, source in decoded.items()
         for symbol in POLICY_PROHIBITED_SYMBOLS
         if symbol in source
     ]
     return {
-        "source_files": {candidate.name: _sha256(candidate) for candidate in paths},
+        "source_files": {
+            name: hashlib.sha256(source).hexdigest() for name, source in sources.items()
+        },
         "allowed_includes": {
             name: list(allowed) for name, allowed in POLICY_ALLOWED_INCLUDES.items()
         },
@@ -112,6 +115,13 @@ def audit_kv_action_policy_no_cuda_sync(path: Path) -> dict[str, Any]:
         "matches": matches,
         "passed": not unexpected and not matches,
     }
+
+
+def audit_kv_action_policy_no_cuda_sync(path: Path) -> dict[str, Any]:
+    paths = (path, path.with_suffix(".h"))
+    return _audit_kv_action_policy_sources(
+        {candidate.name: candidate.read_bytes() for candidate in paths}
+    )
 
 
 def validate_kv_action_collection_order(
@@ -604,38 +614,45 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
     if manifest.get("patch_sha256") != hashlib.sha256(committed_patch).hexdigest():
         raise ValueError("KV action committed replay-patch hash differs")
     vendor_root = project_root / "vendor/llama.cpp"
+    replayed_sync_audit: dict[str, Any] | None = None
     if vendor_root.is_dir():
         try:
-            vendor_head = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=vendor_root, text=True,
-            ).strip()
-            vendor_status = subprocess.check_output(
-                ["git", "status", "--porcelain", "--untracked-files=all"],
-                cwd=vendor_root, text=True,
+            subprocess.run(
+                ["git", "cat-file", "-e", f"{upstream_revision}^{{commit}}"],
+                cwd=vendor_root, check=True, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
-            if vendor_head == upstream_revision:
+            # Historical evidence must remain replayable after later vendor
+            # commits. Validate the committed patch against its recorded base
+            # in an isolated index instead of equating it with the live HEAD.
+            with tempfile.TemporaryDirectory() as temporary:
+                environment = os.environ.copy()
+                environment["GIT_INDEX_FILE"] = str(Path(temporary) / "replay.index")
                 subprocess.run(
-                    ["git", "apply", "--reverse", "--check", str(project_root / patch_path)],
-                    cwd=vendor_root, check=True, stdout=subprocess.DEVNULL,
+                    ["git", "read-tree", upstream_revision], cwd=vendor_root,
+                    env=environment, check=True, stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
-                patch_paths = {
-                    line.split(" b/", 1)[1].decode()
-                    for line in committed_patch.splitlines() if line.startswith(b"diff --git a/")
-                }
-                status_paths = {
-                    line[3:].strip().replace("\\", "/") for line in vendor_status.splitlines()
-                }
-                if status_paths != patch_paths:
-                    raise ValueError("KV action vendor worktree differs from the replay patch")
-            else:
-                if vendor_status:
-                    raise ValueError("KV action committed vendor tree is dirty")
-                vendor_patch = subprocess.check_output(
-                    ["git", "diff", "--binary", f"{upstream_revision}..HEAD"], cwd=vendor_root,
+                subprocess.run(
+                    ["git", "apply", "--cached", "--check", "--whitespace=nowarn", "-"],
+                    cwd=vendor_root, env=environment, input=committed_patch, check=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
-                if committed_patch != vendor_patch:
-                    raise ValueError("KV action vendor tree differs from the replay patch")
+                subprocess.run(
+                    ["git", "apply", "--cached", "--whitespace=nowarn", "-"],
+                    cwd=vendor_root, env=environment, input=committed_patch, check=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                replayed_sources = {
+                    Path(relative).name: subprocess.check_output(
+                        ["git", "show", f":{relative}"], cwd=vendor_root, env=environment,
+                    )
+                    for relative in (
+                        "tools/server/server-kv-action-policy.cpp",
+                        "tools/server/server-kv-action-policy.h",
+                    )
+                }
+                replayed_sync_audit = _audit_kv_action_policy_sources(replayed_sources)
         except (OSError, subprocess.CalledProcessError) as error:
             raise ValueError("KV action vendor replay state is unavailable") from error
     expected_files = set(manifest.get("files", {}))
@@ -684,9 +701,10 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
     ]
     if len(overhead_rows) != 5:
         raise ValueError("KV action overhead regime coverage differs")
-    policy_source = project_root / "vendor/llama.cpp/tools/server/server-kv-action-policy.cpp"
     sync_audit = json.loads((artifact / "sync-audit.json").read_text(encoding="utf-8"))
-    expected_sync_audit = audit_kv_action_policy_no_cuda_sync(policy_source)
+    if replayed_sync_audit is None:
+        raise ValueError("KV action vendor replay state is unavailable")
+    expected_sync_audit = replayed_sync_audit
     if sync_audit != expected_sync_audit or not expected_sync_audit["passed"]:
         raise ValueError("KV action CUDA synchronization audit differs or did not pass")
     gates = protocol["overhead_gates"]
