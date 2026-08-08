@@ -109,6 +109,7 @@ class PhaseEvidence:
     uncertainty_ms: float
     positive_waves: int = 0
     max_consecutive_positive_waves: int = 0
+    terminal_consecutive_positive_waves: int = 0
 
 
 @dataclass(frozen=True)
@@ -150,8 +151,13 @@ def evaluate_long_lived(
         violations.append("positive decisions are inconsistent with non-exploration actions")
     if stable.max_consecutive_positive_waves < acceptance.minimum_consecutive_positive_waves:
         violations.append("positive-lower-bound enablement was not persistent across waves")
-    if stable.predicted_benefit_ms <= stable.uncertainty_ms:
-        violations.append("stable phase lost terminal confidence in CacheFlow benefit")
+    if (
+        stable.terminal_consecutive_positive_waves
+        < acceptance.minimum_consecutive_positive_waves
+    ):
+        violations.append(
+            "positive-lower-bound enablement was absent from terminal waves"
+        )
     if shift.cacheflow_decisions or shift.positive_decisions:
         violations.append("distribution shift continued to enable CacheFlow")
     if shift.drift_events + shift.safety_fallbacks == 0:

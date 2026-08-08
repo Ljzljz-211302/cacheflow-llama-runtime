@@ -266,6 +266,7 @@ def main() -> None:
                         uncertainty_ms=previous.uncertainty_ms,
                         positive_waves=positive_waves,
                         max_consecutive_positive_waves=maximum_positive_streak,
+                        terminal_consecutive_positive_waves=positive_streak,
                     )
                 )
         finally:

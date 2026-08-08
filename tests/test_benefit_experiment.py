@@ -87,7 +87,7 @@ class LongLivedAcceptanceTests(unittest.TestCase):
     def test_accepts_learning_then_distribution_shift_fallback(self) -> None:
         phases = [
             PhaseEvidence("cold_start", 12, 0, 3, 0, 0, 0, 120.0, 0.0, 0.0),
-            PhaseEvidence("stable_reuse", 24, 9, 1, 8, 0, 0, 78.0, 5.0, 1.2, 8, 5),
+            PhaseEvidence("stable_reuse", 24, 9, 1, 8, 0, 0, 78.0, 5.0, 1.2, 8, 5, 5),
             PhaseEvidence("distribution_shift", 15, 0, 0, 0, 1, 6, 82.0, -2.0, 4.0),
         ]
         result = evaluate_long_lived(phases, LongLivedAcceptance())
@@ -107,7 +107,7 @@ class LongLivedAcceptanceTests(unittest.TestCase):
     def test_rejects_shift_without_drift_or_safety_fallback(self) -> None:
         phases = [
             PhaseEvidence("cold_start", 12, 0, 3, 0, 0, 0, 120.0, 0.0, 0.0),
-            PhaseEvidence("stable_reuse", 24, 9, 1, 8, 0, 0, 78.0, 5.0, 1.2, 8, 5),
+            PhaseEvidence("stable_reuse", 24, 9, 1, 8, 0, 0, 78.0, 5.0, 1.2, 8, 5, 5),
             PhaseEvidence("distribution_shift", 15, 3, 0, 0, 0, 2, 120.0, -1.0, 4.0),
         ]
         result = evaluate_long_lived(phases, LongLivedAcceptance())
@@ -124,15 +124,27 @@ class LongLivedAcceptanceTests(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertTrue(any("persistent" in item for item in result.violations))
 
-    def test_rejects_convergence_that_loses_terminal_confidence(self) -> None:
+    def test_rejects_convergence_that_is_not_present_in_terminal_waves(self) -> None:
         phases = [
             PhaseEvidence("cold_start", 12, 0, 0, 0, 0, 0, 120.0, 0.0, 0.0),
-            PhaseEvidence("stable_reuse", 24, 8, 1, 7, 0, 0, 90.0, 1.0, 2.0, 7, 5),
+            PhaseEvidence("stable_reuse", 24, 8, 1, 7, 0, 0, 90.0, 5.0, 2.0, 7, 5, 0),
             PhaseEvidence("distribution_shift", 12, 0, 0, 0, 0, 3, 100.0, 0.0, 2.0),
         ]
         result = evaluate_long_lived(phases, LongLivedAcceptance())
         self.assertFalse(result.passed)
-        self.assertTrue(any("terminal confidence" in item for item in result.violations))
+        self.assertTrue(any("terminal waves" in item for item in result.violations))
+
+    def test_last_value_gauge_cannot_erase_terminal_contextual_confidence(self) -> None:
+        phases = [
+            PhaseEvidence("cold_start", 12, 0, 0, 0, 0, 0, 120.0, 0.0, 0.0),
+            # The final wave has a positive contextual action, followed by an
+            # unrelated upstream decision whose last-value gauge has no
+            # positive margin. The action counter is the semantic evidence.
+            PhaseEvidence("stable_reuse", 24, 8, 1, 7, 0, 0, 90.0, 1.0, 2.0, 7, 5, 3),
+            PhaseEvidence("distribution_shift", 12, 0, 0, 0, 0, 3, 100.0, 0.0, 2.0),
+        ]
+        result = evaluate_long_lived(phases, LongLivedAcceptance())
+        self.assertTrue(result.passed)
 
 
 if __name__ == "__main__":
