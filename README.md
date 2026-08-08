@@ -47,7 +47,7 @@ flowchart LR
 - Adaptive Prefill：CUDA 在线 cost model 在最终轮避开错误 fixed-64，但略劣于 greedy/fixed-256；CPU 历史在线动作曾劣于所有候选，现按 backend bucket 选择 `chunk=0` greedy 安全动作，并由 2% 回归门槛阻止再次静默退化。
 - Gather/Scatter：完全不重叠时 per-block memcpy 更快，因此生产实现只在重叠/重复映射需要 snapshot 语义时使用 staging kernel。
 - Mixed prefill/decode：CPU 在两轮 3-trial 验收中都改善尾延迟/吞吐；CUDA 两轮的 latency/吞吐结论反号，虽然 TTFT P95 均改善，但样本不足以声称稳定端到端收益，因此当前不应对所有 CUDA workload 默认启用。
-- Conservative Benefit Gating：最终 CPU/CUDA 各 12-trial Williams balanced Latin 验收既平衡四种策略的进程位置与直接前驱，也交替平衡共享机器上的后端顺序；真实 socket send seam 固定每波顺序并保持响应/SSE 重叠，96/96 trial rows 的两波 observed order 均为 `0..5`。CPU learned objective median 4186.49 ms、paired upstream regression -24.54%、paired-oracle regret 5.25%，CUDA 257.11 ms、paired regression -6.04%、paired-oracle regret 0.13%。两端均通过原 3%/20% 与 harmful wrong-enable 门槛；CUDA 的 8 个 harmful trials 中错误启用为 0。短生命周期采用 backend-local 风险预算：CPU 32 次有限探索，CUDA 0 次 probe 并 fail closed；positive-lower-bound 均为 0，不把冷启动门禁冒充在线收敛。
+- Conservative Benefit Gating：最终将 `backend×mode` 视为 8 个联合treatment，运行16 trial（两个完整Williams blocks）；每个联合treatment在8个真实进程位置各出现2次，56条有向直接前驱也各出现2次，trial边界用1秒显式washout隔离。真实 socket send seam固定每波顺序并保持响应/SSE重叠，128/128 trial rows的两波observed order均为 `0..5`。CPU learned objective median 4244.78 ms、paired upstream regression -25.66%、paired-oracle regret 6.10%，CUDA 249.44 ms、paired regression -1.53%、paired-oracle regret 3.02%。两端均通过原3%/20%与harmful wrong-enable门槛；CUDA的11个harmful trials中错误启用为0。短生命周期采用backend-local风险预算：CPU 39次有限探索，CUDA 0次probe并fail closed；positive-lower-bound均为0，不把冷启动门禁冒充在线收敛。
 - 长驻在线学习：单一 CUDA server PID 连续 53 waves，生产级 `confidence_beta=1.0`、每动作最少 12 个样本；冷启动 0 次提前启用，稳定阶段 26 次探索后产生 125 次 positive-lower-bound，覆盖 36 个 wave，最长及终端连续均为 35 waves；最后一次上下文 gauge 为预测收益 8.926 ms、不确定性 4.463 ms，但last-value gauge只作诊断，硬门禁使用可审计的逐wave动作counter；切换后 0 次 CacheFlow、3 次安全回退。逐wave CSV 保存请求级TTFT向量，验证器独立重算phase P95、streak和acceptance并覆盖篡改反例。
 - CUDA profiling 因果链：3 组 paired Latin upstream/always 干预中，强制 CacheFlow 中位使决策 +13、prefill chunk +23、prefill token -354、自研 KV kernel +2、KV copy +20,066,300 B、CUDA Event +0.808 ms，Engine execute 汇总 -11,446 us，但 TTFT P95 +85.61 ms。说明总 execute 时间下降仍可能因分块、批次顺序和请求等待结构而恶化尾延迟，单个 kernel 或 phase 汇总不能替代请求级结果；范围不冒充完整 Nsight kernel census。
 - Nsight KV 机制切片：4 个预注册 regime、160 条 no-profiler paired trials 和 4 份真实 NSYS trace。aligned 1 block 的 CUDA-event 改善 +57.10% [95% CI +38.51%, +57.14%]，16/32 blocks 为低于 10% 门槛的 neutral，misaligned 1 block 明确回退 137.94%；scalar/vector 在每个 trace 都是 10/10 launches，故收益不是来自减少 launch 数。NCU 因 driver compatibility 与 `ERR_NVGPUCTRPERM` 未取得硬件计数器，项目明确不声称 memory-bound、roofline 或 occupancy。
@@ -83,7 +83,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 5. OpenAI/SSE、取消、Deadline、背压和恢复；
 6. 上游输出兼容、模型/后端/并发/上下文矩阵；
 7. Compute Sanitizer memcheck/racecheck（硬门槛）；
-8. CUDA Transport/COW、Adaptive Prefill/Spec、mixed workload、Conservative Benefit Gating（CPU/CUDA 各 12-trial Williams blocks）、53-wave 长驻收敛和 3-pair CUDA 因果 profiling；
+8. CUDA Transport/COW、Adaptive Prefill/Spec、mixed workload、Conservative Benefit Gating（16-trial联合 backend×mode Williams blocks）、53-wave 长驻收敛和 3-pair CUDA 因果 profiling；
 9. production Engine trace/flame chart，并从原始数据重新生成报告。
 
 只做快速环境与 Python 验证：

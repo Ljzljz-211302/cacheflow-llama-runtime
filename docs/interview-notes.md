@@ -197,7 +197,7 @@ CUDA mixed workload 缺少 backend-aware policy guard；Hybrid/Recurrent 只有 
 
 ### Benefit Gating 怎么讲？
 
-先讲负结果：固定 adaptive chunk 在不同 backend/workload 上结论反号。然后画出同一生产 Seam 的两条 shadow plan，说明 learned policy 只在悲观 CacheFlow cost 仍低于乐观 upstream cost 加安全 margin 时启用。重点追问是：为什么置信半径必须乘 residual noise、为什么 SLO miss 进入 reward 却不等于 drift、为什么探索必须有预算、为什么单 prefill 必须直接回退。最后展示 CPU/CUDA 各 12-trial Williams balanced Latin 验收与 paired oracle regret；强调它同时平衡进程位置、直接前驱和 backend 热状态，不声称这是全栈或所有模型上的全局最优。
+先讲负结果：固定adaptive chunk在不同backend/workload上结论反号。然后画出同一生产Seam的两条shadow plan，说明learned policy只在悲观CacheFlow cost仍低于乐观upstream cost加安全margin时启用。重点追问是置信半径、SLO reward、drift与探索预算。最后展示16-trial联合 `backend×mode` Williams验收：每个treatment×位置和有向前驱各2次，trial边界有washout，并报告paired oracle regret；不声称这是所有模型和硬件上的全局最优。
 
 最终在真实 socket send seam 固定并发发送顺序的短程fresh-process实验中，positive-lower-bound次数为0，验证backend-local冷启动风险边界。随后53-wave单进程CUDA trace在 `beta=1.0` 下产生26次探索和125次positive-lower-bound，覆盖36 waves、最长及终端连续均为35 waves；最后一次上下文gauge为8.926/4.463 ms，但面试中要主动说明last-value gauge无法代表同一wave中的所有特征向量，硬证据是逐wave动作counter。分布切换后0次错误启用、3次安全回退；验证器还能从逐请求TTFT和counter重算phase/acceptance并拒绝篡改。因此可以声称当前0.5B/CUDA/workload上观察到持续在线利用，但不能外推其他模型与硬件。
 
