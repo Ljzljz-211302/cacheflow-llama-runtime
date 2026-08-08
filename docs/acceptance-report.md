@@ -169,6 +169,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 - 生产动作：Direct、真实 CUDA Remap、受限 opt-in Paged、CUDA-managed Swap、事务型 host Swap、Recompute 均走真实服务路径；selected/observed counter 与实际动作一致，`{action,reason}` 联合计数可解释每个动作为何被选中，restore/CUDA 失败按原动作记录失败并清理状态。
 - 能力门禁：Remap 只在真实 donor prefix 可执行时开放；Paged 只支持 Qwen2.5-0.5B、FP16 KV、page 16、D64、单 token/batch 1、context ≤ 17、完整 GPU offload，默认关闭。超出 envelope 的受控用户请求回退 Recompute，不把 H3 microbenchmark 当作生产证据。
 - 验收入口：`scripts/run_issue7_acceptance.ps1` 串行执行 Direct/Paged differential、真实 Remap、KV pressure fallback、晚到 CUDA failure/recovery；CUDA build gate 另执行 `test-backend-ops` 的 Paged Flash Attention CPU/CUDA 交叉验证、独立 F16 CUDA oracle、策略与 block-table 单测。
+- 正式 Paged 服务证据：干净提交 `b62305d` 上 10 组 AB/BA 配对均逐字输出 ` Hello`，Paged 进入真实 production graph 10 次、fallback 0；机制隔离 NSYS replay 恰有 24 个 `cacheflow_paged_decode_fattn_k1<64>` layer launch。Paged client P95 37.861 ms 对 Direct 29.160 ms，回退 29.84%；配对 Paged-Direct 中位差 +10.886 ms，bootstrap 95% 区间 [+0.952, +22.929] ms。因此 +5% promotion gate 失败，保留 opt-in/默认不选，不把正确性通过写成性能通过。完整 hash-bound 工件位于 `results/research/h7-production-paged-v1.0.0/`。
 - 算法：H0 固定安全规则、A1 解析模型、T1 分桶查表、L1 置信约束 Ridge 使用相同 snapshot 和完整动作边界；无效/OOD/冷启动/不确定性均 fail closed。
 - 数据隔离：20 个 trace group 按时间顺序切为 12 train / 8 evaluation，session、prefix family 与 trace 均无交叉；16 个 held-out resident/preempted snapshot 采用 paired action observation。
 - v1.0.0 因错误使用 HTTP 往返计时且 L1 合同与生产不一致而被否决，仅保留在 `results/research/superseded/`。v1.1.0 从干净提交 `32c8fe7` 重采集：40 trace 按时间切为 20 train/20 evaluation，resident/preempted 各 20 个 held-out pair。

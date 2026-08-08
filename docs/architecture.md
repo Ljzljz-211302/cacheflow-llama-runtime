@@ -1238,6 +1238,8 @@ Remap 只有在真实 donor prefix 大于目标 slot 的 resident prefix 时才�
 
 统一入口 `scripts/run_issue7_acceptance.ps1` 覆盖 Direct、真实 CUDA Remap、Paged、out-of-envelope Recompute、容量压力回收和晚到 CUDA failure 后完整重算；Paged 还与原生 Flash/non-Flash backend envelope 做端到端 top-logprob 差分，并要求动作计数可由 `{action,reason}` 联合指标完整归因。算子级独立 oracle 继续使用 `atol=rtol=1e-3`。性能只采用预注册的 paired no-profiler 服务实验；若 +5% P95 promotion gate 失败，Paged 保持 opt-in，不因功能正确而默认启用。
 
+正式 `h7-production-paged-v1.0.0` 工件在干净外层提交 `b62305d`、vendor 提交 `8f999df` 上完成 10 组 AB/BA：Direct/Paged 输出全部一致，Paged graph entry 10、fallback 0，机制 replay 的 24 个 K1 launch 与 24 层模型一致。Paged client P95 37.861 ms 相对 Direct 29.160 ms 回退 29.84%；配对差中位数 +10.886 ms，bootstrap 95% 区间 [+0.952, +22.929] ms。故策略 capability 可以描述“可执行”，但 promotion 状态必须为 false；H0/L1 都不得把 Paged 当成默认性能动作。该边界仅适用于 Qwen2.5-0.5B、batch 1、短 context。
+
 ### 26.5 正式证据与边界
 
 协议固定 trace/session/prefix-family 分组、时间顺序切分、paired matched-workload action、H0/A1/T1/L1 和开销门禁。v1.3.0 保存并语义校验 200 组原始 Prometheus/响应 observation，每个 regime 独立采集 Recompute，按真实 observation 顺序 replay，强制每个 trace 同时包含 resident/preempted，并报告/门禁各动作服务器相对真实 H0 锚点的九维最大偏差 `[0, 0.188721, 0, 0.00885548, 1, 0.544826, 0.382813, 1.63381, 0.00755668]`。因此不表述为“克隆同一状态的因果反事实”。H0/A1/L1 的 median/P95/cumulative regret 均为 0/1.953/15.543 ms、harmful 0；离线 T1 为 0/1.516/5.506 ms、harmful 0，paired trace-cluster CI [-0.5285, -0.0511] ms。该结果只说明本次 matched-workload replay 中 T1 低于 H0，不是生产在线或因果收益。源码哈希绑定的词法审计只证明策略模块未发现直接 CUDA 同步符号或后端 include。v1.0.0 至 v1.2.0 均已移入 superseded。

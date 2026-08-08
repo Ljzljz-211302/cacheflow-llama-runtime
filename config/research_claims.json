@@ -215,7 +215,7 @@
       ],
       "scope_limits": [
         "The unified policy currently executes H0 and runs per-action Ridge in shadow; the held-out run did not justify active L1 selection.",
-        "Production-complete evidence covers Direct, CUDA-managed pinned-host swap, transactional host swap, and Recompute; Remap and Paged remain capability-masked until complete llama_decode adapters exist.",
+        "Issue #6 production-complete evidence covers Direct, CUDA-managed pinned-host swap, transactional host swap, and Recompute. Issue #7 separately added real Remap and a restricted Paged llama_decode adapter without rewriting the Issue #6 replay.",
         "No reinforcement-learning claim",
         "Held-out evaluation is restricted to the available single-GPU workload matrix"
       ],
@@ -266,6 +266,56 @@
         "No occupancy, roofline, or universal scheduler conclusion"
       ],
       "negative_result_policy": "Treat harmful TTFT as a primary result and require future policies to explain or avoid it; never substitute phase aggregates for request metrics."
+    },
+    {
+      "id": "H6-production-paged-dispatch",
+      "question": "Can the restricted paged decode kernel execute inside the real llama.cpp service path without correctness loss, and does it pass the preregistered production promotion gate?",
+      "hypothesis": "For the registered Qwen2.5-0.5B short-context envelope, the production Paged path preserves exact deterministic output and does not regress client P95 by more than 5% versus Direct.",
+      "status": "existing-evidence",
+      "independent_variables": [
+        "explicit Direct versus Paged action override",
+        "seeded AB/BA fresh-process pair order"
+      ],
+      "dependent_metrics": [
+        "exact response content",
+        "production graph entries and fallbacks",
+        "client latency P95 and paired latency effect",
+        "PID-filtered production Paged CUDA kernel launches"
+      ],
+      "confounders": [
+        "fresh-process startup and Windows scheduling noise",
+        "profiler perturbation",
+        "short context where launch overhead dominates",
+        "single laptop GPU and one model shape"
+      ],
+      "baselines": ["upstream", "fixed-rule"],
+      "mechanism": "The graph consumes the physical KV block table directly through a restricted CUDA online-softmax kernel; capability and layout checks occur before KV mutation, while a separate no-profiler paired service experiment decides promotion.",
+      "falsification": [
+        "Any paired response differs from Direct.",
+        "The Paged action falls back or fails to enter the production graph.",
+        "PID-filtered NSYS replay does not contain one Paged kernel launch per model layer.",
+        "Paged client P95 regresses by more than the preregistered 5% promotion limit."
+      ],
+      "evidence_sources": [
+        "config/production_paged_protocol.json",
+        "results/research/h7-production-paged-v1.0.0/manifest.json",
+        "results/research/h7-production-paged-v1.0.0/summary.json",
+        "results/research/h7-production-paged-v1.0.0/trials.json",
+        "results/research/h7-production-paged-v1.0.0/mechanism.json"
+      ],
+      "observed_results": [
+        "All ten AB/BA pairs produced exact matching content; Paged entered the production graph ten times with zero fallbacks.",
+        "A method-isolated PID-filtered NSYS replay recorded exactly 24 cacheflow_paged_decode_fattn_k1<64> launches, one per Qwen2.5-0.5B layer; profiler timing is non-primary.",
+        "Direct client latency was median/P95 9.100/29.160 ms and Paged was 30.118/37.861 ms. The paired Paged-minus-Direct median was +10.886 ms with a bootstrap 95% interval of +0.952 to +22.929 ms.",
+        "Paged P95 regressed by 29.84%, exceeding the preregistered +5% limit. Correctness passed, production promotion failed, and Paged remains opt-in and excluded from default policy selection."
+      ],
+      "scope_limits": [
+        "Qwen2.5-0.5B, FP16 KV, D64, page 16, batch/query token 1, context no greater than 17, complete CUDA offload",
+        "One RTX 4050 Laptop GPU and Windows driver 561.19",
+        "No long-context, memory-capacity, larger-model, or universal latency claim",
+        "NSYS launch identity is mechanism evidence and its timing is not used for the primary latency result"
+      ],
+      "negative_result_policy": "Keep Paged opt-in and fail closed when the promotion gate loses; preserve exact correctness and mechanism evidence without relabeling it as a speedup."
     }
   ]
 }
