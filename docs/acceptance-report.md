@@ -79,9 +79,9 @@ P95 改善 97.41%。这证明被隔离的 COW hot path，不等价于整个 serv
 
 ### Conservative Benefit Gating
 
-新控制器不再按 backend 硬编码开关，而是在真实 prefill 决策点生成 upstream greedy 与 CacheFlow shadow plan，按 backend-local contextual confidence model 保守选择。最终 10-trial Latin 结果：CPU learned objective median 4177.39 ms、paired upstream regression -18.11%、paired-oracle regret 15.35%；CUDA learned 190.70 ms、paired regression -2.82%、paired-oracle regret 1.02%。两端均通过原 3% fresh-process paired regression、20% paired upstream/always/rule oracle regret 和 harmful-trace wrong-enable 门槛。此前“两个独立中位数之比”的错误统计口径已移除，阈值未放宽。
+新控制器不再按 backend 硬编码开关，而是在真实 prefill 决策点生成 upstream greedy 与 CacheFlow shadow plan，按 backend-local contextual confidence model 保守选择。最终 10-trial Latin 结果固定每波 `0..5` 客户端 admission 顺序、相邻放行至少间隔 10 ms，同时保留 4 路重叠请求；同一 policy 的首波 server task pattern 在全部 10 trials 内一致。CPU learned objective median 4153.18 ms、paired upstream regression -25.87%、paired-oracle regret 3.48%；CUDA learned 223.23 ms、paired regression +1.64%、paired-oracle regret 3.92%。两端均通过原 3% fresh-process paired regression、20% paired upstream/always/rule oracle regret 和 harmful-trace wrong-enable 门槛；CUDA 6 个 harmful trials 中非探索错误启用为 0。此前“两个独立中位数之比”的错误统计口径已移除，阈值未放宽。
 
-短生命周期风险预算按 backend 隔离：CPU learned 产生 19 次 `safe_exploration`；已知 always 有害的 CUDA fresh process 提高最小样本门槛，在该 trace 内 0 次 probe 并 fail closed；`positive_lower_bound_decisions` 均为 0。CUDA positive-lower-bound 的生产实证由下一段长驻实验提供。
+短生命周期风险预算按 backend 隔离：CPU learned 产生 26 次 `safe_exploration`；已知 always 有害的 CUDA fresh process 提高最小样本门槛，在该 trace 内 0 次 probe 并 fail closed；`positive_lower_bound_decisions` 均为 0。CUDA positive-lower-bound 的生产实证由下一段长驻实验提供。
 
 随后新增的单进程长驻门禁补齐了这一限制：CUDA server 连续运行 53 waves，`confidence_beta=1.0`、每动作最少 12 个样本。冷启动 CacheFlow/positive 均为 0；稳定阶段 18 次有限探索后产生 142 次 positive-lower-bound，覆盖 33 waves、最长连续 13 waves，终态收益 21.29 ms 大于 8.82 ms 不确定性；切换后 CacheFlow/positive 均为 0、安全回退为 3。门禁要求持续启用且终态仍保持置信，不取最大置信快照。
 

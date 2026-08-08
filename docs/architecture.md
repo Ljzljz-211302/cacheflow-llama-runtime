@@ -1127,7 +1127,7 @@ Scheduler 同时产生会改变 fairness cursor 的 CacheFlow plan，以及纯�
 
 CLI 支持 `--benefit-policy upstream|always|rule|learned` 及样本、探索、置信度、margin 参数。Prometheus 按 backend/action 导出 decision、observation、exploration、safety fallback、drift 和 cooldown。
 
-`run_benefit_gating_ab.py` 在相同 CacheFlow 运行栈中只改变门控策略，执行 fresh-process Latin rotation 的 upstream/always/rule/learned 对照，并从 paired upstream/always/rule 构造 trace-level oracle。比较使用同一 trial 内的 paired ratio，禁止用两个独立中位数相除。短冷启动硬门槛保持 learned paired median regression 不超过 3%、paired median oracle regret 不超过 20%，以及 harmful trace 上非探索错误启用率不超过 20%。风险预算按 backend 隔离：该 CPU trace 允许快速收集样本；已知 always 有害的 CUDA fresh process 将最小样本提高到 64，在 12-request trace 内保持零 probe/fail-closed，CUDA 的探索能力只由长驻实验验证。完整验收固定为 CPU/CUDA 各 10 trials；真正的置信启用由 21.5 的长驻门禁负责。
+`run_benefit_gating_ab.py` 在相同 CacheFlow 运行栈中只改变门控策略，执行 fresh-process Latin rotation 的 upstream/always/rule/learned 对照，并从 paired upstream/always/rule 构造 trace-level oracle。每波并发请求通过共享 admission coordinator 按预登记索引顺序、至少 10 ms 间隔进入客户端调用，但调用后继续重叠执行；结果保留 `admission_order` 与 `admission_stagger_ms`，避免线程抢跑改变 server slot assignment 后仍把两次运行称为同一 trace。比较使用同一 trial 内的 paired ratio，禁止用两个独立中位数相除。短冷启动硬门槛保持 learned paired median regression 不超过 3%、paired median oracle regret 不超过 20%，以及 harmful trace 上非探索错误启用率不超过 20%。风险预算按 backend 隔离：该 CPU trace 允许快速收集样本；已知 always 有害的 CUDA fresh process 将最小样本提高到 64，在 12-request trace 内保持零 probe/fail-closed，CUDA 的探索能力只由长驻实验验证。完整验收固定为 CPU/CUDA 各 10 trials；真正的置信启用由 21.5 的长驻门禁负责。
 
 ### 21.5 长驻收敛与分布切换
 

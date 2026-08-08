@@ -10,7 +10,6 @@ import subprocess
 import sys
 import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +17,13 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from llama_lab.benefit_protocol import run_staggered_wave
 from llama_lab.server_bench import wait_until_ready
 from llama_lab.streaming import stream_chat
 
 
 MODES = ("upstream", "always", "rule", "learned")
+ADMISSION_STAGGER_MS = 10
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -99,26 +100,33 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
             # Two waves keep the online state alive long enough to leave cold
             # start; a one-shot burst only measures the fallback, not learning.
             for wave in range(2):
-                with ThreadPoolExecutor(max_workers=4) as pool:
-                    futures = {
-                        pool.submit(
-                            stream_chat, base_url, prompt + f" wave {wave}",
-                            "local-model", predict, 180, 1000 + wave * len(requests) + index,
-                        ): (wave * len(requests) + index, kind)
-                        for index, (kind, prompt, predict) in enumerate(requests)
+                wave_inputs = [
+                    (wave * len(requests) + index, kind, prompt, predict)
+                    for index, (kind, prompt, predict) in enumerate(requests)
+                ]
+
+                def issue(item: tuple[int, str, str, int]) -> dict[str, Any]:
+                    index, kind, prompt, predict = item
+                    result = stream_chat(
+                        base_url, prompt + f" wave {wave}", "local-model", predict,
+                        180, 1000 + index,
+                    )
+                    return {
+                        "request": index,
+                        "kind": kind,
+                        "ttft_ms": result["ttft_ms"],
+                        "total_ms": result["total_ms"],
+                        "completion_tokens": result["completion_tokens"],
+                        "output_text": result["text"],
+                        "output_hash": hashlib.sha256(result["text"].encode()).hexdigest(),
                     }
-                    for future in as_completed(futures):
-                        index, kind = futures[future]
-                        result = future.result()
-                        rows.append({
-                            "request": index,
-                            "kind": kind,
-                            "ttft_ms": result["ttft_ms"],
-                            "total_ms": result["total_ms"],
-                            "completion_tokens": result["completion_tokens"],
-                            "output_text": result["text"],
-                            "output_hash": hashlib.sha256(result["text"].encode()).hexdigest(),
-                        })
+
+                rows.extend(run_staggered_wave(
+                    wave_inputs,
+                    issue,
+                    max_workers=4,
+                    admission_stagger_s=ADMISSION_STAGGER_MS / 1000,
+                ))
             burst_ms = (time.perf_counter() - started) * 1000
             with urllib.request.urlopen(f"{base_url}/metrics", timeout=30) as response:
                 prometheus = response.read().decode()
@@ -144,6 +152,8 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
         "output_hashes": ";".join(str(row["output_hash"]) for row in sorted(rows, key=lambda item: item["request"])),
         "completion_counts": ";".join(str(row["completion_tokens"]) for row in sorted(rows, key=lambda item: item["request"])),
         "outputs_json": json.dumps([str(row["output_text"]) for row in sorted(rows, key=lambda item: item["request"])], ensure_ascii=False),
+        "admission_order": ";".join(str(index) for index in range(len(requests))),
+        "admission_stagger_ms": ADMISSION_STAGGER_MS,
         "exact_hash_match_ratio": 0.0,
         "upstream_decisions": metric(prometheus, "benefit_decisions_total", {"backend": backend_label, "action": "upstream"}),
         "cacheflow_decisions": metric(prometheus, "benefit_decisions_total", {"backend": backend_label, "action": "cacheflow"}),
