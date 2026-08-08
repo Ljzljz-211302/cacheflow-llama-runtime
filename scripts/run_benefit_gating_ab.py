@@ -18,13 +18,14 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from llama_lab.benefit_protocol import complete_latin_orders, run_staggered_wave
+from llama_lab.benefit_protocol import joint_williams_orders, run_staggered_wave
 from llama_lab.server_bench import wait_until_ready
 from llama_lab.streaming import stream_chat
 
 
 MODES = ("upstream", "always", "rule", "learned")
 ADMISSION_STAGGER_MS = 10
+TRIAL_WASHOUT_MS = 1000
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -187,31 +188,29 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fresh-process conservative benefit-gating A/B/oracle evaluation")
     parser.add_argument("--backend", choices=("cpu", "cuda", "both"), default="both")
-    parser.add_argument("--trials", type=int, default=12)
+    parser.add_argument("--trials", type=int, default=16)
     parser.add_argument("--max-regression", type=float, default=0.03)
     parser.add_argument("--max-oracle-regret", type=float, default=0.20)
     args = parser.parse_args()
-    mode_orders = complete_latin_orders(MODES, args.trials)
     backends = ["cpu", "cuda"] if args.backend == "both" else [args.backend]
-    backend_orders = (
-        complete_latin_orders(backends, args.trials)
-        if len(backends) > 1
-        else tuple((backends[0],) for _ in range(args.trials))
-    )
+    treatment_orders = joint_williams_orders(backends, MODES, args.trials)
     rows: list[dict[str, Any]] = []
-    for trial_index, backend_order in enumerate(backend_orders):
+    for trial_index, order in enumerate(treatment_orders):
         trial = trial_index + 1
-        order = mode_orders[trial_index]
-        for backend in backend_order:
-            # Complete Latin blocks balance every mode across every process
-            # position and predecessor. Alternating backend order also avoids
-            # always measuring CUDA after a long CPU-only heating phase.
-            for process_position, mode in enumerate(order):
-                row = run_trial(backend, mode, trial)
-                row["treatment_order"] = ";".join(order)
-                row["process_position"] = process_position
-                row["backend_order"] = ";".join(backend_order)
-                rows.append(row)
+        if trial_index:
+            # A fixed idle boundary prevents the last process of one matched
+            # trial from becoming the immediate predecessor of the next row.
+            time.sleep(TRIAL_WASHOUT_MS / 1000)
+        labels = tuple(f"{backend}/{mode}" for backend, mode in order)
+        for process_position, (backend, mode) in enumerate(order):
+            row = run_trial(backend, mode, trial)
+            row["treatment_order"] = ";".join(labels)
+            row["process_position"] = process_position
+            row["previous_treatment"] = (
+                labels[process_position - 1] if process_position else "trial_washout"
+            )
+            row["trial_washout_ms"] = TRIAL_WASHOUT_MS if trial_index else 0
+            rows.append(row)
 
     # Batch composition can move near-tied greedy logits across a floating-point
     # boundary and can change where EOS appears. Exact text hashes and token

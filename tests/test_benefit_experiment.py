@@ -1,11 +1,19 @@
+import csv
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from llama_lab.benefit_experiment import (
     BenefitSnapshot,
     LongLivedAcceptance,
     PhaseEvidence,
     evaluate_long_lived,
+    validate_long_lived_artifact,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def metrics(
@@ -84,6 +92,48 @@ class BenefitSnapshotTests(unittest.TestCase):
 
 
 class LongLivedAcceptanceTests(unittest.TestCase):
+    def test_repository_artifact_recomputes_terminal_acceptance(self) -> None:
+        summary = validate_long_lived_artifact(
+            ROOT / "results/long_lived_benefit_cuda_waves.csv",
+            ROOT / "results/long_lived_benefit_cuda_summary.json",
+        )
+        stable = next(item for item in summary["phases"] if item["phase"] == "stable_reuse")
+        self.assertGreaterEqual(stable["terminal_consecutive_positive_waves"], 3)
+        self.assertTrue(summary["acceptance"]["passed"])
+
+    def test_artifact_validator_rejects_wave_counter_tamper(self) -> None:
+        source_csv = ROOT / "results/long_lived_benefit_cuda_waves.csv"
+        source_summary = ROOT / "results/long_lived_benefit_cuda_summary.json"
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            with source_csv.open(encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            stable_rows = [row for row in rows if row["phase"] == "stable_reuse"]
+            stable_rows[-1]["positive_decisions"] = "0"
+            csv_path = directory / "waves.csv"
+            with csv_path.open("w", newline="", encoding="utf-8-sig") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+                writer.writeheader()
+                writer.writerows(rows)
+            summary_path = directory / "summary.json"
+            summary_path.write_text(source_summary.read_text(encoding="utf-8"), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "phase evidence"):
+                validate_long_lived_artifact(csv_path, summary_path)
+
+    def test_artifact_validator_rejects_copied_acceptance_tamper(self) -> None:
+        source_csv = ROOT / "results/long_lived_benefit_cuda_waves.csv"
+        source_summary = ROOT / "results/long_lived_benefit_cuda_summary.json"
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            csv_path = directory / "waves.csv"
+            csv_path.write_bytes(source_csv.read_bytes())
+            summary = json.loads(source_summary.read_text(encoding="utf-8"))
+            summary["acceptance"] = {"passed": False, "violations": ["fabricated"]}
+            summary_path = directory / "summary.json"
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "acceptance"):
+                validate_long_lived_artifact(csv_path, summary_path)
+
     def test_accepts_learning_then_distribution_shift_fallback(self) -> None:
         phases = [
             PhaseEvidence("cold_start", 12, 0, 3, 0, 0, 0, 120.0, 0.0, 0.0),

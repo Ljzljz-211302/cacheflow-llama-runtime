@@ -196,7 +196,7 @@
 ## 六、必须背熟的数据，但不要只背数据
 
 - 固定上游个人差异：61 files、+8708/−99 C/C++/CUDA；外层实验另计。
-- 长驻 CUDA：53 waves；19 exploration；88 positive；31 positive waves；最长及终端连续均为 26；last-context gauge 13.964ms > 10.825ms 仅作诊断，逐wave动作counter承担硬门禁；shift 后 0 错误启用、3 fallback。
+- 长驻 CUDA：53 waves；26 exploration；125 positive；36 positive waves；最长及终端连续均为 35；last-context gauge 8.926ms > 4.463ms 仅作诊断，逐wave动作counter承担硬门禁；逐请求TTFT/counter可重算并有篡改反例；shift 后 0 错误启用、3 fallback。
 - 短程 gating：每端 12-trial Williams blocks 平衡策略位置、直接前驱与 backend 顺序，真实 socket send seam 下 96/96 rows 的两波 observed order 均为 `0..5`；CPU regression −24.54%、oracle regret 5.25%；CUDA −6.04%、0.13%，CUDA fresh-process 0 probe，8 个 harmful trials 中 0 次错误启用。
 - CUDA causal：decision +13、chunk +23、prefill token −354、copy +20.066MB、Event +0.808ms、Engine 汇总 −11.446ms、TTFT P95 +85.61ms。
 - 严格入口是 `verify.ps1 -Full`。2026-08-08 在外层 `bf6f8b1`、vendor `130bd22` 上原生退出 0：127 个 Python 测试、构建、固定 upstream 对照、原生测试、Sanitizer、真实模型/应用、Issue #7 生产旅程及全部统计门禁均通过。相较历史 `e01a844`，当前已补齐真实 socket send、每端 12-trial Williams blocks、交替 backend order 和上下文动作级终端门禁，阈值未放宽。

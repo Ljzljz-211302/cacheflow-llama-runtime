@@ -26,6 +26,7 @@ from llama_lab.benefit_experiment import (  # noqa: E402
     LongLivedAcceptance,
     PhaseEvidence,
     evaluate_long_lived,
+    validate_long_lived_artifact,
 )
 from llama_lab.server_bench import wait_until_ready  # noqa: E402
 from llama_lab.streaming import stream_chat  # noqa: E402
@@ -230,6 +231,10 @@ def main() -> None:
                             "phase_wave": phase_wave + 1,
                             "global_wave": global_wave,
                             "requests": len(requests),
+                            "request_ttft_ms": json.dumps(
+                                [float(row["ttft_ms"]) for row in requests],
+                                separators=(",", ":"),
+                            ),
                             "ttft_p95_ms": percentile(
                                 [float(row["ttft_ms"]) for row in requests], 0.95
                             ),
@@ -277,10 +282,8 @@ def main() -> None:
                 process.kill()
                 process.wait(timeout=5)
 
-    acceptance = evaluate_long_lived(
-        phase_evidence,
-        LongLivedAcceptance(maximum_ttft_ms=args.max_ttft_ms),
-    )
+    acceptance_protocol = LongLivedAcceptance(maximum_ttft_ms=args.max_ttft_ms)
+    acceptance = evaluate_long_lived(phase_evidence, acceptance_protocol)
     wave_path = ROOT / "results" / f"long_lived_benefit_{args.backend}_waves.csv"
     summary_path = ROOT / "results" / f"long_lived_benefit_{args.backend}_summary.json"
     with wave_path.open("w", newline="", encoding="utf-8-sig") as handle:
@@ -294,10 +297,12 @@ def main() -> None:
         "confidence_beta": args.confidence_beta,
         "server_pid_reused_across_phases": True,
         "waves": len(wave_rows),
+        "acceptance_protocol": asdict(acceptance_protocol),
         "phases": [asdict(phase) for phase in phase_evidence],
         "acceptance": asdict(acceptance),
     }
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    validate_long_lived_artifact(wave_path, summary_path)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if not acceptance.passed and not args.observe_only:
         raise RuntimeError("; ".join(acceptance.violations))

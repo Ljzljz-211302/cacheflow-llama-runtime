@@ -110,7 +110,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "engine scheduler A/B failed" }
         python scripts\run_mixed_workload.py --backend both --trials 3
         if ($LASTEXITCODE -ne 0) { throw "mixed prefill/decode CPU/CUDA workload failed" }
-        python scripts\run_benefit_gating_ab.py --backend both --trials 12
+        python scripts\run_benefit_gating_ab.py --backend both --trials 16
         if ($LASTEXITCODE -ne 0) { throw "conservative benefit gating/oracle acceptance failed" }
         python scripts\run_long_lived_benefit.py --backend cuda
         if ($LASTEXITCODE -ne 0) { throw "long-lived benefit convergence/shift acceptance failed" }

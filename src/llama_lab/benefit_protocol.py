@@ -52,6 +52,19 @@ def complete_latin_orders(
     )
 
 
+def joint_williams_orders(
+    backends: Sequence[str], modes: Sequence[str], trials: int
+) -> tuple[tuple[tuple[str, str], ...], ...]:
+    """Balance the actual fresh-process stream over backend × policy."""
+
+    if not backends:
+        raise ValueError("backends must not be empty")
+    if not modes:
+        raise ValueError("modes must not be empty")
+    treatments = tuple((backend, mode) for backend in backends for mode in modes)
+    return complete_latin_orders(treatments, trials)
+
+
 @dataclass(frozen=True)
 class StaggeredWave(Generic[ResultT]):
     results: tuple[ResultT, ...]

@@ -5,7 +5,11 @@ import unittest
 from contextlib import AbstractContextManager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from llama_lab.benefit_protocol import complete_latin_orders, run_staggered_wave
+from llama_lab.benefit_protocol import (
+    complete_latin_orders,
+    joint_williams_orders,
+    run_staggered_wave,
+)
 from llama_lab.streaming import stream_chat
 
 
@@ -63,6 +67,40 @@ class BenefitProtocolTests(unittest.TestCase):
         orders = complete_latin_orders(("cpu", "cuda"), 12)
         self.assertEqual(orders.count(("cpu", "cuda")), 6)
         self.assertEqual(orders.count(("cuda", "cpu")), 6)
+
+    def test_joint_backend_mode_orders_balance_actual_process_predecessors(self) -> None:
+        treatments = tuple(
+            (backend, mode)
+            for backend in ("cpu", "cuda")
+            for mode in ("upstream", "always", "rule", "learned")
+        )
+        with self.assertRaisesRegex(ValueError, "complete Latin"):
+            complete_latin_orders(treatments, 12)
+
+        orders = joint_williams_orders(
+            ("cpu", "cuda"),
+            ("upstream", "always", "rule", "learned"),
+            16,
+        )
+        position_counts = {
+            (treatment, position): 0
+            for treatment in treatments
+            for position in range(len(treatments))
+        }
+        predecessor_counts = {
+            (left, right): 0
+            for left in treatments
+            for right in treatments
+            if left != right
+        }
+        for order in orders:
+            for position, treatment in enumerate(order):
+                position_counts[(treatment, position)] += 1
+            for pair in zip(order, order[1:]):
+                predecessor_counts[pair] += 1
+
+        self.assertEqual(set(position_counts.values()), {2})
+        self.assertEqual(set(predecessor_counts.values()), {2})
 
     def test_staggered_wave_orders_the_real_http_send_seam(self) -> None:
         server = ThreadingHTTPServer(("127.0.0.1", 0), _ArrivalHandler)

@@ -83,7 +83,7 @@ P95 改善 97.41%。这证明被隔离的 COW hot path，不等价于整个 serv
 
 短生命周期风险预算按 backend 隔离：CPU learned 产生 32 次 `safe_exploration`；已知 always 有害的 CUDA fresh process 提高最小样本门槛，在该 trace 内 0 次 probe 并 fail closed；`positive_lower_bound_decisions` 均为 0。CUDA positive-lower-bound 的生产实证由下一段长驻实验提供。
 
-随后新增的单进程长驻门禁补齐了这一限制：CUDA server 连续运行 53 waves，`confidence_beta=1.0`、每动作最少 12 个样本。冷启动 CacheFlow/positive 均为 0；稳定阶段 19 次有限探索后产生 88 次 positive-lower-bound，覆盖 31 waves、最长及终端连续均为 26 waves；最后一次上下文 gauge 的收益 13.964 ms 大于 10.825 ms 不确定性，但该last-value只作诊断。切换后 CacheFlow/positive 均为 0、安全回退为 3。硬门禁使用逐wave动作counter，要求持续启用且稳定阶段最后至少3个wave仍有positive action，不用全程最大值，也不让另一个异构请求的last-value gauge抹掉已发生的上下文决策。
+随后新增的单进程长驻门禁补齐了这一限制：CUDA server 连续运行 53 waves，`confidence_beta=1.0`、每动作最少 12 个样本。冷启动 CacheFlow/positive 均为 0；稳定阶段 26 次有限探索后产生 125 次 positive-lower-bound，覆盖 36 waves、最长及终端连续均为 35 waves；最后一次上下文 gauge 的收益 8.926 ms 大于 4.463 ms 不确定性，但该last-value只作诊断。切换后 CacheFlow/positive 均为 0、安全回退为 3。硬门禁使用逐wave动作counter，要求持续启用且稳定阶段最后至少3个wave仍有positive action，不用全程最大值，也不让另一个异构请求的last-value gauge抹掉已发生的上下文决策。逐wave请求TTFT与counter可独立重算全部phase/acceptance，篡改raw或copied acceptance均由普通测试拒绝。
 
 ### CUDA profiling 因果链
 

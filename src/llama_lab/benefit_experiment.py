@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import csv
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+from llama_lab.metrics import percentile
 
 
 _SAMPLE = re.compile(
@@ -167,3 +173,97 @@ def evaluate_long_lived(
     if shift.ttft_p95_ms > acceptance.maximum_ttft_ms:
         violations.append("post-shift TTFT exceeded the configured SLO")
     return AcceptanceResult(not violations, tuple(violations))
+
+
+def validate_long_lived_artifact(
+    wave_path: Path, summary_path: Path
+) -> dict[str, Any]:
+    """Rebuild long-lived phase evidence and acceptance from raw wave rows."""
+
+    with wave_path.open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    if not rows:
+        raise ValueError("long-lived wave evidence is empty")
+    if int(summary.get("waves", -1)) != len(rows):
+        raise ValueError("wave count diverges from summary")
+    if [int(row["global_wave"]) for row in rows] != list(range(1, len(rows) + 1)):
+        raise ValueError("global wave sequence is not contiguous")
+    if {row["backend"] for row in rows} != {str(summary.get("backend"))}:
+        raise ValueError("wave backend diverges from summary")
+    if {row["model"] for row in rows} != {str(summary.get("model"))}:
+        raise ValueError("wave model diverges from summary")
+
+    expected_phase_order = ["cold_start", "stable_reuse", "distribution_shift"]
+    observed_phase_order: list[str] = []
+    for row in rows:
+        phase = row["phase"]
+        if not observed_phase_order or phase != observed_phase_order[-1]:
+            observed_phase_order.append(phase)
+    if observed_phase_order != expected_phase_order:
+        raise ValueError("phase order is not cold/stable/shift contiguous")
+
+    phase_evidence: list[PhaseEvidence] = []
+    counter_names = (
+        "upstream_decisions",
+        "cacheflow_decisions",
+        "exploration_decisions",
+        "positive_decisions",
+        "drift_events",
+        "safety_fallbacks",
+    )
+    for phase in expected_phase_order:
+        phase_rows = [row for row in rows if row["phase"] == phase]
+        if [int(row["phase_wave"]) for row in phase_rows] != list(
+            range(1, len(phase_rows) + 1)
+        ):
+            raise ValueError(f"{phase} phase-wave sequence is not contiguous")
+        streak = 0
+        maximum_streak = 0
+        positive_waves = 0
+        for row in phase_rows:
+            if int(row["positive_decisions"]) > 0:
+                positive_waves += 1
+                streak += 1
+                maximum_streak = max(maximum_streak, streak)
+            else:
+                streak = 0
+        counters = {
+            name: sum(int(row[name]) for row in phase_rows) for name in counter_names
+        }
+        final_row = phase_rows[-1]
+        phase_evidence.append(
+            PhaseEvidence(
+                phase=phase,
+                **counters,
+                ttft_p95_ms=percentile(
+                    (
+                        float(value)
+                        for row in phase_rows
+                        for value in json.loads(row["request_ttft_ms"])
+                    ),
+                    0.95,
+                ),
+                predicted_benefit_ms=float(final_row["predicted_benefit_ms"]),
+                uncertainty_ms=float(final_row["uncertainty_ms"]),
+                positive_waves=positive_waves,
+                max_consecutive_positive_waves=maximum_streak,
+                terminal_consecutive_positive_waves=streak,
+            )
+        )
+
+    rebuilt_phases = [asdict(phase) for phase in phase_evidence]
+    if summary.get("phases") != rebuilt_phases:
+        raise ValueError("phase evidence diverges from raw waves")
+    protocol_payload = summary.get("acceptance_protocol", {})
+    acceptance_protocol = LongLivedAcceptance(
+        **{
+            field: protocol_payload.get(field, getattr(LongLivedAcceptance(), field))
+            for field in LongLivedAcceptance.__dataclass_fields__
+        }
+    )
+    rebuilt_acceptance = asdict(evaluate_long_lived(phase_evidence, acceptance_protocol))
+    rebuilt_acceptance["violations"] = list(rebuilt_acceptance["violations"])
+    if summary.get("acceptance") != rebuilt_acceptance:
+        raise ValueError("acceptance diverges from raw wave evidence")
+    return summary

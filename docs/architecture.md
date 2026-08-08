@@ -1133,7 +1133,7 @@ CLI 支持 `--benefit-policy upstream|always|rule|learned` 及样本、探索、
 
 `run_long_lived_benefit.py` 保持同一个 CUDA server PID，逐 wave 抓取带 backend/action label 的累积 counter 与最后一次预测 gauge。实验顺序固定为短冷启动、稳定高复用/长短请求混合、独立 throughput-only 分布切换。主门禁使用生产级 `confidence_beta=1.0`、每动作最少 12 个样本：冷启动不得提前启用；稳定阶段必须连续出现 `predicted_benefit > joint_uncertainty` 的非探索动作；最后至少 3 个 stable wave 仍须各有 positive-lower-bound action；切换后不得继续错误启用，并须由 drift 或 structural safety fallback 回到 upstream。Prometheus 的预测/不确定性 gauge 只描述最后一次任意上下文，不能覆盖同一 wave 中更早的其他特征向量，因此只作诊断，不再跨上下文否决动作 counter。不同 phase 的请求复杂度不同，禁止互相作为相对性能 baseline，只使用统一 TTFT SLO；同 workload 相对性能由下一节配对 A/B 提供。
 
-最终 53-wave CUDA 结果为：冷启动 CacheFlow/positive 均为 0；稳定阶段 exploration 19、positive-lower-bound 88，positive 覆盖 31 waves、最长及终端连续均为 26 waves，最后一次上下文 gauge 的预测收益/不确定性为 13.964/10.825 ms；分布切换 CacheFlow/positive 均为 0、安全回退 3。门禁要求至少连续 3 个 positive wave，且稳定阶段末尾仍连续存在；不以全程最大值或最后一个异构上下文的单值 gauge 制造选择偏差。
+最终 53-wave CUDA 结果为：冷启动 CacheFlow/positive 均为 0；稳定阶段 exploration 26、positive-lower-bound 125，positive 覆盖 36 waves、最长及终端连续均为 35 waves，最后一次上下文 gauge 的预测收益/不确定性为 8.926/4.463 ms；分布切换 CacheFlow/positive 均为 0、安全回退 3。门禁要求至少连续 3 个 positive wave，且稳定阶段末尾仍连续存在；不以全程最大值或最后一个异构上下文的单值 gauge 制造选择偏差。CSV 逐wave保存每个请求的TTFT向量；`validate_long_lived_artifact()` 从原始counter/TTFT重算phase P95、positive wave、最大/终端streak和最终acceptance，运行脚本写出后立即自校验，普通测试还覆盖raw counter与copied acceptance篡改。
 
 ### 21.6 CUDA profiling 因果链
 
