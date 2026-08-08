@@ -18,7 +18,12 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from llama_lab.benefit_protocol import joint_williams_orders, run_staggered_wave
+from llama_lab.benefit_protocol import (
+    evaluate_short_lived_acceptance,
+    joint_williams_orders,
+    prometheus_histogram_quantile_upper_bound,
+    run_staggered_wave,
+)
 from llama_lab.server_bench import wait_until_ready
 from llama_lab.streaming import stream_chat
 
@@ -179,6 +184,12 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
             prometheus, "benefit_reason_total",
             {"backend": backend_label, "reason": "insufficient_evidence"},
         ),
+        "benefit_choose_p99_us": prometheus_histogram_quantile_upper_bound(
+            prometheus,
+            "benefit_choose_duration_us",
+            {"backend": backend_label},
+            0.99,
+        ),
         "oracle_objective_ms": "",
         "oracle_regret_ratio": "",
         "upstream_regression_ratio": "",
@@ -191,6 +202,7 @@ def main() -> None:
     parser.add_argument("--trials", type=int, default=16)
     parser.add_argument("--max-regression", type=float, default=0.03)
     parser.add_argument("--max-oracle-regret", type=float, default=0.20)
+    parser.add_argument("--max-choose-p99-us", type=float, default=50.0)
     args = parser.parse_args()
     backends = ["cpu", "cuda"] if args.backend == "both" else [args.backend]
     treatment_orders = joint_williams_orders(backends, MODES, args.trials)
@@ -252,12 +264,14 @@ def main() -> None:
                 "cacheflow_decisions": sum(float(row["cacheflow_decisions"]) for row in group),
                 "exploration_decisions": sum(float(row["exploration_decisions"]) for row in group),
                 "positive_lower_bound_decisions": sum(float(row["positive_lower_bound_decisions"]) for row in group),
+                "benefit_choose_p99_us": max(float(row["benefit_choose_p99_us"]) for row in group),
                 "exact_hash_match_ratio": statistics.median(float(row["exact_hash_match_ratio"]) for row in group),
                 "paired_upstream_regression_ratio": (
                     statistics.median(float(row["upstream_regression_ratio"]) for row in group)
                     if mode == "learned"
                     else ""
                 ),
+                "performance_status": "",
             })
         learned_group = [row for row in rows if row["backend"] == backend and row["mode"] == "learned"]
         wrong_enable_trials = 0
@@ -280,19 +294,25 @@ def main() -> None:
             "cacheflow_decisions": 0.0,
             "exploration_decisions": 0.0,
             "positive_lower_bound_decisions": 0.0,
+            "benefit_choose_p99_us": 0.0,
             "exact_hash_match_ratio": 1.0,
             "paired_upstream_regression_ratio": "",
+            "performance_status": "",
         })
 
-        paired_regression = statistics.median(
-            float(row["upstream_regression_ratio"]) for row in learned_group
+        short_acceptance = evaluate_short_lived_acceptance(
+            learned_group,
+            maximum_regression=args.max_regression,
+            maximum_choose_p99_us=args.max_choose_p99_us,
         )
+        paired_regression = short_acceptance.paired_regression
+        for summary in summaries:
+            if summary["backend"] == backend and summary["mode"] == "learned":
+                summary["performance_status"] = short_acceptance.performance_status
+                break
         regret = statistics.median(float(row["oracle_regret_ratio"]) for row in learned_group)
-        if paired_regression > args.max_regression:
-            violations.append(
-                f"{backend} learned paired median regression {paired_regression:.1%} "
-                f"exceeds {args.max_regression:.1%}"
-            )
+        if not short_acceptance.passed:
+            violations.append(f"{backend} learned {short_acceptance.violation}")
         if regret > args.max_oracle_regret:
             violations.append(f"{backend} learned median oracle regret {regret:.1%} exceeds {args.max_oracle_regret:.1%}")
         if harmful_trials and wrong_enable_trials / harmful_trials > 0.20:

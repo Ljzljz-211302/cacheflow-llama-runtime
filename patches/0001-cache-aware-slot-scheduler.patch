@@ -3863,10 +3863,10 @@ index 0000000..910e019
 +}
 diff --git a/tests/test-benefit-policy.cpp b/tests/test-benefit-policy.cpp
 new file mode 100644
-index 0000000..3d9c648
+index 0000000..96b972f
 --- /dev/null
 +++ b/tests/test-benefit-policy.cpp
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,206 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -3938,6 +3938,12 @@ index 0000000..3d9c648
 +    const auto converged = policy.snapshot(server_benefit_backend::cpu);
 +    assert(converged.last_predicted_benefit_ms == learned.predicted_benefit_ms);
 +    assert(converged.last_uncertainty_ms == learned.uncertainty_ms);
++    uint64_t timed_decisions = 0;
++    for (const auto count : converged.choose_duration_us_buckets) {
++        timed_decisions += count;
++    }
++    assert(timed_decisions == converged.upstream_decisions + converged.cacheflow_decisions);
++    assert(converged.choose_duration_us_sum > 0.0);
 +
 +    // Inconclusive evidence triggers only a finite number of sparse probes.
 +    auto ambiguous_config = config;
@@ -6428,13 +6434,14 @@ index 0000000..3ef4495
 +};
 diff --git a/tools/server/server-benefit-policy.cpp b/tools/server/server-benefit-policy.cpp
 new file mode 100644
-index 0000000..31a907c
+index 0000000..6e1aaaa
 --- /dev/null
 +++ b/tools/server/server-benefit-policy.cpp
-@@ -0,0 +1,578 @@
+@@ -0,0 +1,606 @@
 +#include "server-benefit-policy.h"
 +
 +#include <algorithm>
++#include <chrono>
 +#include <cmath>
 +#include <limits>
 +#include <stdexcept>
@@ -6444,6 +6451,27 @@ index 0000000..31a907c
 +
 +namespace {
 +using checkpoint_json = nlohmann::ordered_json;
++
++constexpr std::array<double, server_benefit_choose_duration_bucket_count - 1>
++        choose_duration_upper_bounds_us = { 1, 2, 5, 10, 20, 50, 100, 250 };
++
++struct choose_duration_timer {
++    std::array<uint64_t, server_benefit_choose_duration_bucket_count> & buckets;
++    double & sum_us;
++    std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
++
++    ~choose_duration_timer() {
++        const double elapsed_us = std::chrono::duration<double, std::micro>(
++                std::chrono::steady_clock::now() - started).count();
++        sum_us += elapsed_us;
++        size_t bucket = 0;
++        while (bucket < choose_duration_upper_bounds_us.size() &&
++                elapsed_us > choose_duration_upper_bounds_us[bucket]) {
++            ++bucket;
++        }
++        buckets[bucket]++;
++    }
++};
 +
 +uint32_t checkpoint_crc32(const std::string & value) {
 +    uint32_t crc = 0xffffffffU;
@@ -6647,6 +6675,10 @@ index 0000000..31a907c
 +
 +server_benefit_decision server_benefit_policy::choose(const server_benefit_features & features) {
 +    auto & backend = state(features.backend);
++    choose_duration_timer duration_timer{
++        backend.choose_duration_us_buckets,
++        backend.choose_duration_us_sum,
++    };
 +    server_benefit_decision decision;
 +    decision.id = next_id_++;
 +    decision.backend = features.backend;
@@ -6808,6 +6840,8 @@ index 0000000..31a907c
 +        backend.cacheflow.predict(reference),
 +        backend.last_predicted_benefit_ms,
 +        backend.last_uncertainty_ms,
++        backend.choose_duration_us_buckets,
++        backend.choose_duration_us_sum,
 +    };
 +}
 +
@@ -7012,10 +7046,10 @@ index 0000000..31a907c
 +}
 diff --git a/tools/server/server-benefit-policy.h b/tools/server/server-benefit-policy.h
 new file mode 100644
-index 0000000..9e4bc3b
+index 0000000..771def3
 --- /dev/null
 +++ b/tools/server/server-benefit-policy.h
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,186 @@
 +#pragma once
 +
 +#include "server-benefit-checkpoint.h"
@@ -7044,6 +7078,7 @@ index 0000000..9e4bc3b
 +};
 +
 +constexpr size_t server_benefit_feature_count = 10;
++constexpr size_t server_benefit_choose_duration_bucket_count = 9;
 +
 +struct server_benefit_config {
 +    server_benefit_mode mode = server_benefit_mode::upstream;
@@ -7112,6 +7147,10 @@ index 0000000..9e4bc3b
 +    double cacheflow_cost_ms = 0.0;
 +    double last_predicted_benefit_ms = 0.0;
 +    double last_uncertainty_ms = 0.0;
++    // Exact (non-cumulative) bins with upper bounds
++    // 1/2/5/10/20/50/100/250/+Inf microseconds.
++    std::array<uint64_t, server_benefit_choose_duration_bucket_count> choose_duration_us_buckets{};
++    double choose_duration_us_sum = 0.0;
 +};
 +
 +struct server_benefit_persistence_snapshot {
@@ -7171,6 +7210,8 @@ index 0000000..9e4bc3b
 +        uint64_t decisions_since_probe = 0;
 +        double last_predicted_benefit_ms = 0.0;
 +        double last_uncertainty_ms = 0.0;
++        std::array<uint64_t, server_benefit_choose_duration_bucket_count> choose_duration_us_buckets{};
++        double choose_duration_us_sum = 0.0;
 +    };
 +
 +    server_benefit_config config_;
@@ -7196,7 +7237,7 @@ index 0000000..9e4bc3b
 +    checkpoint_restore_result restore_checkpoint(const std::string & payload);
 +};
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..14064c9 100644
+index 986b2f1..5d5976e 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -4,6 +4,14 @@
@@ -9105,7 +9146,7 @@ index 986b2f1..14064c9 100644
              },{
                      {"name",  "requests_processing"},
                      {"help",  "Number of requests processing."},
-@@ -4188,6 +5449,197 @@ void server_routes::init_routes() {
+@@ -4188,6 +5449,213 @@ void server_routes::init_routes() {
              }
          }
  
@@ -9137,6 +9178,20 @@ index 986b2f1..14064c9 100644
 +                       << value.last_predicted_benefit_ms << "\n"
 +                       << "llamacpp:benefit_uncertainty_ms{backend=\"" << backend << "\"} "
 +                       << value.last_uncertainty_ms << "\n";
++            static constexpr const char * choose_duration_labels[] = {
++                "1", "2", "5", "10", "20", "50", "100", "250", "+Inf",
++            };
++            uint64_t cumulative = 0;
++            for (size_t i = 0; i < server_benefit_choose_duration_bucket_count; ++i) {
++                cumulative += value.choose_duration_us_buckets[i];
++                prometheus << "llamacpp:benefit_choose_duration_us_bucket{backend=\""
++                           << backend << "\",le=\"" << choose_duration_labels[i]
++                           << "\"} " << cumulative << "\n";
++            }
++            prometheus << "llamacpp:benefit_choose_duration_us_count{backend=\""
++                       << backend << "\"} " << cumulative << "\n"
++                       << "llamacpp:benefit_choose_duration_us_sum{backend=\""
++                       << backend << "\"} " << value.choose_duration_us_sum << "\n";
 +        };
 +        prometheus << "# HELP llamacpp:benefit_decisions_total Conservative benefit-policy decisions.\n"
 +                   << "# TYPE llamacpp:benefit_decisions_total counter\n"
@@ -9155,7 +9210,9 @@ index 986b2f1..14064c9 100644
 +                   << "# HELP llamacpp:benefit_predicted_benefit_ms Last contextual upstream minus CacheFlow predicted cost.\n"
 +                   << "# TYPE llamacpp:benefit_predicted_benefit_ms gauge\n"
 +                   << "# HELP llamacpp:benefit_uncertainty_ms Last joint confidence radius and safety margin.\n"
-+                   << "# TYPE llamacpp:benefit_uncertainty_ms gauge\n";
++                   << "# TYPE llamacpp:benefit_uncertainty_ms gauge\n"
++                   << "# HELP llamacpp:benefit_choose_duration_us Online policy choose latency in microseconds.\n"
++                   << "# TYPE llamacpp:benefit_choose_duration_us histogram\n";
 +        append_benefit("cpu", res_task->benefit_cpu);
 +        append_benefit("cuda", res_task->benefit_cuda);
 +

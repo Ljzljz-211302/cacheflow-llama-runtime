@@ -6,7 +6,9 @@ from contextlib import AbstractContextManager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from llama_lab.benefit_protocol import (
+    evaluate_short_lived_acceptance,
     complete_latin_orders,
+    prometheus_histogram_quantile_upper_bound,
     joint_williams_orders,
     run_staggered_wave,
 )
@@ -37,6 +39,67 @@ class _ArrivalHandler(BaseHTTPRequestHandler):
 
 
 class BenefitProtocolTests(unittest.TestCase):
+    def test_histogram_quantile_uses_cumulative_prometheus_buckets(self) -> None:
+        payload = """
+llamacpp:benefit_choose_duration_us_bucket{backend="cuda",le="1"} 3
+llamacpp:benefit_choose_duration_us_bucket{backend="cuda",le="5"} 8
+llamacpp:benefit_choose_duration_us_bucket{backend="cuda",le="50"} 99
+llamacpp:benefit_choose_duration_us_bucket{backend="cuda",le="+Inf"} 100
+"""
+        self.assertEqual(
+            prometheus_histogram_quantile_upper_bound(
+                payload,
+                "benefit_choose_duration_us",
+                {"backend": "cuda"},
+                0.99,
+            ),
+            50.0,
+        )
+
+    def test_zero_intervention_requires_bounded_choose_latency(self) -> None:
+        rows = [
+            {
+                "upstream_regression_ratio": 0.08,
+                "cacheflow_decisions": 0.0,
+                "exploration_decisions": 0.0,
+                "benefit_choose_p99_us": 20.0,
+            },
+            {
+                "upstream_regression_ratio": 0.06,
+                "cacheflow_decisions": 0.0,
+                "exploration_decisions": 0.0,
+                "benefit_choose_p99_us": 50.0,
+            },
+        ]
+        result = evaluate_short_lived_acceptance(
+            rows, maximum_regression=0.03, maximum_choose_p99_us=50.0
+        )
+        self.assertTrue(result.passed)
+        self.assertEqual(result.performance_status, "inconclusive_no_intervention")
+        self.assertEqual(result.non_probe_cacheflow_decisions, 0)
+
+        rows[1]["benefit_choose_p99_us"] = 100.0
+        slow = evaluate_short_lived_acceptance(
+            rows, maximum_regression=0.03, maximum_choose_p99_us=50.0
+        )
+        self.assertFalse(slow.passed)
+        self.assertIn("choose P99", slow.violation)
+
+    def test_applied_policy_still_requires_wall_clock_non_regression(self) -> None:
+        rows = [
+            {
+                "upstream_regression_ratio": 0.06,
+                "cacheflow_decisions": 4.0,
+                "exploration_decisions": 1.0,
+                "benefit_choose_p99_us": 20.0,
+            }
+        ]
+        result = evaluate_short_lived_acceptance(
+            rows, maximum_regression=0.03, maximum_choose_p99_us=50.0
+        )
+        self.assertFalse(result.passed)
+        self.assertEqual(result.performance_status, "regressed_with_intervention")
+
     def test_latin_orders_require_complete_four_trial_blocks(self) -> None:
         modes = ("upstream", "always", "rule", "learned")
         with self.assertRaisesRegex(ValueError, "complete Latin"):

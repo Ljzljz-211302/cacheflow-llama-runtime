@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import threading
 import time
+import re
+import statistics
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager
@@ -12,6 +14,133 @@ from typing import Generic, TypeVar, cast
 
 InputT = TypeVar("InputT")
 ResultT = TypeVar("ResultT")
+
+
+_PROMETHEUS_SAMPLE_RE = re.compile(
+    r'^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)'
+    r'(?:\{(?P<labels>[^}]*)\})?\s+(?P<value>[-+0-9.eE]+)$'
+)
+_PROMETHEUS_LABEL_RE = re.compile(r'(?P<key>[a-zA-Z_][a-zA-Z0-9_]*)="(?P<value>[^"]*)"')
+
+
+def prometheus_histogram_quantile_upper_bound(
+    text: str,
+    name: str,
+    labels: dict[str, str],
+    quantile: float,
+) -> float:
+    """Return the conservative bucket upper bound for a histogram quantile."""
+
+    if not 0 < quantile <= 1:
+        raise ValueError("quantile must be in (0, 1]")
+    metric_name = f"llamacpp:{name}_bucket"
+    buckets: list[tuple[float, float]] = []
+    for raw_line in text.splitlines():
+        match = _PROMETHEUS_SAMPLE_RE.match(raw_line.strip())
+        if not match or match.group("name") != metric_name:
+            continue
+        sample_labels = {
+            item.group("key"): item.group("value")
+            for item in _PROMETHEUS_LABEL_RE.finditer(match.group("labels") or "")
+        }
+        if any(sample_labels.get(key) != value for key, value in labels.items()):
+            continue
+        if "le" not in sample_labels:
+            continue
+        upper = (
+            float("inf")
+            if sample_labels["le"] == "+Inf"
+            else float(sample_labels["le"])
+        )
+        buckets.append((upper, float(match.group("value"))))
+    if not buckets:
+        raise RuntimeError(f"missing histogram {name} with {labels}")
+    buckets.sort(key=lambda item: item[0])
+    if buckets[-1][0] != float("inf") or buckets[-1][1] <= 0:
+        raise RuntimeError(f"histogram {name} is missing a nonempty +Inf bucket")
+    if any(right[1] < left[1] for left, right in zip(buckets, buckets[1:])):
+        raise RuntimeError(f"histogram {name} buckets are not cumulative")
+    target = quantile * buckets[-1][1]
+    for upper, count in buckets:
+        if count >= target:
+            return upper
+    raise RuntimeError(f"histogram {name} has no quantile bucket")
+
+
+@dataclass(frozen=True)
+class ShortLivedAcceptance:
+    passed: bool
+    performance_status: str
+    paired_regression: float
+    choose_p99_us: float
+    cacheflow_decisions: int
+    non_probe_cacheflow_decisions: int
+    violation: str = ""
+
+
+def evaluate_short_lived_acceptance(
+    learned_rows: Sequence[dict[str, object]],
+    *,
+    maximum_regression: float,
+    maximum_choose_p99_us: float,
+) -> ShortLivedAcceptance:
+    """Separate measured intervention effects from a fail-closed null path.
+
+    An experiment with no CacheFlow action cannot identify CacheFlow's causal
+    end-to-end effect. It may still verify the production fallback when the
+    online chooser itself stays inside its preregistered latency budget.
+    """
+
+    if not learned_rows:
+        raise ValueError("learned_rows must not be empty")
+    paired_regression = statistics.median(
+        float(row["upstream_regression_ratio"]) for row in learned_rows
+    )
+    choose_p99_us = max(float(row["benefit_choose_p99_us"]) for row in learned_rows)
+    cacheflow_decisions = round(
+        sum(float(row["cacheflow_decisions"]) for row in learned_rows)
+    )
+    exploration_decisions = round(
+        sum(float(row["exploration_decisions"]) for row in learned_rows)
+    )
+    non_probe = max(0, cacheflow_decisions - exploration_decisions)
+    if choose_p99_us > maximum_choose_p99_us:
+        return ShortLivedAcceptance(
+            False,
+            "chooser_over_budget",
+            paired_regression,
+            choose_p99_us,
+            cacheflow_decisions,
+            non_probe,
+            f"choose P99 {choose_p99_us:.1f} us exceeds {maximum_choose_p99_us:.1f} us",
+        )
+    if paired_regression <= maximum_regression:
+        return ShortLivedAcceptance(
+            True,
+            "non_regressed",
+            paired_regression,
+            choose_p99_us,
+            cacheflow_decisions,
+            non_probe,
+        )
+    if cacheflow_decisions == 0:
+        return ShortLivedAcceptance(
+            True,
+            "inconclusive_no_intervention",
+            paired_regression,
+            choose_p99_us,
+            cacheflow_decisions,
+            non_probe,
+        )
+    return ShortLivedAcceptance(
+        False,
+        "regressed_with_intervention",
+        paired_regression,
+        choose_p99_us,
+        cacheflow_decisions,
+        non_probe,
+        f"paired median regression {paired_regression:.1%} exceeds {maximum_regression:.1%}",
+    )
 
 
 def complete_latin_orders(
