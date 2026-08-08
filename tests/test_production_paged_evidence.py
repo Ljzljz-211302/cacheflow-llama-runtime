@@ -80,6 +80,31 @@ class ProductionPagedEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "device"):
                 validate_artifact(self.protocol, artifact)
 
+    def test_rehashed_report_conclusion_tamper_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / "artifact"
+            shutil.copytree(self.artifact, artifact)
+            report_path = artifact / "report.md"
+            report = report_path.read_text(encoding="utf-8")
+            report_path.write_text(
+                report.replace("did not pass", "passed"), encoding="utf-8"
+            )
+            self._rehash(artifact, "report.md")
+            with self.assertRaisesRegex(AssertionError, "report"):
+                validate_artifact(self.protocol, artifact)
+
+    def test_rehashed_raw_log_tamper_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / "artifact"
+            shutil.copytree(self.artifact, artifact)
+            trials = json.loads((artifact / "trials.json").read_text(encoding="utf-8"))
+            relative = str(trials[0]["log"])
+            log_path = artifact / relative
+            log_path.write_bytes(log_path.read_bytes() + b"\ntampered\n")
+            self._rehash(artifact, relative)
+            with self.assertRaisesRegex(AssertionError, "log_sha256"):
+                validate_artifact(self.protocol, artifact)
+
 
 if __name__ == "__main__":
     unittest.main()

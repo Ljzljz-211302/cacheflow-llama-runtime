@@ -104,6 +104,33 @@ def action_reason_total(metrics: str, action: str) -> float:
     )
 
 
+def render_report(
+    summary: dict[str, Any],
+    mechanism: dict[str, Any],
+) -> str:
+    direct = summary["direct_client_elapsed_ms"]
+    paged = summary["paged_client_elapsed_ms"]
+    effect = summary["paired_paged_minus_direct_ms"]
+    interval = summary["paired_median_bootstrap_95_ms"]
+    device = summary["device"]
+    outcome = "passed" if summary["promotion_passed"] else "did not pass"
+    return f"""# Issue #7 production Paged service experiment
+
+- Protocol: `{summary['protocol_version']}` (`{summary['protocol_sha256']}`)
+- Device: {device['name']} (compute capability {device['compute_capability']})
+- Paired trials: {summary['paired_trials']}, alternating AB/BA, no outcome-based deletion
+- Direct client latency: median {direct['median']:.3f} ms, P95 {direct['p95']:.3f} ms
+- Paged client latency: median {paged['median']:.3f} ms, P95 {paged['p95']:.3f} ms
+- Paired Paged - Direct: median {effect['median']:+.3f} ms, P95 {effect['p95']:+.3f} ms
+- Paired median bootstrap 95% interval: [{interval[0]:+.3f}, {interval[1]:+.3f}] ms
+- P95 regression: {summary['p95_regression_percent']:+.2f}% (preregistered promotion limit: +{summary['promotion_limit_percent']:.2f}%)
+- Correctness: exact output match in every pair; {summary['production_graph_entries']} production Paged graph entries; {summary['paged_fallbacks']} fallbacks
+- Mechanism replay: {mechanism['kernel_launches']} `cacheflow_paged_decode_fattn_k1<64>` launches (one per model layer); profiler timing is non-primary
+
+The opt-in production promotion gate **{outcome}**. This result applies only to the preregistered Qwen2.5-0.5B, batch-1, short-context envelope. It is not a long-context, memory-bound, or universal speedup claim.
+"""
+
+
 def validate_artifact(protocol_path: Path, output: Path) -> None:
     protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
     rows = json.loads((output / "trials.json").read_text(encoding="utf-8"))
@@ -145,6 +172,14 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
             raise AssertionError("artifact contains an action without complete cost observation")
         if row["action_reason_decisions"] != row["action_decisions"]:
             raise AssertionError("artifact action decisions are not bound to their reasons")
+        expected_log = Path(
+            f"raw/{row['action']}-pair-{int(row['pair']):02d}-{order_in_pair}.log"
+        )
+        relative_log = Path(str(row["log"]))
+        if relative_log.as_posix() != expected_log.as_posix():
+            raise AssertionError("artifact trial log path differs from its pair/action identity")
+        if row.get("log_sha256") != sha256(output / relative_log):
+            raise AssertionError("artifact trial log_sha256 differs from its raw log")
     if any(pair["direct"]["content"] != pair["paged"]["content"] for pair in by_pair.values()):
         raise AssertionError("artifact contains a differential output mismatch")
     direct = [by_pair[pair]["direct"]["client_elapsed_ms"] for pair in sorted(by_pair)]
@@ -211,6 +246,10 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
         raise AssertionError("summary kernel launch count differs from mechanism evidence")
     if summary.get("nsys_production_paged_kernel_duration_ms_non_primary") != mechanism["kernel_duration_ms"]:
         raise AssertionError("summary kernel duration differs from mechanism evidence")
+    if (output / "report.md").read_text(encoding="utf-8") != render_report(
+        summary, mechanism,
+    ):
+        raise AssertionError("artifact report is not rendered from validated evidence")
 
 
 def main() -> None:
@@ -385,23 +424,9 @@ def main() -> None:
     }
     (args.output / "trials.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    outcome = "passed" if summary["promotion_passed"] else "did not pass"
-    report = f"""# Issue #7 production Paged service experiment
-
-- Protocol: `{protocol['protocol_version']}` (`{summary['protocol_sha256']}`)
-- Device: {device['name']} (compute capability {device['compute_capability']})
-- Paired trials: {pairs}, alternating AB/BA, no outcome-based deletion
-- Direct client latency: median {direct_summary['median']:.3f} ms, P95 {direct_summary['p95']:.3f} ms
-- Paged client latency: median {paged_summary['median']:.3f} ms, P95 {paged_summary['p95']:.3f} ms
-- Paired Paged - Direct: median {effect_summary['median']:+.3f} ms, P95 {effect_summary['p95']:+.3f} ms
-- Paired median bootstrap 95% interval: [{summary['paired_median_bootstrap_95_ms'][0]:+.3f}, {summary['paired_median_bootstrap_95_ms'][1]:+.3f}] ms
-- P95 regression: {p95_regression:+.2f}% (preregistered promotion limit: +{promotion_limit:.2f}%)
-- Correctness: exact output match in every pair; {summary['production_graph_entries']} production Paged graph entries; {summary['paged_fallbacks']} fallbacks
-- Mechanism replay: {mechanism['kernel_launches']} `cacheflow_paged_decode_fattn_k1<64>` launches (one per model layer); profiler timing is non-primary
-
-The opt-in production promotion gate **{outcome}**. This result applies only to the preregistered Qwen2.5-0.5B, batch-1, short-context envelope. It is not a long-context, memory-bound, or universal speedup claim.
-"""
-    (args.output / "report.md").write_text(report, encoding="utf-8")
+    (args.output / "report.md").write_text(
+        render_report(summary, mechanism), encoding="utf-8",
+    )
     evidence_files = [
         "trials.json", "summary.json", "report.md", "mechanism.json",
         "profile/production-paged.nsys-rep", "profile/production-paged.sqlite",

@@ -199,7 +199,7 @@ CUDA mixed workload 缺少 backend-aware policy guard；Hybrid/Recurrent 只有 
 
 先讲负结果：固定 adaptive chunk 在不同 backend/workload 上结论反号。然后画出同一生产 Seam 的两条 shadow plan，说明 learned policy 只在悲观 CacheFlow cost 仍低于乐观 upstream cost 加安全 margin 时启用。重点追问是：为什么置信半径必须乘 residual noise、为什么 SLO miss 进入 reward 却不等于 drift、为什么探索必须有预算、为什么单 prefill 必须直接回退。最后展示 CPU/CUDA 各 10-trial Latin 验收与 paired oracle regret，不声称这是全栈或所有模型上的全局最优。
 
-最终固定并发 admission 顺序的 10-trial fresh-process 中 positive-lower-bound 次数为 0：CPU 26 次有限探索，CUDA 0 次 probe/fail-closed；它只验证 backend-local 冷启动风险边界。随后 53-wave 单进程 CUDA trace 在 `beta=1.0` 下产生 18 次探索和 142 次 positive-lower-bound，覆盖 33 waves、最长连续 13 waves，终态收益 21.29 ms 仍大于 8.82 ms 不确定性，并在分布切换后 0 次错误启用、3 次安全回退，因此可以声称当前 0.5B/CUDA/workload 上观察到持续在线利用，但不能外推其他模型与硬件。
+最终在真实 socket send seam 固定并发发送顺序的 10-trial fresh-process 中 positive-lower-bound 次数为 0：CPU 26 次有限探索，CUDA 0 次 probe/fail-closed；它只验证 backend-local 冷启动风险边界。随后 53-wave 单进程 CUDA trace 在 `beta=1.0` 下产生 18 次探索和 142 次 positive-lower-bound，覆盖 33 waves、最长连续 13 waves，终态收益 21.29 ms 仍大于 8.82 ms 不确定性，并在分布切换后 0 次错误启用、3 次安全回退，因此可以声称当前 0.5B/CUDA/workload 上观察到持续在线利用，但不能外推其他模型与硬件。
 
 ### CUDA 因果链怎么讲？
 

@@ -1,6 +1,6 @@
 # CacheFlow Runtime 推免面试学习路线（零基础 18 天）
 
-> 本路线保留分日训练安排；项目事实、最新实验数字和完整问答统一以 [`lessons/cacheflow-runtime-complete-interview-handbook.html`](../lessons/cacheflow-runtime-complete-interview-handbook.html) 为准。当前增量专项验收通过，但全量统计套件未稳定绿灯。
+> 本路线保留分日训练安排；项目事实、最新实验数字和完整问答统一以 [`lessons/cacheflow-runtime-complete-interview-handbook.html`](../lessons/cacheflow-runtime-complete-interview-handbook.html) 为准。当前增量专项与一次严格 Full 均已通过；一次通过不外推为所有未来运行都无统计波动。
 
 课程入口：[lessons/index.html](../lessons/index.html)；速查：[术语表](../reference/glossary.html)、[公式与代码地图](../reference/formulas-and-code-map.html)。
 
@@ -197,7 +197,7 @@
 
 - 固定上游个人差异：61 files、+8708/−99 C/C++/CUDA；外层实验另计。
 - 长驻 CUDA：53 waves；18 exploration；142 positive；33 positive waves；最长连续 13；终态 21.29ms > 8.82ms；shift 后 0 错误启用、3 fallback。
-- 短程 gating：固定并发 admission 顺序后，CPU regression −25.87%、oracle regret 3.48%；CUDA +1.64%、3.92%，CUDA fresh-process 0 probe，6 个 harmful trials 中 0 次错误启用。
+- 短程 gating：在真实 socket send seam 固定并发发送顺序后，CPU regression −25.87%、oracle regret 3.48%；CUDA +1.64%、3.92%，CUDA fresh-process 0 probe，6 个 harmful trials 中 0 次错误启用。
 - CUDA causal：decision +13、chunk +23、prefill token −354、copy +20.066MB、Event +0.808ms、Engine 汇总 −11.446ms、TTFT P95 +85.61ms。
 - 严格入口是 `verify.ps1 -Full`。2026-08-08 在外层 `e01a844`、vendor `130bd22` 上原生退出 0：122 个 Python 测试、构建、原生测试、Sanitizer、真实模型/应用、Issue #7 生产旅程及全部统计门禁均通过。此前波动已定位为并发客户端线程抢跑改变 slot assignment；现在固定 admission 顺序但保持请求重叠，阈值未放宽。
 

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
 
@@ -88,6 +89,7 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
     ]
     log_path.parent.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
+    observed_send_orders: list[str] = []
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.Popen(
             command, cwd=ROOT, env=environment, stdout=log, stderr=subprocess.STDOUT,
@@ -105,11 +107,14 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
                     for index, (kind, prompt, predict) in enumerate(requests)
                 ]
 
-                def issue(item: tuple[int, str, str, int]) -> dict[str, Any]:
+                def issue(
+                    item: tuple[int, str, str, int],
+                    send_guard: AbstractContextManager[None],
+                ) -> dict[str, Any]:
                     index, kind, prompt, predict = item
                     result = stream_chat(
                         base_url, prompt + f" wave {wave}", "local-model", predict,
-                        180, 1000 + index,
+                        180, 1000 + index, send_guard=send_guard,
                     )
                     return {
                         "request": index,
@@ -121,12 +126,16 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
                         "output_hash": hashlib.sha256(result["text"].encode()).hexdigest(),
                     }
 
-                rows.extend(run_staggered_wave(
+                wave_result = run_staggered_wave(
                     wave_inputs,
                     issue,
                     max_workers=4,
                     admission_stagger_s=ADMISSION_STAGGER_MS / 1000,
-                ))
+                )
+                rows.extend(wave_result.results)
+                observed_send_orders.append(
+                    ";".join(str(index) for index in wave_result.observed_send_order)
+                )
             burst_ms = (time.perf_counter() - started) * 1000
             with urllib.request.urlopen(f"{base_url}/metrics", timeout=30) as response:
                 prometheus = response.read().decode()
@@ -152,7 +161,8 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
         "output_hashes": ";".join(str(row["output_hash"]) for row in sorted(rows, key=lambda item: item["request"])),
         "completion_counts": ";".join(str(row["completion_tokens"]) for row in sorted(rows, key=lambda item: item["request"])),
         "outputs_json": json.dumps([str(row["output_text"]) for row in sorted(rows, key=lambda item: item["request"])], ensure_ascii=False),
-        "admission_order": ";".join(str(index) for index in range(len(requests))),
+        "planned_send_order": ";".join(str(index) for index in range(len(requests))),
+        "observed_send_orders": "|".join(observed_send_orders),
         "admission_stagger_ms": ADMISSION_STAGGER_MS,
         "exact_hash_match_ratio": 0.0,
         "upstream_decisions": metric(prometheus, "benefit_decisions_total", {"backend": backend_label, "action": "upstream"}),
