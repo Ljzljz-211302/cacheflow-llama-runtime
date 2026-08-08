@@ -196,7 +196,7 @@
 ## 六、必须背熟的数据，但不要只背数据
 
 - 固定上游个人差异：61 files、+8708/−99 C/C++/CUDA；外层实验另计。
-- 长驻 CUDA：53 waves；18 exploration；142 positive；33 positive waves；最长连续 13；终态 21.29ms > 8.82ms；shift 后 0 错误启用、3 fallback。
+- 长驻 CUDA：53 waves；19 exploration；88 positive；31 positive waves；最长及终端连续均为 26；last-context gauge 13.964ms > 10.825ms 仅作诊断，逐wave动作counter承担硬门禁；shift 后 0 错误启用、3 fallback。
 - 短程 gating：每端 12-trial Williams blocks 平衡策略位置、直接前驱与 backend 顺序，真实 socket send seam 下 96/96 rows 的两波 observed order 均为 `0..5`；CPU regression −24.54%、oracle regret 5.25%；CUDA −6.04%、0.13%，CUDA fresh-process 0 probe，8 个 harmful trials 中 0 次错误启用。
 - CUDA causal：decision +13、chunk +23、prefill token −354、copy +20.066MB、Event +0.808ms、Engine 汇总 −11.446ms、TTFT P95 +85.61ms。
 - 严格入口是 `verify.ps1 -Full`。历史提交 `e01a844` 曾原生退出 0，但后续审查发现其 socket send 与截断 Latin 协议仍不充分；当前已改为真实 send guard、每端 12-trial Williams blocks 和交替 backend order，定向门禁通过。只有新的完整 Full 再次退出 0 后才能更新最终验收主张，阈值始终未放宽。
