@@ -10,7 +10,7 @@
 
 ## 当前结论
 
-2026-08-08 在外层提交 `e01a844`、vendor 提交 `130bd22` 上，唯一严格入口 `scripts/verify.ps1 -Full` 原生以 0 退出。该轮通过 122 个 Python 测试、架构/patch/制品门禁、CPU/CUDA 与同工具链 upstream 构建、全部原生测试、17-token 非连续跨页后端算子、真实 Qwen 服务与 Swap、Compute Sanitizer（0 errors）/racecheck（0 hazards）、14-case 模型矩阵、多用户应用旅程、Issue #7 统一生产旅程，以及 Adaptive Prefill/Speculation、Mixed Workload、固定 admission 的 CPU/CUDA 各 10-trial Benefit Gating、53-wave 长驻学习和 CUDA 因果链。此前 Full 的统计波动根因是并发 HTTP 客户端线程抢跑改变了 server slot assignment，使所谓 paired trace 实际不一致；`e01a844` 固定客户端 admission 顺序但保留请求重叠，阈值未放宽。Full 产生的非正式易波动输出不替换版本化研究 artifact；各研究主张仍以对应 hash-bound artifact 和本报告明确引用的正式结果为准。
+2026-08-08 曾在外层提交 `e01a844`、vendor 提交 `130bd22` 上让唯一严格入口 `scripts/verify.ps1 -Full` 原生以 0 退出。随后审查发现当时仅固定 worker admission，没有约束真实 socket send；修复后又暴露 10-trial 截断循环 Latin 和先 CPU 后 CUDA 的顺序混杂。当前提交已用真实 send guard、每端 12-trial Williams balanced Latin 和交替 backend order 修复这些协议缺陷，定向 CPU/CUDA 门禁通过，但本段在新的完整 `-Full` 成功前不宣称当前 HEAD 已整体通过。Full 产生的非正式易波动输出不替换版本化研究 artifact；各研究主张仍以对应 hash-bound artifact 和本报告明确引用的正式结果为准。
 
 “存在代码”“单元测试通过”和“生产路径通过”是三个不同层级。本报告只把有生产 smoke 或真实模型证据的条目标为生产接入。
 
@@ -35,7 +35,7 @@
 | KV 准入/抢占/恢复 | 真实 preempt smoke；Host/File/CUDA restore | save 失败保留 resident；restore 失败丢弃并重算 | 通过 |
 | Host/File 事务 Swap | server CLI 选择 memory/path store；真实序列 state 序列化 | budget、checksum、temp+rename、next-save/restore failpoint | 通过 |
 | Adaptive Prefill | CPU/CUDA 真实 A/B | backend-aware safety action；2% 错误固定点回归硬门槛 | 通过 |
-| Conservative Benefit Gating | 生产 shadow upstream/CacheFlow plan；CPU/CUDA 独立模型 | 置信下界、有限探索、高压/漂移回退、deterministic replay、每端 10 trials | 通过 |
+| Conservative Benefit Gating | 生产 shadow upstream/CacheFlow plan；CPU/CUDA 独立模型 | 置信下界、有限探索、高压/漂移回退、deterministic replay、每端 12-trial Williams blocks | 通过 |
 | Adaptive Speculation | CPU/CUDA N-gram 真实 A/B | EWMA、证据门槛、迟滞、KV 压力反馈 | 通过 |
 | CUDA Gather/Scatter | 真实 llama K/V tensor 的 descriptor-driven gather -> staging -> scatter | 随机/重复/重叠/尾部映射逐元素一致 | 通过 |
 | CUDA 异步 Swap | 真实 Qwen K/V D2H/H2D | pinned pool、stream/event lease、allocation failpoint | 通过 |
@@ -79,9 +79,9 @@ P95 改善 97.41%。这证明被隔离的 COW hot path，不等价于整个 serv
 
 ### Conservative Benefit Gating
 
-新控制器不再按 backend 硬编码开关，而是在真实 prefill 决策点生成 upstream greedy 与 CacheFlow shadow plan，按 backend-local contextual confidence model 保守选择。最终 10-trial Latin 结果在 `HTTPConnection.request()` 的真实 connect/body-send seam 固定每波 `0..5` 顺序、相邻发送至少间隔 10 ms；锁在 request body 发送后释放，响应等待与 SSE 仍保持 4 路重叠。每个 trial 同时保留 `planned_send_order` 与两波 `observed_send_orders`；本地 HTTP 回归测试强制首 worker 延迟 40 ms，服务端仍按 `0..5` 收到请求，正式 80/80 trial rows 也均记录两波 `0..5`。CPU learned objective median 4063.89 ms、paired upstream regression -24.87%、paired-oracle regret 5.59%；CUDA learned 232.46 ms、paired regression -1.93%、paired-oracle regret 1.73%。两端均通过原 3% fresh-process paired regression、20% paired upstream/always/rule oracle regret 和 harmful-trace wrong-enable 门槛；CUDA 8 个 harmful trials 中非探索错误启用为 0。此前“两个独立中位数之比”的错误统计口径已移除，阈值未放宽。
+新控制器不再按 backend 硬编码开关，而是在真实 prefill 决策点生成 upstream greedy 与 CacheFlow shadow plan，按 backend-local contextual confidence model 保守选择。最终每端 12-trial Williams balanced Latin 结果同时平衡策略进程位置、直接前驱和 CPU/CUDA 先后顺序，并在 `HTTPConnection.request()` 的真实 connect/body-send seam 固定每波 `0..5`、相邻发送至少间隔 10 ms；锁在 request body 发送后释放，响应等待与 SSE 仍保持 4 路重叠。原始行保存 `treatment_order/process_position/backend_order`，正式 96/96 trial rows 的两波 observed order 均为 `0..5`；每种策略×位置及每个有向前驱关系均恰好出现 3 次，两个 backend order 各覆盖 48 行。CPU learned objective median 4186.49 ms、paired upstream regression -24.54%、paired-oracle regret 5.25%；CUDA learned 257.11 ms、paired regression -6.04%、paired-oracle regret 0.13%。两端均通过原 3% fresh-process paired regression、20% paired upstream/always/rule oracle regret 和 harmful-trace wrong-enable 门槛；CUDA 8 个 harmful trials 中非探索错误启用为 0。此前“两个独立中位数之比”的错误统计口径已移除，阈值未放宽。
 
-短生命周期风险预算按 backend 隔离：CPU learned 产生 19 次 `safe_exploration`；已知 always 有害的 CUDA fresh process 提高最小样本门槛，在该 trace 内 0 次 probe 并 fail closed；`positive_lower_bound_decisions` 均为 0。CUDA positive-lower-bound 的生产实证由下一段长驻实验提供。
+短生命周期风险预算按 backend 隔离：CPU learned 产生 32 次 `safe_exploration`；已知 always 有害的 CUDA fresh process 提高最小样本门槛，在该 trace 内 0 次 probe 并 fail closed；`positive_lower_bound_decisions` 均为 0。CUDA positive-lower-bound 的生产实证由下一段长驻实验提供。
 
 随后新增的单进程长驻门禁补齐了这一限制：CUDA server 连续运行 53 waves，`confidence_beta=1.0`、每动作最少 12 个样本。冷启动 CacheFlow/positive 均为 0；稳定阶段 18 次有限探索后产生 142 次 positive-lower-bound，覆盖 33 waves、最长连续 13 waves，终态收益 21.29 ms 大于 8.82 ms 不确定性；切换后 CacheFlow/positive 均为 0、安全回退为 3。门禁要求持续启用且终态仍保持置信，不取最大置信快照。
 
@@ -146,7 +146,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 - WPR sampled-stack profile 因权限未完成；现有图只回答 Engine phase 时间归属；
 - CUDA cacheflow 当前 mixed workload 的吞吐和 latency P95 退化，需要后续加入 backend-specific policy gating；
 - Benefit Gating 当前仅控制 prefill plan，尚未扩展到 slot placement、KV admission、swap 与 speculation 的联合动作空间；
-- 当前 10-trial fresh-process 短 trace 没有 positive-lower-bound；在线收敛只由新增 53-wave 单进程 CUDA trace 支持，不能外推其他 GPU、模型或负载；
+- 当前每端 12-trial fresh-process 短 trace 没有 positive-lower-bound；在线收敛只由新增 53-wave 单进程 CUDA trace 支持，不能外推其他 GPU、模型或负载；
 - 同工具链输出兼容不等于跨编译器逐字节兼容；
 - 换 GPU、驱动、CUDA 或模型后必须重跑 Sanitizer 和矩阵。
 

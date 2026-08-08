@@ -137,7 +137,7 @@
 ### Day 10：实验统计
 
 - 完成 Lesson 07 的 1–4 节。
-- 解释 fresh process、paired trial、Latin rotation。
+- 解释 fresh process、paired trial、Williams balanced Latin、进程位置/直接前驱平衡和 backend 热状态混杂。
 - 说明为什么 `median(learned)/median(upstream)` 不是 paired ratio。
 - 设计一个最低 3 trial 的随机顺序表。
 
@@ -197,9 +197,9 @@
 
 - 固定上游个人差异：61 files、+8708/−99 C/C++/CUDA；外层实验另计。
 - 长驻 CUDA：53 waves；18 exploration；142 positive；33 positive waves；最长连续 13；终态 21.29ms > 8.82ms；shift 后 0 错误启用、3 fallback。
-- 短程 gating：在真实 socket send seam 固定并发发送顺序后，80/80 rows 的两波 observed order 均为 `0..5`；CPU regression −24.87%、oracle regret 5.59%；CUDA −1.93%、1.73%，CUDA fresh-process 0 probe，8 个 harmful trials 中 0 次错误启用。
+- 短程 gating：每端 12-trial Williams blocks 平衡策略位置、直接前驱与 backend 顺序，真实 socket send seam 下 96/96 rows 的两波 observed order 均为 `0..5`；CPU regression −24.54%、oracle regret 5.25%；CUDA −6.04%、0.13%，CUDA fresh-process 0 probe，8 个 harmful trials 中 0 次错误启用。
 - CUDA causal：decision +13、chunk +23、prefill token −354、copy +20.066MB、Event +0.808ms、Engine 汇总 −11.446ms、TTFT P95 +85.61ms。
-- 严格入口是 `verify.ps1 -Full`。2026-08-08 在外层 `e01a844`、vendor `130bd22` 上原生退出 0：122 个 Python 测试、构建、原生测试、Sanitizer、真实模型/应用、Issue #7 生产旅程及全部统计门禁均通过。此前波动已定位为并发客户端线程抢跑改变 slot assignment；现在固定 admission 顺序但保持请求重叠，阈值未放宽。
+- 严格入口是 `verify.ps1 -Full`。历史提交 `e01a844` 曾原生退出 0，但后续审查发现其 socket send 与截断 Latin 协议仍不充分；当前已改为真实 send guard、每端 12-trial Williams blocks 和交替 backend order，定向门禁通过。只有新的完整 Full 再次退出 0 后才能更新最终验收主张，阈值始终未放宽。
 
 每个数字必须同时说出“它回答什么”和“它不能证明什么”。
 
