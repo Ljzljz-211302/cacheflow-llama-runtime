@@ -15,9 +15,11 @@
 - 基于固定 llama.cpp 上游提交重构真实 `llama-server → llama_decode → KV Cache → CUDA` 路径，实现 Prefill/Decode 分离的缓存感知调度、Aging 防饥饿、背压、取消、Deadline 及多请求 Continuous Batching。
 - 设计 KV Block Manager 与 Prefix 索引，实现引用计数、partial-tail Copy-on-Write、Pinned Memory 异步 Swap、检查点恢复和故障回退，并以真实 Qwen CUDA 请求验证共享 21 个 Prefix KV Block 后输出与 cold decode 一致。
 - 实现 descriptor-driven CUDA KV Remap 算子：使用 `uint4` 进行 128-bit Gather/Scatter，支持重叠映射 snapshot 语义、非对齐/尾部标量回退和非法 grid 拒绝；Compute Sanitizer memcheck/racecheck 均为 0 error。
-- 分离无 profiler 主结果与 Nsight Systems 机制回放：aligned 1-block CUDA-event 改善 57.10%（95% CI 38.51%–57.14%），misaligned 反例回退 137.94%；scalar/vector launch 数均为 10/10，排除“减少 launch”解释，并明确 NCU performance counter 因权限不可用。
-- 设计 Direct/Remap/Paged/Swap/Recompute 统一动作接口、capability/resource gate 与可解释代价模型；完成 200 组原始观测和 500 万次 H0/A1/T1/L1 replay，保留动作服务器状态无法完全克隆的因果边界。
+- 分离无 profiler 主结果与 Nsight Systems 机制回放：aligned 1-block CUDA-event 改善 57.10%（95% CI 38.51%–57.14%），misaligned 反例回退 137.94%；scalar/vector launch 数均为 10/10，排除“减少 launch”解释，并明确 NCU 同时受 driver/tool 不兼容与 performance-counter 权限限制。
+- 实现受限 Qwen2.5 Paged Decode K1 CUDA kernel 与生产 dispatch，覆盖跨页、非连续页和 CUDA 失败原子回退；v1.1 Paged 服务 P95 相对 Direct 回退 6.78%，因此保持 opt-in，不宣称默认加速。
+- 设计 Direct/Remap/Paged/Swap/Recompute 统一候选接口、capability/resource gate 与可解释代价模型；Issue #6 正式 replay 仅覆盖 Direct、device/host Swap、Recompute 的 200 条观测，另完成 500 万次零分配 chooser 开销微基准，保留 Remap/Paged 当时被 mask 及服务器状态无法完全克隆的边界。
 - 设计 backend-local 在线 Ridge 收益门控、置信下界、有限探索和漂移回退；16-trial 联合 Williams 实验平衡 8 个 `backend×policy` treatment 的位置与一阶前驱效应，CPU/CUDA paired oracle regret 为 5.04%/10.52%，生产 chooser 最坏 trial P99 为 2/5μs（预算 50μs）。
+- 审计一手论文、作者实现和 NVIDIA 官方文档，区分本机可复现 baseline 与 related work；预注册研究问题、配对/bootstrap 统计、证伪门槛和负结果规则，避免外部数字挪用与事后调参。
 - 在 RTX 4050 Laptop GPU 上完成 20 组配对、交替顺序微基准；相对标量实现在 1/4/16/32 Block 上的 GPU 中位耗时分别改善 53.33%/48.89%/3.13%/1.87%，所有规模无回归；通过原生 Prometheus 指标确认真实应用累计执行 5.60M 向量化 KV Remap 字节。
 - 开发推免面试学习助手作为真实用户负载，覆盖本地资料检索、带引用 SSE 回答、SQLite 会话恢复、并发限流与客户端中断，并以独立应用进程和真实 CUDA 模型完成端到端验收。
 
@@ -25,7 +27,7 @@
 
 - 深度修改 llama.cpp 推理热路径，实现缓存感知调度、KV Block/COW/Swap、五动作统一代价模型、在线收益门控及真实 CUDA Serving 观测链路。
 - 编写 128-bit 向量化 CUDA KV Remap 算子，支持重叠 snapshot、非对齐尾部回退；Compute Sanitizer memcheck/racecheck 0 error。
-- 以配对实验、bootstrap CI、NSYS 因果链和 500 万次策略 replay 验证机制与边界；真实 Qwen 应用路径累计命中 5.60M 向量化字节。
+- 以配对实验、bootstrap CI、NSYS 因果链、200 条动作观测和 500 万次 chooser 微基准验证机制与开销边界；真实 Qwen 应用路径累计命中 5.60M 向量化字节。
 
 ## 面试口述版本
 

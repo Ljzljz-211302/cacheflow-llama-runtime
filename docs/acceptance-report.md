@@ -22,7 +22,7 @@
 | #3 | 已关闭 | `research_protocol.json` 与人类可读协议冻结变量、配对统计、bootstrap、主指标和 pass/fail gate。 |
 | #4 | 已关闭 | H2 KV/profile 与真实服务 NSYS 因果链，保留 native report、SQLite、无 profiler 主结果及 NCU 不可用边界。 |
 | #5 | 已关闭 | 受限 Qwen Paged Decode K1 CUDA kernel、FP32 online softmax、CPU oracle、跨页/非连续页和 fail-closed 测试。 |
-| #6 | 已关闭 | Direct/Remap/Paged/Swap/Recompute 统一动作接口、H0/A1/T1/L1、200 组原始观测、500 万次 replay 及可篡改检测 artifact。 |
+| #6 | 已关闭 | 建立 Direct/Remap/Paged/Swap/Recompute 统一候选接口；正式 H0/A1/T1/L1 artifact 仅 replay Direct、device/host Swap、Recompute 的 200 条观测，Remap/Paged 因能力门禁被 mask；另完成 500 万次 chooser 开销微基准。 |
 | #7 | 实现完成，Issue 尚未关闭 | 生产 Remap/Paged dispatch、原子故障回退、v1.1 负结果、联合 Williams 实验、在线 Ridge 与 chooser P99 证据。 |
 | #10 | 已关闭 | 一手论文、官方实现和本地可复现基线审计；外部系统只作 related work，不挪用其性能数字。 |
 
