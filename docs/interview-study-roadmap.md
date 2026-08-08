@@ -199,7 +199,7 @@
 - 长驻 CUDA：53 waves；18 exploration；142 positive；33 positive waves；最长连续 13；终态 21.29ms > 8.82ms；shift 后 0 错误启用、3 fallback。
 - 短程 gating：固定并发 admission 顺序后，CPU regression −25.87%、oracle regret 3.48%；CUDA +1.64%、3.92%，CUDA fresh-process 0 probe，6 个 harmful trials 中 0 次错误启用。
 - CUDA causal：decision +13、chunk +23、prefill token −354、copy +20.066MB、Event +0.808ms、Engine 汇总 −11.446ms、TTFT P95 +85.61ms。
-- 严格入口是 `verify.ps1 -Full`。2026-08-01 基线曾用 1395.4 秒、退出 0 完整通过；当前 Remap 增量的功能、Sanitizer、真实模型、应用和算子性能门禁通过，但两次 Full 分别在不同的既有统计门禁波动，不能声称当前稳定全绿。
+- 严格入口是 `verify.ps1 -Full`。2026-08-08 在外层 `e01a844`、vendor `130bd22` 上原生退出 0：122 个 Python 测试、构建、原生测试、Sanitizer、真实模型/应用、Issue #7 生产旅程及全部统计门禁均通过。此前波动已定位为并发客户端线程抢跑改变 slot assignment；现在固定 admission 顺序但保持请求重叠，阈值未放宽。
 
 每个数字必须同时说出“它回答什么”和“它不能证明什么”。
 

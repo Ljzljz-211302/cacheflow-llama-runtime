@@ -10,7 +10,7 @@
 
 ## 当前结论
 
-2026-08-01 基线版本曾通过唯一入口 `scripts/verify.ps1 -Full`，完整运行 1395.4 秒并以 0 退出。本次向量化 KV Remap 增量已通过架构/patch 门禁、CPU/CUDA 构建、全部单元测试、Compute Sanitizer、真实 Qwen tensor/COW、模型矩阵、用户应用旅程和 20-trial 配对微基准；但两次重新执行 Full 均被既有统计型性能门禁拦截：第一次为长驻实验末态收益 7.86 ms 小于不确定性 9.00 ms，第二次为 CPU learned oracle regret 26.1% 和 CUDA paired regression 3.7% 越过 20%/3% 门槛。相同长驻场景随后单独复现通过（17.82 ms > 8.49 ms）。因此本增量的功能/内存安全/算子性能门禁通过，但不能声称当前全量统计套件稳定绿灯。
+2026-08-08 在外层提交 `e01a844`、vendor 提交 `130bd22` 上，唯一严格入口 `scripts/verify.ps1 -Full` 原生以 0 退出。该轮通过 122 个 Python 测试、架构/patch/制品门禁、CPU/CUDA 与同工具链 upstream 构建、全部原生测试、17-token 非连续跨页后端算子、真实 Qwen 服务与 Swap、Compute Sanitizer（0 errors）/racecheck（0 hazards）、14-case 模型矩阵、多用户应用旅程、Issue #7 统一生产旅程，以及 Adaptive Prefill/Speculation、Mixed Workload、固定 admission 的 CPU/CUDA 各 10-trial Benefit Gating、53-wave 长驻学习和 CUDA 因果链。此前 Full 的统计波动根因是并发 HTTP 客户端线程抢跑改变了 server slot assignment，使所谓 paired trace 实际不一致；`e01a844` 固定客户端 admission 顺序但保留请求重叠，阈值未放宽。Full 产生的非正式易波动输出不替换版本化研究 artifact；各研究主张仍以对应 hash-bound artifact 和本报告明确引用的正式结果为准。
 
 “存在代码”“单元测试通过”和“生产路径通过”是三个不同层级。本报告只把有生产 smoke 或真实模型证据的条目标为生产接入。
 
