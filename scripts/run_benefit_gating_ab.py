@@ -191,14 +191,27 @@ def main() -> None:
     parser.add_argument("--max-regression", type=float, default=0.03)
     parser.add_argument("--max-oracle-regret", type=float, default=0.20)
     args = parser.parse_args()
-    orders = complete_latin_orders(MODES, args.trials)
+    mode_orders = complete_latin_orders(MODES, args.trials)
     backends = ["cpu", "cuda"] if args.backend == "both" else [args.backend]
+    backend_orders = (
+        complete_latin_orders(backends, args.trials)
+        if len(backends) > 1
+        else tuple((backends[0],) for _ in range(args.trials))
+    )
     rows: list[dict[str, Any]] = []
-    for backend in backends:
-        for trial, order in enumerate(orders, start=1):
+    for trial_index, backend_order in enumerate(backend_orders):
+        trial = trial_index + 1
+        order = mode_orders[trial_index]
+        for backend in backend_order:
             # Complete Latin blocks balance every mode across every process
-            # position instead of truncating a rotation at an arbitrary count.
-            rows.extend(run_trial(backend, mode, trial) for mode in order)
+            # position and predecessor. Alternating backend order also avoids
+            # always measuring CUDA after a long CPU-only heating phase.
+            for process_position, mode in enumerate(order):
+                row = run_trial(backend, mode, trial)
+                row["treatment_order"] = ";".join(order)
+                row["process_position"] = process_position
+                row["backend_order"] = ";".join(backend_order)
+                rows.append(row)
 
     # Batch composition can move near-tied greedy logits across a floating-point
     # boundary and can change where EOS appears. Exact text hashes and token

@@ -44,6 +44,26 @@ class BenefitProtocolTests(unittest.TestCase):
             positions = [order.index(mode) for order in orders]
             self.assertEqual([positions.count(index) for index in range(4)], [3] * 4)
 
+        # Each directed immediate predecessor pair occurs once per four-trial
+        # block. This is stronger than cyclic rotation and controls first-order
+        # thermal/process carryover between fresh server processes.
+        for block_start in range(0, len(orders), 4):
+            pair_counts = {
+                (left, right): 0
+                for left in modes
+                for right in modes
+                if left != right
+            }
+            for order in orders[block_start : block_start + 4]:
+                for pair in zip(order, order[1:]):
+                    pair_counts[pair] += 1
+            self.assertEqual(set(pair_counts.values()), {1})
+
+    def test_two_backend_orders_balance_shared_machine_state(self) -> None:
+        orders = complete_latin_orders(("cpu", "cuda"), 12)
+        self.assertEqual(orders.count(("cpu", "cuda")), 6)
+        self.assertEqual(orders.count(("cuda", "cpu")), 6)
+
     def test_staggered_wave_orders_the_real_http_send_seam(self) -> None:
         server = ThreadingHTTPServer(("127.0.0.1", 0), _ArrivalHandler)
         server.arrivals = []

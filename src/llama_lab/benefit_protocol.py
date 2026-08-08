@@ -17,16 +17,19 @@ ResultT = TypeVar("ResultT")
 def complete_latin_orders(
     modes: Sequence[InputT], trials: int
 ) -> tuple[tuple[InputT, ...], ...]:
-    """Return complete cyclic Latin blocks for an order-sensitive experiment.
+    """Return complete Williams-balanced Latin blocks for an experiment.
 
-    Requiring whole blocks prevents a truncated rotation from placing some
-    modes disproportionately early or late in fresh-process measurements.
+    Requiring whole blocks balances process position. The Williams ordering
+    also makes each directed predecessor pair occur once per block, controlling
+    first-order carryover from fresh-process loading and thermal state.
     """
 
     if not modes:
         raise ValueError("modes must not be empty")
     if len(set(modes)) != len(modes):
         raise ValueError("modes must be unique")
+    if len(modes) % 2 != 0:
+        raise ValueError("Williams-balanced modes must have even cardinality")
     if trials <= 0:
         raise ValueError("trials must be positive")
     if trials % len(modes) != 0:
@@ -35,9 +38,17 @@ def complete_latin_orders(
         )
 
     mode_tuple = tuple(modes)
+    count = len(mode_tuple)
+    # Williams' even-order first row: 0, 1, n-1, 2, n-2, ...; modular
+    # rotations of this row form a position- and first-order-balanced square.
+    first_row = [0]
+    for offset in range(1, count // 2 + 1):
+        first_row.append(offset)
+        if offset < count // 2:
+            first_row.append(count - offset)
     return tuple(
-        mode_tuple[shift:] + mode_tuple[:shift]
-        for shift in (index % len(mode_tuple) for index in range(trials))
+        tuple(mode_tuple[(index + offset) % count] for offset in first_row)
+        for index in range(trials)
     )
 
 
