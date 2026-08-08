@@ -18,7 +18,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from llama_lab.benefit_protocol import run_staggered_wave
+from llama_lab.benefit_protocol import complete_latin_orders, run_staggered_wave
 from llama_lab.server_bench import wait_until_ready
 from llama_lab.streaming import stream_chat
 
@@ -187,19 +187,17 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fresh-process conservative benefit-gating A/B/oracle evaluation")
     parser.add_argument("--backend", choices=("cpu", "cuda", "both"), default="both")
-    parser.add_argument("--trials", type=int, default=10)
+    parser.add_argument("--trials", type=int, default=12)
     parser.add_argument("--max-regression", type=float, default=0.03)
     parser.add_argument("--max-oracle-regret", type=float, default=0.20)
     args = parser.parse_args()
-    if args.trials < 1:
-        raise ValueError("trials must be positive")
+    orders = complete_latin_orders(MODES, args.trials)
     backends = ["cpu", "cuda"] if args.backend == "both" else [args.backend]
     rows: list[dict[str, Any]] = []
     for backend in backends:
-        for trial in range(1, args.trials + 1):
-            # Latin rotation removes systematic process-order/thermal bias.
-            shift = (trial - 1) % len(MODES)
-            order = MODES[shift:] + MODES[:shift]
+        for trial, order in enumerate(orders, start=1):
+            # Complete Latin blocks balance every mode across every process
+            # position instead of truncating a rotation at an arbitrary count.
             rows.extend(run_trial(backend, mode, trial) for mode in order)
 
     # Batch composition can move near-tied greedy logits across a floating-point

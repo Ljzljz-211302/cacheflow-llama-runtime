@@ -5,7 +5,7 @@ import unittest
 from contextlib import AbstractContextManager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from llama_lab.benefit_protocol import run_staggered_wave
+from llama_lab.benefit_protocol import complete_latin_orders, run_staggered_wave
 from llama_lab.streaming import stream_chat
 
 
@@ -33,6 +33,17 @@ class _ArrivalHandler(BaseHTTPRequestHandler):
 
 
 class BenefitProtocolTests(unittest.TestCase):
+    def test_latin_orders_require_complete_four_trial_blocks(self) -> None:
+        modes = ("upstream", "always", "rule", "learned")
+        with self.assertRaisesRegex(ValueError, "complete Latin"):
+            complete_latin_orders(modes, 10)
+
+        orders = complete_latin_orders(modes, 12)
+        self.assertEqual(len(orders), 12)
+        for mode in modes:
+            positions = [order.index(mode) for order in orders]
+            self.assertEqual([positions.count(index) for index in range(4)], [3] * 4)
+
     def test_staggered_wave_orders_the_real_http_send_seam(self) -> None:
         server = ThreadingHTTPServer(("127.0.0.1", 0), _ArrivalHandler)
         server.arrivals = []
