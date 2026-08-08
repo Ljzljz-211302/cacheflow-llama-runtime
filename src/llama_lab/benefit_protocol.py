@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import re
+import json
 import statistics
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -23,18 +24,15 @@ _PROMETHEUS_SAMPLE_RE = re.compile(
 _PROMETHEUS_LABEL_RE = re.compile(r'(?P<key>[a-zA-Z_][a-zA-Z0-9_]*)="(?P<value>[^"]*)"')
 
 
-def prometheus_histogram_quantile_upper_bound(
+def prometheus_histogram_cumulative_buckets(
     text: str,
     name: str,
     labels: dict[str, str],
-    quantile: float,
-) -> float:
-    """Return the conservative bucket upper bound for a histogram quantile."""
+) -> dict[str, float]:
+    """Extract cumulative histogram buckets while preserving `le` labels."""
 
-    if not 0 < quantile <= 1:
-        raise ValueError("quantile must be in (0, 1]")
     metric_name = f"llamacpp:{name}_bucket"
-    buckets: list[tuple[float, float]] = []
+    buckets: dict[str, float] = {}
     for raw_line in text.splitlines():
         match = _PROMETHEUS_SAMPLE_RE.match(raw_line.strip())
         if not match or match.group("name") != metric_name:
@@ -47,24 +45,46 @@ def prometheus_histogram_quantile_upper_bound(
             continue
         if "le" not in sample_labels:
             continue
-        upper = (
-            float("inf")
-            if sample_labels["le"] == "+Inf"
-            else float(sample_labels["le"])
-        )
-        buckets.append((upper, float(match.group("value"))))
+        buckets[sample_labels["le"]] = float(match.group("value"))
     if not buckets:
         raise RuntimeError(f"missing histogram {name} with {labels}")
-    buckets.sort(key=lambda item: item[0])
-    if buckets[-1][0] != float("inf") or buckets[-1][1] <= 0:
-        raise RuntimeError(f"histogram {name} is missing a nonempty +Inf bucket")
+    return buckets
+
+
+def histogram_quantile_upper_bound(
+    cumulative_buckets: dict[str, float], quantile: float
+) -> float:
+    """Return a conservative quantile upper bound from cumulative buckets."""
+
+    if not 0 < quantile <= 1:
+        raise ValueError("quantile must be in (0, 1]")
+    buckets = sorted(
+        (
+            float("inf") if upper == "+Inf" else float(upper),
+            count,
+        )
+        for upper, count in cumulative_buckets.items()
+    )
+    if not buckets or buckets[-1][0] != float("inf") or buckets[-1][1] <= 0:
+        raise RuntimeError("histogram is missing a nonempty +Inf bucket")
     if any(right[1] < left[1] for left, right in zip(buckets, buckets[1:])):
-        raise RuntimeError(f"histogram {name} buckets are not cumulative")
+        raise RuntimeError("histogram buckets are not cumulative")
     target = quantile * buckets[-1][1]
     for upper, count in buckets:
         if count >= target:
             return upper
-    raise RuntimeError(f"histogram {name} has no quantile bucket")
+    raise RuntimeError("histogram has no quantile bucket")
+
+
+def prometheus_histogram_quantile_upper_bound(
+    text: str,
+    name: str,
+    labels: dict[str, str],
+    quantile: float,
+) -> float:
+    return histogram_quantile_upper_bound(
+        prometheus_histogram_cumulative_buckets(text, name, labels), quantile
+    )
 
 
 @dataclass(frozen=True)
@@ -94,6 +114,21 @@ def evaluate_short_lived_acceptance(
 
     if not learned_rows:
         raise ValueError("learned_rows must not be empty")
+    for row in learned_rows:
+        raw_histogram = row.get("benefit_choose_histogram_json")
+        if raw_histogram is None:
+            continue
+        buckets = json.loads(str(raw_histogram))
+        samples = float(row["benefit_choose_samples"])
+        if float(buckets.get("+Inf", -1)) != samples:
+            raise ValueError("choose histogram count diverges from trial samples")
+        if samples > 0:
+            rebuilt_p99 = histogram_quantile_upper_bound(buckets, 0.99)
+            if rebuilt_p99 != float(row["benefit_choose_p99_us"]):
+                raise ValueError("choose P99 diverges from raw histogram")
+        if samples != float(row["upstream_decisions"]) + float(row["cacheflow_decisions"]):
+            raise ValueError("choose histogram count diverges from decision counters")
+
     paired_regression = statistics.median(
         float(row["upstream_regression_ratio"]) for row in learned_rows
     )

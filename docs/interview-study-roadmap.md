@@ -197,7 +197,7 @@
 
 - 固定上游个人差异：61 files、+8708/−99 C/C++/CUDA；外层实验另计。
 - 长驻 CUDA：53 waves；26 exploration；125 positive；36 positive waves；最长及终端连续均为 35；last-context gauge 8.926ms > 4.463ms 仅作诊断，逐wave动作counter承担硬门禁；逐请求TTFT/counter可重算并有篡改反例；shift 后 0 错误启用、3 fallback。
-- 短程gating：16-trial联合 `backend×mode` Williams blocks使64个treatment×位置单元、56条有向前驱各覆盖2次，trial间1秒washout；真实socket send seam下128/128 rows两波observed order均为 `0..5`。CPU regression −25.66%、oracle regret6.10%；CUDA −1.53%、3.02%，CUDA fresh-process 0 probe，11个harmful trials中0次错误启用。
+- 短程gating：16-trial联合 `backend×mode` Williams blocks使64个treatment×位置单元、56条有向前驱各覆盖2次，trial间1秒washout；真实socket send seam下128/128 rows两波observed order均为 `0..5`。CPU regression −23.80%、oracle regret5.04%；CUDA +2.16%、10.52%，CUDA fresh-process 0 probe，8个harmful trials中0次错误启用。生产chooser分别覆盖139/142次CPU/CUDA learned决策，最坏trial P99为2/5 us（预算50 us），原始bucket/count/sum可重算。
 - CUDA causal：decision +13、chunk +23、prefill token −354、copy +20.066MB、Event +0.808ms、Engine 汇总 −11.446ms、TTFT P95 +85.61ms。
 - 严格入口是 `verify.ps1 -Full`。历史 `bf6f8b1` 曾在旧12-trial局部Williams协议上退出0；当前已进一步补齐16-trial联合顺序、trial washout与长驻artifact验证器。新的完整Full再次退出0前不宣称当前HEAD已整体通过，阈值未放宽。
 

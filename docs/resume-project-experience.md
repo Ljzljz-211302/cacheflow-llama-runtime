@@ -15,6 +15,7 @@
 - 基于固定 llama.cpp 上游提交重构真实 `llama-server → llama_decode → KV Cache → CUDA` 路径，实现 Prefill/Decode 分离的缓存感知调度、Aging 防饥饿、背压、取消、Deadline 及多请求 Continuous Batching。
 - 设计 KV Block Manager 与 Prefix 索引，实现引用计数、partial-tail Copy-on-Write、Pinned Memory 异步 Swap、检查点恢复和故障回退，并以真实 Qwen CUDA 请求验证共享 21 个 Prefix KV Block 后输出与 cold decode 一致。
 - 实现 descriptor-driven CUDA KV Remap 算子：使用 `uint4` 进行 128-bit Gather/Scatter，支持重叠映射 snapshot 语义、非对齐/尾部标量回退和非法 grid 拒绝；Compute Sanitizer memcheck/racecheck 均为 0 error。
+- 设计 backend-local 在线 Ridge 收益门控、置信下界、有限探索和漂移回退；16-trial 联合 Williams 实验平衡 8 个 `backend×policy` treatment 的位置与一阶前驱效应，CPU/CUDA paired oracle regret 为 5.04%/10.52%，生产 chooser 最坏 trial P99 为 2/5μs（预算 50μs）。
 - 在 RTX 4050 Laptop GPU 上完成 20 组配对、交替顺序微基准；相对标量实现在 1/4/16/32 Block 上的 GPU 中位耗时分别改善 53.33%/48.89%/3.13%/1.87%，所有规模无回归；通过原生 Prometheus 指标确认真实应用累计执行 5.60M 向量化 KV Remap 字节。
 - 开发推免面试学习助手作为真实用户负载，覆盖本地资料检索、带引用 SSE 回答、SQLite 会话恢复、并发限流与客户端中断，并以独立应用进程和真实 CUDA 模型完成端到端验收。
 

@@ -199,7 +199,7 @@ CUDA mixed workload 缺少 backend-aware policy guard；Hybrid/Recurrent 只有 
 
 先讲负结果：固定adaptive chunk在不同backend/workload上结论反号。然后画出同一生产Seam的两条shadow plan，说明learned policy只在悲观CacheFlow cost仍低于乐观upstream cost加安全margin时启用。重点追问是置信半径、SLO reward、drift与探索预算。最后展示16-trial联合 `backend×mode` Williams验收：每个treatment×位置和有向前驱各2次，trial边界有washout，并报告paired oracle regret；不声称这是所有模型和硬件上的全局最优。
 
-最终在真实 socket send seam 固定并发发送顺序的短程fresh-process实验中，positive-lower-bound次数为0，验证backend-local冷启动风险边界。随后53-wave单进程CUDA trace在 `beta=1.0` 下产生26次探索和125次positive-lower-bound，覆盖36 waves、最长及终端连续均为35 waves；最后一次上下文gauge为8.926/4.463 ms，但面试中要主动说明last-value gauge无法代表同一wave中的所有特征向量，硬证据是逐wave动作counter。分布切换后0次错误启用、3次安全回退；验证器还能从逐请求TTFT和counter重算phase/acceptance并拒绝篡改。因此可以声称当前0.5B/CUDA/workload上观察到持续在线利用，但不能外推其他模型与硬件。
+最终在真实 socket send seam 固定并发发送顺序的短程fresh-process实验中，positive-lower-bound次数为0，验证backend-local冷启动风险边界。生产 `choose()` 用C++ `steady_clock` 原位计时并导出Prometheus histogram：CPU/CUDA learned共139/142次样本，最坏trial P99为2/5 us，低于50 us预算；固定CPU upstream绕过chooser时明确记录0样本，而learned缺样本会直接失败。原始trial还保存bucket/count/sum，重算P99并核对决策counter。CUDA零probe意味着该短trace不能识别CacheFlow因果效果，不能拿跨进程延迟差冒充算法收益。随后53-wave单进程CUDA trace在 `beta=1.0` 下产生26次探索和125次positive-lower-bound，覆盖36 waves、最长及终端连续均为35 waves；最后一次上下文gauge为8.926/4.463 ms，但面试中要主动说明last-value gauge无法代表同一wave中的所有特征向量，硬证据是逐wave动作counter。分布切换后0次错误启用、3次安全回退；验证器还能从逐请求TTFT和counter重算phase/acceptance并拒绝篡改。因此可以声称当前0.5B/CUDA/workload上观察到持续在线利用，但不能外推其他模型与硬件。
 
 ### CUDA 因果链怎么讲？
 

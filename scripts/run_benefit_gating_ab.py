@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from llama_lab.benefit_protocol import (
     evaluate_short_lived_acceptance,
     joint_williams_orders,
+    prometheus_histogram_cumulative_buckets,
     prometheus_histogram_quantile_upper_bound,
     run_staggered_wave,
 )
@@ -159,6 +160,9 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
     benefit_choose_samples = metric(
         prometheus, "benefit_choose_duration_us_count", {"backend": backend_label}
     )
+    benefit_choose_histogram = prometheus_histogram_cumulative_buckets(
+        prometheus, "benefit_choose_duration_us", {"backend": backend_label}
+    )
     benefit_choose_p99_us = (
         prometheus_histogram_quantile_upper_bound(
             prometheus,
@@ -199,6 +203,12 @@ def run_trial(backend: str, mode: str, trial: int) -> dict[str, Any]:
         ),
         "benefit_choose_samples": benefit_choose_samples,
         "benefit_choose_p99_us": benefit_choose_p99_us,
+        "benefit_choose_duration_us_sum": metric(
+            prometheus, "benefit_choose_duration_us_sum", {"backend": backend_label}
+        ),
+        "benefit_choose_histogram_json": json.dumps(
+            benefit_choose_histogram, sort_keys=True, separators=(",", ":")
+        ),
         "oracle_objective_ms": "",
         "oracle_regret_ratio": "",
         "upstream_regression_ratio": "",
@@ -275,6 +285,8 @@ def main() -> None:
                 "positive_lower_bound_decisions": sum(float(row["positive_lower_bound_decisions"]) for row in group),
                 "benefit_choose_samples": sum(float(row["benefit_choose_samples"]) for row in group),
                 "benefit_choose_p99_us": max(float(row["benefit_choose_p99_us"]) for row in group),
+                "benefit_choose_duration_us_sum": sum(float(row["benefit_choose_duration_us_sum"]) for row in group),
+                "benefit_choose_histogram_json": "raw_trials",
                 "exact_hash_match_ratio": statistics.median(float(row["exact_hash_match_ratio"]) for row in group),
                 "paired_upstream_regression_ratio": (
                     statistics.median(float(row["upstream_regression_ratio"]) for row in group)
@@ -306,6 +318,8 @@ def main() -> None:
             "positive_lower_bound_decisions": 0.0,
             "benefit_choose_samples": 0.0,
             "benefit_choose_p99_us": 0.0,
+            "benefit_choose_duration_us_sum": 0.0,
+            "benefit_choose_histogram_json": "",
             "exact_hash_match_ratio": 1.0,
             "paired_upstream_regression_ratio": "",
             "performance_status": "",

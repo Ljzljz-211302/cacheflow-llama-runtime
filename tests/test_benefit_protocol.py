@@ -103,6 +103,29 @@ llamacpp:benefit_choose_duration_us_bucket{backend="cuda",le="+Inf"} 100
         self.assertFalse(result.passed)
         self.assertEqual(result.performance_status, "regressed_with_intervention")
 
+    def test_choose_acceptance_recomputes_p99_and_count_from_raw_buckets(self) -> None:
+        row = {
+            "upstream_regression_ratio": 0.0,
+            "upstream_decisions": 9.0,
+            "cacheflow_decisions": 1.0,
+            "exploration_decisions": 1.0,
+            "benefit_choose_samples": 10.0,
+            "benefit_choose_p99_us": 5.0,
+            "benefit_choose_histogram_json": json.dumps(
+                {"1": 2, "2": 8, "5": 10, "+Inf": 10}
+            ),
+        }
+        result = evaluate_short_lived_acceptance(
+            [row], maximum_regression=0.03, maximum_choose_p99_us=50.0
+        )
+        self.assertTrue(result.passed)
+
+        row["benefit_choose_p99_us"] = 2.0
+        with self.assertRaisesRegex(ValueError, "P99"):
+            evaluate_short_lived_acceptance(
+                [row], maximum_regression=0.03, maximum_choose_p99_us=50.0
+            )
+
     def test_latin_orders_require_complete_four_trial_blocks(self) -> None:
         modes = ("upstream", "always", "rule", "learned")
         with self.assertRaisesRegex(ValueError, "complete Latin"):
