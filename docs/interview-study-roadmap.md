@@ -199,7 +199,7 @@
 - 长驻 CUDA：53 waves；19 exploration；88 positive；31 positive waves；最长及终端连续均为 26；last-context gauge 13.964ms > 10.825ms 仅作诊断，逐wave动作counter承担硬门禁；shift 后 0 错误启用、3 fallback。
 - 短程 gating：每端 12-trial Williams blocks 平衡策略位置、直接前驱与 backend 顺序，真实 socket send seam 下 96/96 rows 的两波 observed order 均为 `0..5`；CPU regression −24.54%、oracle regret 5.25%；CUDA −6.04%、0.13%，CUDA fresh-process 0 probe，8 个 harmful trials 中 0 次错误启用。
 - CUDA causal：decision +13、chunk +23、prefill token −354、copy +20.066MB、Event +0.808ms、Engine 汇总 −11.446ms、TTFT P95 +85.61ms。
-- 严格入口是 `verify.ps1 -Full`。历史提交 `e01a844` 曾原生退出 0，但后续审查发现其 socket send 与截断 Latin 协议仍不充分；当前已改为真实 send guard、每端 12-trial Williams blocks 和交替 backend order，定向门禁通过。只有新的完整 Full 再次退出 0 后才能更新最终验收主张，阈值始终未放宽。
+- 严格入口是 `verify.ps1 -Full`。2026-08-08 在外层 `bf6f8b1`、vendor `130bd22` 上原生退出 0：127 个 Python 测试、构建、固定 upstream 对照、原生测试、Sanitizer、真实模型/应用、Issue #7 生产旅程及全部统计门禁均通过。相较历史 `e01a844`，当前已补齐真实 socket send、每端 12-trial Williams blocks、交替 backend order 和上下文动作级终端门禁，阈值未放宽。
 
 每个数字必须同时说出“它回答什么”和“它不能证明什么”。
 

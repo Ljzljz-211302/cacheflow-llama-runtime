@@ -10,7 +10,7 @@
 
 ## 当前结论
 
-2026-08-08 曾在外层提交 `e01a844`、vendor 提交 `130bd22` 上让唯一严格入口 `scripts/verify.ps1 -Full` 原生以 0 退出。随后审查发现当时仅固定 worker admission，没有约束真实 socket send；修复后又暴露 10-trial 截断循环 Latin 和先 CPU 后 CUDA 的顺序混杂。当前提交已用真实 send guard、每端 12-trial Williams balanced Latin 和交替 backend order 修复这些协议缺陷，定向 CPU/CUDA 门禁通过，但本段在新的完整 `-Full` 成功前不宣称当前 HEAD 已整体通过。Full 产生的非正式易波动输出不替换版本化研究 artifact；各研究主张仍以对应 hash-bound artifact 和本报告明确引用的正式结果为准。
+2026-08-08 在外层提交 `bf6f8b1`、vendor 提交 `130bd22` 上，唯一严格入口 `scripts/verify.ps1 -Full` 已原生以 0 退出。该轮通过 127 个 Python 测试、架构/patch/制品门禁、个人 CPU/CUDA 与同工具链固定 upstream 构建、全部原生测试、17-token 非连续跨页后端算子、真实 Qwen 服务与 Swap、Compute Sanitizer（0 errors）/racecheck（0 hazards）、14-case 模型矩阵、多用户应用旅程、Issue #7 的 Direct/Remap/Paged/pressure/failure-recovery 统一旅程，以及 Adaptive Prefill/Speculation、Mixed Workload、每端 12-trial Williams Benefit Gating、53-wave 长驻学习和 CUDA 因果链。相较历史 `e01a844`，当前协议已修复真实 socket send、截断循环 Latin、backend 热状态顺序混杂和跨上下文 last-value gauge 误判，阈值未放宽。Full 产生的非正式易波动输出不替换已提交的正式研究 evidence；各研究主张仍以对应 hash-bound artifact 和本报告明确引用的正式结果为准。
 
 “存在代码”“单元测试通过”和“生产路径通过”是三个不同层级。本报告只把有生产 smoke 或真实模型证据的条目标为生产接入。
 
