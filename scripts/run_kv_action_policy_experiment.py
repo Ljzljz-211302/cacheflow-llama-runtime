@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect paired real-service action costs and evaluate H0/A1/T1/L1/D1."""
+"""Collect paired real-service action costs and evaluate H0/A1/T1/L1/D1/D2."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from llama_lab.kv_action_evidence import (
 from llama_lab.server_bench import wait_until_ready
 
 
-ARTIFACT = ROOT / "results/research/h4-kv-action-v1.4.0"
+ARTIFACT = ROOT / "results/research/h4-kv-action-v1.5.0"
 PROTOCOL_PATH = ROOT / "config/kv_action_policy_protocol.json"
 SERVER = ROOT / "build/patched-cuda-ninja3/bin/llama-server.exe"
 MODEL = ROOT / "models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
@@ -441,6 +441,7 @@ def main() -> None:
     t1 = analysis["models"]["T1"]
     h0 = analysis["models"]["H0"]
     d1 = analysis["models"]["D1"]
+    d2 = analysis["models"]["D2"]
     if t1 == h0:
         table_conclusion = "T1 also matched H0 on this held-out run and established no advantage."
     elif t1["harmful_rate"] > h0["harmful_rate"]:
@@ -458,6 +459,19 @@ def main() -> None:
         failed = [name for name, passed in d1_acceptance.items() if name != "passed" and not passed]
         delta_conclusion = (
             f"D1 made {d1['switches_vs_h0']} held-out switches but failed the retained "
+            f"paired-replay gates: {', '.join(failed)}. H0 therefore remains selected."
+        )
+    d2_acceptance = analysis["piecewise_delta"]["acceptance"]
+    if d2_acceptance["passed"]:
+        piecewise_conclusion = (
+            f"D2 made {d2['switches_vs_h0']} held-out switches and passed every "
+            "pre-registered paired-replay gate. The result supports a separately gated "
+            "production canary; it does not itself enable D2 online."
+        )
+    else:
+        failed = [name for name, passed in d2_acceptance.items() if name != "passed" and not passed]
+        piecewise_conclusion = (
+            f"D2 made {d2['switches_vs_h0']} held-out switches but failed the retained "
             f"paired-replay gates: {', '.join(failed)}. H0 therefore remains selected."
         )
     ablation_lines = [
@@ -487,6 +501,12 @@ def main() -> None:
         "D1 predicts the paired complete-action delta `candidate - H0`, conditions models by "
         "runtime regime, adds four pre-registered mechanism interactions, and adds a one-sided "
         "held-out calibration offset before the switch margin.",
+        "",
+        piecewise_conclusion,
+        "",
+        "D2 preserves D1's signed-delta and fail-closed logic but fits and calibrates separate "
+        "models on the pre-registered `context_tokens <= 512` and `> 512` bands. Its stricter "
+        "0.75 ms margin was locked before this confirmatory collection.",
         "",
         "| D1 ablation | Median regret (ms) | P95 regret (ms) | Cumulative regret (ms) | Switches |",
         "|---|---:|---:|---:|---:|",

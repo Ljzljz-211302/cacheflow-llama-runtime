@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "protocol_version": "1.4.0",
-  "artifact_version": "h4-kv-action-v1.4.0",
+  "protocol_version": "1.5.0",
+  "artifact_version": "h4-kv-action-v1.5.0",
   "claim_id": "H4-adaptive-action-policy",
   "cost_boundary": "scheduler snapshot ready through next useful decode runnable",
   "production_actions": ["direct", "device_swap", "host_swap", "recompute"],
@@ -9,7 +9,7 @@
     "remap": "operator exists but no complete-action llama_decode adapter",
     "paged": "H3 K1 regressed 10.41%-13.05% in every medium/long regime and has no production adapter"
   },
-  "models": ["H0", "A1", "T1", "L1", "D1"],
+  "models": ["H0", "A1", "T1", "L1", "D1", "D2"],
   "split": {
     "unit": "trace_id",
     "group_fields": ["session_id", "prefix_family"],
@@ -53,6 +53,22 @@
       "host_transfer_x_reuse_distance",
       "fragmentation_x_kv_bytes"
     ],
+    "acceptance": {
+      "minimum_switches_vs_h0": 1,
+      "mean_regret_delta_ci95_upper_must_be_negative": true,
+      "p95_regret_must_not_exceed_h0": true,
+      "harmful_rate_must_not_exceed_h0": true
+    }
+  },
+  "piecewise_delta": {
+    "ridge_lambda": 1.0,
+    "confidence_beta": 1.0,
+    "switch_margin_ms": 0.75,
+    "minimum_action_observations": 4,
+    "calibration_traces": 20,
+    "one_sided_quantile": 0.95,
+    "context_boundaries": [512],
+    "calibration_by_context_band": true,
     "acceptance": {
       "minimum_switches_vs_h0": 1,
       "mean_regret_delta_ci95_upper_must_be_negative": true,

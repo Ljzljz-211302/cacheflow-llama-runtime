@@ -49,8 +49,14 @@ def load_kv_action_protocol(path: Path) -> dict[str, Any]:
     protocol = json.loads(path.read_text(encoding="utf-8"))
     if protocol.get("schema_version") != 1:
         raise ValueError("KV action protocol schema_version must be 1")
-    if protocol.get("models") != ["H0", "A1", "T1", "L1", "D1"]:
-        raise ValueError("KV action protocol must compare H0/A1/T1/L1/D1")
+    protocol_version = protocol.get("protocol_version")
+    expected_models = (
+        ["H0", "A1", "T1", "L1", "D1", "D2"]
+        if protocol_version == "1.5.0"
+        else ["H0", "A1", "T1", "L1", "D1"]
+    )
+    if protocol.get("models") != expected_models:
+        raise ValueError("KV action protocol model set differs from its version")
     paired_delta = protocol.get("paired_delta", {})
     interactions = paired_delta.get("interaction_features")
     if (
@@ -83,6 +89,18 @@ def load_kv_action_protocol(path: Path) -> dict[str, Any]:
         "harmful_rate_must_not_exceed_h0": True,
     }:
         raise ValueError("KV action protocol has invalid paired-delta acceptance gates")
+    if protocol_version == "1.5.0":
+        piecewise = protocol.get("piecewise_delta", {})
+        boundaries = piecewise.get("context_boundaries")
+        if (
+            not isinstance(boundaries, list)
+            or not boundaries
+            or boundaries != sorted(set(boundaries))
+            or any(not isinstance(value, int) or value <= 0 for value in boundaries)
+        ):
+            raise ValueError("KV action protocol has invalid piecewise context boundaries")
+        if piecewise.get("calibration_by_context_band") is not True:
+            raise ValueError("KV action protocol must calibrate D2 by context band")
     if protocol.get("split", {}).get("unit") != "trace_id":
         raise ValueError("KV action protocol split unit must be trace_id")
     if not protocol.get("split", {}).get("row_randomization_prohibited"):
@@ -353,8 +371,21 @@ def _paired_delta_key(regime: str, action: str, regime_conditioned: bool) -> tup
     return (regime if regime_conditioned else "pooled", action)
 
 
+def _context_band(context_tokens: float, boundaries: list[int]) -> str:
+    for boundary in boundaries:
+        if context_tokens <= boundary:
+            return f"le-{boundary}"
+    return f"gt-{boundaries[-1]}"
+
+
+def _piecewise_delta_key(
+    regime: str, action: str, context_band: str
+) -> tuple[str, str, str]:
+    return (regime, context_band, action)
+
+
 class _OnlineRidge:
-    """Exact Python replay of server_kv_action_policy::ridge_model."""
+    """Bounded online Ridge used by exact server replay and offline delta models."""
 
     def __init__(
         self, ridge_lambda: float, *, feature_count: int = 9, nonnegative: bool = True
@@ -520,6 +551,55 @@ def evaluate_kv_action_models(
         if bool(delta_config["calibration_enabled"])
         else {key: 0.0 for key in delta_models}
     )
+    piecewise_config = protocol.get("piecewise_delta", delta_config)
+    context_boundaries = [
+        int(value) for value in piecewise_config.get("context_boundaries", [2**31 - 1])
+    ]
+    piecewise_models: dict[tuple[str, str, str], _OnlineRidge] = {}
+    for snapshot in sorted(
+        fit_snapshots, key=lambda value: int(value[0]["observation_order"])
+    ):
+        by_action = {str(row["action"]): row for row in snapshot}
+        baseline = str(snapshot[0]["baseline_action"])
+        baseline_cost = float(by_action[baseline]["observed_cost_ms"])
+        regime = str(snapshot[0]["regime"])
+        band = _context_band(float(snapshot[0]["context_tokens"]), context_boundaries)
+        features = _paired_delta_features(snapshot[0], interaction_names)
+        for action, row in by_action.items():
+            if action == baseline:
+                continue
+            key = _piecewise_delta_key(regime, action, band)
+            model = piecewise_models.setdefault(
+                key,
+                _OnlineRidge(
+                    float(piecewise_config["ridge_lambda"]),
+                    feature_count=len(delta_feature_names),
+                    nonnegative=False,
+                ),
+            )
+            model.observe(features, float(row["observed_cost_ms"]) - baseline_cost)
+    piecewise_residuals: dict[tuple[str, str, str], list[float]] = defaultdict(list)
+    for snapshot in calibration_snapshots:
+        by_action = {str(row["action"]): row for row in snapshot}
+        baseline = str(snapshot[0]["baseline_action"])
+        baseline_cost = float(by_action[baseline]["observed_cost_ms"])
+        regime = str(snapshot[0]["regime"])
+        band = _context_band(float(snapshot[0]["context_tokens"]), context_boundaries)
+        features = _paired_delta_features(snapshot[0], interaction_names)
+        for action, row in by_action.items():
+            key = _piecewise_delta_key(regime, action, band)
+            if action == baseline or key not in piecewise_models:
+                continue
+            observed_delta = float(row["observed_cost_ms"]) - baseline_cost
+            piecewise_residuals[key].append(
+                observed_delta - piecewise_models[key].predict(features)
+            )
+    piecewise_calibration = {
+        key: max(0.0, _conformal_upper_quantile(
+            values, float(piecewise_config["one_sided_quantile"])
+        ))
+        for key, values in piecewise_residuals.items()
+    }
     minimum = int(protocol["learned"]["minimum_action_observations"])
     snapshots: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in evaluation:
@@ -604,6 +684,58 @@ def evaluate_kv_action_models(
                 delta_choice = candidate
                 delta_detail["reason"] = "negative_upper_bound"
         choices["D1"] = delta_choice
+        piecewise_choice = baseline
+        piecewise_candidates: list[tuple[float, str, float, float, float]] = []
+        context_band = _context_band(
+            float(snapshot[0]["context_tokens"]), context_boundaries
+        )
+        for action in by_action:
+            if action == baseline:
+                continue
+            key = _piecewise_delta_key(
+                str(snapshot[0]["regime"]), str(action), context_band
+            )
+            model = piecewise_models.get(key)
+            if model is None or model.observations < int(
+                piecewise_config["minimum_action_observations"]
+            ):
+                continue
+            prediction = model.predict(features)
+            radius = model.radius(
+                features, float(piecewise_config["confidence_beta"])
+            )
+            calibration = piecewise_calibration.get(key, math.inf)
+            upper_delta = prediction + radius + calibration
+            piecewise_candidates.append(
+                (upper_delta, str(action), prediction, radius, calibration)
+            )
+        piecewise_detail: dict[str, Any] = {
+            "candidate": baseline,
+            "context_band": context_band,
+            "predicted_delta_ms": 0.0,
+            "ridge_radius_ms": 0.0,
+            "calibration_offset_ms": 0.0,
+            "upper_delta_ms": 0.0,
+            "switch_margin_ms": float(piecewise_config["switch_margin_ms"]),
+            "reason": "insufficient_observations",
+        }
+        if piecewise_candidates:
+            best_upper_delta, candidate, prediction, radius, calibration = min(
+                piecewise_candidates
+            )
+            piecewise_detail.update({
+                "candidate": candidate,
+                "predicted_delta_ms": prediction,
+                "ridge_radius_ms": radius,
+                "calibration_offset_ms": calibration,
+                "upper_delta_ms": best_upper_delta,
+                "reason": "nonnegative_upper_bound",
+            })
+            if best_upper_delta + float(piecewise_config["switch_margin_ms"]) < 0.0:
+                piecewise_choice = candidate
+                piecewise_detail["reason"] = "negative_upper_bound"
+        if "D2" in results:
+            choices["D2"] = piecewise_choice
         oracle_cost = float(oracle["observed_cost_ms"])
         baseline_cost = float(by_action[baseline]["observed_cost_ms"])
         for model, action in choices.items():
@@ -620,6 +752,8 @@ def evaluate_kv_action_models(
             }
             if model == "D1":
                 result_row.update(delta_detail)
+            elif model == "D2":
+                result_row.update(piecewise_detail)
             results[model].append(result_row)
     summary: dict[str, Any] = {}
     h0_by_snapshot = {
@@ -686,6 +820,30 @@ def evaluate_kv_action_models(
         ),
     }
     delta_acceptance["passed"] = all(delta_acceptance.values())
+    piecewise_acceptance: dict[str, bool] = {}
+    if "D2" in summary:
+        piecewise_summary = summary["D2"]
+        piecewise_acceptance_config = piecewise_config["acceptance"]
+        piecewise_acceptance = {
+            "minimum_switches_vs_h0": (
+                int(piecewise_summary["switches_vs_h0"])
+                >= int(piecewise_acceptance_config["minimum_switches_vs_h0"])
+            ),
+            "mean_regret_delta_ci95_upper_negative": (
+                float(piecewise_summary[
+                    "paired_trace_cluster_mean_regret_delta_vs_h0_ci95_ms"
+                ][1]) < 0.0
+            ),
+            "p95_regret_not_above_h0": (
+                float(piecewise_summary["p95_regret_ms"])
+                <= float(h0_summary["p95_regret_ms"])
+            ),
+            "harmful_rate_not_above_h0": (
+                float(piecewise_summary["harmful_rate"])
+                <= float(h0_summary["harmful_rate"])
+            ),
+        }
+        piecewise_acceptance["passed"] = all(piecewise_acceptance.values())
     max_feature_delta = [0.0] * 9
     for row in rows:
         for index, (canonical, actual) in enumerate(zip(
@@ -731,6 +889,19 @@ def evaluate_kv_action_models(
             },
             "acceptance": delta_acceptance,
         },
+        **({"piecewise_delta": {
+            "feature_names": list(delta_feature_names),
+            "context_boundaries": context_boundaries,
+            "fit_traces": len(ordered_train_traces) - calibration_trace_count,
+            "calibration_traces": calibration_trace_count,
+            "one_sided_quantile": float(piecewise_config["one_sided_quantile"]),
+            "calibration_by_context_band": True,
+            "calibration_offsets_ms": {
+                f"{regime}:{band}:{action}": value
+                for (regime, band, action), value in sorted(piecewise_calibration.items())
+            },
+            "acceptance": piecewise_acceptance,
+        }} if "D2" in results else {}),
         "ablations": ablations,
     }
 
@@ -814,14 +985,29 @@ def validate_kv_action_raw_evidence(
 
 
 def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str, Any]:
-    protocol = load_kv_action_protocol(protocol_path)
     manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
     report = json.loads((artifact / "report.json").read_text(encoding="utf-8"))
+    project_root = protocol_path.resolve().parents[1]
+    protocol_source = protocol_path.read_bytes()
+    if manifest.get("protocol_sha256") != hashlib.sha256(protocol_source).hexdigest():
+        outer_commit = manifest.get("outer_commit")
+        if not isinstance(outer_commit, str):
+            raise ValueError("KV action source provenance is missing")
+        try:
+            relative_protocol = protocol_path.resolve().relative_to(project_root).as_posix()
+            protocol_source = subprocess.check_output(
+                ["git", "show", f"{outer_commit}:{relative_protocol}"], cwd=project_root
+            )
+        except (OSError, ValueError, subprocess.CalledProcessError) as error:
+            raise ValueError("KV action historical protocol is unavailable") from error
+    if manifest.get("protocol_sha256") != hashlib.sha256(protocol_source).hexdigest():
+        raise ValueError("KV action protocol hash differs")
+    with tempfile.TemporaryDirectory() as temporary:
+        historical_protocol = Path(temporary) / "kv-action-protocol.json"
+        historical_protocol.write_bytes(protocol_source)
+        protocol = load_kv_action_protocol(historical_protocol)
     if manifest.get("artifact_version") != protocol.get("artifact_version"):
         raise ValueError("KV action artifact version differs")
-    if manifest.get("protocol_sha256") != _sha256(protocol_path):
-        raise ValueError("KV action protocol hash differs")
-    project_root = protocol_path.resolve().parents[1]
     model_relative = manifest.get("model_path")
     if not isinstance(model_relative, str) or Path(model_relative).is_absolute():
         raise ValueError("KV action model provenance is missing")

@@ -105,6 +105,28 @@ def interaction_delta_rows() -> list[dict[str, object]]:
     return output
 
 
+def piecewise_context_delta_rows() -> list[dict[str, object]]:
+    output = phase_conditioned_delta_rows()
+    for row in output:
+        trace_number = int(str(row["trace_id"]).rsplit("-", 1)[1])
+        context_tokens = 384 if trace_number % 2 == 0 else 768
+        features = list(row["runtime_model_features"])
+        features[1] = context_tokens / 4096.0
+        row["context_tokens"] = context_tokens
+        row["runtime_model_features"] = features
+        row["action_runtime_model_features"] = list(features)
+        row["model_feature_1"] = features[1]
+        if row["regime"] == "preempted" and row["action"] == "recompute":
+            baseline = next(
+                candidate for candidate in output
+                if candidate["snapshot_id"] == row["snapshot_id"]
+                and candidate["action"] == "device_swap"
+            )
+            delta = -2.0 if context_tokens <= 512 else 8.0
+            row["observed_cost_ms"] = float(baseline["observed_cost_ms"]) + delta
+    return output
+
+
 class KvActionEvidenceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.protocol = load_kv_action_protocol(Path("config/kv_action_policy_protocol.json"))
@@ -179,6 +201,23 @@ class KvActionEvidenceTests(unittest.TestCase):
             report["models"]["D1"]["cumulative_regret_ms"],
             report["ablations"]["D1-I0-no-interactions"]["cumulative_regret_ms"],
         )
+
+    def test_piecewise_delta_switches_only_below_registered_context_boundary(self) -> None:
+        protocol = copy.deepcopy(self.protocol)
+        protocol["piecewise_delta"] = {
+            **copy.deepcopy(protocol["paired_delta"]),
+            "context_boundaries": [512],
+            "calibration_by_context_band": True,
+        }
+        report = evaluate_kv_action_models(piecewise_context_delta_rows(), protocol)
+        preempted = [
+            row for row in report["decisions"]["D2"] if row["regime"] == "preempted"
+        ]
+        low = [row for row in preempted if row["context_band"] == "le-512"]
+        high = [row for row in preempted if row["context_band"] == "gt-512"]
+        self.assertEqual({row["chosen"] for row in low}, {"recompute"})
+        self.assertEqual({row["chosen"] for row in high}, {"device_swap"})
+        self.assertTrue(report["piecewise_delta"]["acceptance"]["passed"])
 
     def test_trace_leakage_is_rejected(self) -> None:
         tampered = copy.deepcopy(rows())
