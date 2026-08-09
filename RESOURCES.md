@@ -36,5 +36,5 @@
 
 ## Gaps
 
-- 当前机器未安装 Nsight Systems/Compute，课程只能教授如何解读现有 CUDA Event、GPU activity 和 Engine trace，不能提供本项目 occupancy/roofline 实测。
+- 当前机器已用 Nsight Systems 完成 PID/request/kernel 机制关联；Nsight Compute 已尝试，但受 driver/tool compatibility 与 `ERR_NVGPUCTRPERM` 限制，当前不作 occupancy/roofline/DRAM-bound 归因。
 - 当前实验是单机单 GPU、小模型；分布式 tensor/pipeline parallel 只作为延伸问题，不作为项目已实现内容。
