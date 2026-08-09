@@ -63,8 +63,17 @@ def expected_summary(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> di
     k2_summary = summarize(k2_client)
     p95_regression = (k2_summary["p95"] / k1_summary["p95"] - 1.0) * 100.0
     limit = float(protocol["acceptance"]["p95_maximum_regression_percent"])
-    median_not_slower = summarize(client_effects)["median"] <= 0.0
-    return {
+    client_median_not_slower = summarize(client_effects)["median"] <= 0.0
+    prompt_median_not_slower = summarize(prompt_effects)["median"] <= 0.0
+    acceptance_metric = protocol["acceptance"].get(
+        "paired_median_metric", "client_elapsed_ms")
+    if acceptance_metric == "client_elapsed_ms":
+        paired_median_passed = client_median_not_slower
+    elif acceptance_metric == "server_prompt_ms":
+        paired_median_passed = prompt_median_not_slower
+    else:
+        raise ValueError(f"unsupported paired_median_metric: {acceptance_metric}")
+    result = {
         "paired_trials": pairs,
         "k1_client_elapsed_ms": k1_summary,
         "k2_client_elapsed_ms": k2_summary,
@@ -77,12 +86,16 @@ def expected_summary(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> di
         ),
         "p95_regression_percent": p95_regression,
         "promotion_limit_percent": limit,
-        "promotion_passed": p95_regression <= limit and median_not_slower,
+        "promotion_passed": p95_regression <= limit and paired_median_passed,
         "correctness_passed": True,
         "k1_paged_graph_entries": int(sum(r["paged_calls"] for r in rows if r["variant"] == "k1")),
         "k2_paged_graph_entries": int(sum(r["paged_calls"] for r in rows if r["variant"] == "k2")),
         "paged_fallbacks": int(sum(r["paged_fallbacks"] for r in rows)),
     }
+    if "paired_median_metric" in protocol["acceptance"]:
+        result["paired_median_acceptance_metric"] = acceptance_metric
+        result["paired_median_acceptance_passed"] = paired_median_passed
+    return result
 
 
 def profile_variant(
@@ -133,6 +146,8 @@ def profile_variant(
 def render_report(summary: dict[str, Any], mechanisms: dict[str, Any]) -> str:
     effect = summary["paired_k2_minus_k1_client_ms"]
     prompt = summary["paired_k2_minus_k1_prompt_ms"]
+    gate_metric = summary.get("paired_median_acceptance_metric", "client_elapsed_ms")
+    gate_label = "服务内部 prompt" if gate_metric == "server_prompt_ms" else "客户端"
     return "\n".join([
         "# K2 相对生产 K1 的正式晋级实验",
         "",
@@ -149,7 +164,8 @@ def render_report(summary: dict[str, Any], mechanisms: dict[str, Any]) -> str:
         f"{mechanisms['k2']['kernel_launches']} 次 / "
         f"{mechanisms['k2']['kernel_duration_ms']:.3f} ms（仅机制证据）。",
         f"- 生产晋级：{'通过' if summary['promotion_passed'] else '未通过'}。门槛为 "
-        f"P95 回退不超过 {summary['promotion_limit_percent']:.1f}% 且配对中位数不慢。",
+        f"客户端 P95 回退不超过 {summary['promotion_limit_percent']:.1f}% 且"
+        f"{gate_label}配对中位数不慢。",
         "",
         "该结论只回答 K2 能否替代同一 Paged 路径中的 K1；不把它改写成 Paged 已优于 Direct。",
         "",
