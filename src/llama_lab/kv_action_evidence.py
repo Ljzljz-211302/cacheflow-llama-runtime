@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import math
@@ -21,6 +22,12 @@ FEATURES = (
     "context_tokens", "batch", "page_runs", "kv_pressure", "kv_bytes", "reuse_distance"
 )
 MODEL_FEATURES = tuple(f"model_feature_{index}" for index in range(9))
+DELTA_INTERACTION_FEATURES = {
+    "cached_tokens_x_prefill_cost": (1, 7),
+    "kv_bytes_x_kv_pressure": (3, 6),
+    "host_transfer_x_reuse_distance": (8, 5),
+    "fragmentation_x_kv_bytes": (4, 3),
+}
 POLICY_ALLOWED_INCLUDES = {
     "server-kv-action-policy.cpp": (
         '"server-kv-action-policy.h"', "<algorithm>", "<chrono>", "<cmath>",
@@ -42,14 +49,46 @@ def load_kv_action_protocol(path: Path) -> dict[str, Any]:
     protocol = json.loads(path.read_text(encoding="utf-8"))
     if protocol.get("schema_version") != 1:
         raise ValueError("KV action protocol schema_version must be 1")
-    if protocol.get("models") != ["H0", "A1", "T1", "L1"]:
-        raise ValueError("KV action protocol must compare H0/A1/T1/L1")
+    if protocol.get("models") != ["H0", "A1", "T1", "L1", "D1"]:
+        raise ValueError("KV action protocol must compare H0/A1/T1/L1/D1")
+    paired_delta = protocol.get("paired_delta", {})
+    interactions = paired_delta.get("interaction_features")
+    if (
+        not isinstance(interactions, list)
+        or len(interactions) != len(set(interactions))
+        or any(name not in DELTA_INTERACTION_FEATURES for name in interactions)
+    ):
+        raise ValueError("KV action protocol has invalid paired-delta interactions")
+    if paired_delta.get("regime_conditioned") is not True:
+        raise ValueError("KV action protocol must condition paired deltas by regime")
+    if paired_delta.get("calibration_enabled") is not True:
+        raise ValueError("KV action protocol must enable paired-delta calibration")
+    calibration_traces = paired_delta.get("calibration_traces")
+    training_traces = protocol.get("split", {}).get("minimum_train_traces")
+    if (
+        not isinstance(calibration_traces, int)
+        or not isinstance(training_traces, int)
+        or calibration_traces <= 0
+        or calibration_traces >= training_traces
+    ):
+        raise ValueError("KV action protocol has invalid paired-delta calibration traces")
+    quantile = paired_delta.get("one_sided_quantile")
+    if not isinstance(quantile, (int, float)) or not 0.5 < float(quantile) < 1.0:
+        raise ValueError("KV action protocol has invalid paired-delta calibration quantile")
+    acceptance = paired_delta.get("acceptance")
+    if not isinstance(acceptance, dict) or acceptance != {
+        "minimum_switches_vs_h0": 1,
+        "mean_regret_delta_ci95_upper_must_be_negative": True,
+        "p95_regret_must_not_exceed_h0": True,
+        "harmful_rate_must_not_exceed_h0": True,
+    }:
+        raise ValueError("KV action protocol has invalid paired-delta acceptance gates")
     if protocol.get("split", {}).get("unit") != "trace_id":
         raise ValueError("KV action protocol split unit must be trace_id")
     if not protocol.get("split", {}).get("row_randomization_prohibited"):
         raise ValueError("KV action protocol must prohibit row randomization")
-    if int(protocol.get("confirmatory", {}).get("minimum_pairs_per_regime", 0)) < 20:
-        raise ValueError("KV action protocol requires at least 20 pairs per regime")
+    if int(protocol.get("confirmatory", {}).get("minimum_pairs_per_regime", 0)) < 40:
+        raise ValueError("KV action protocol requires at least 40 pairs per regime")
     if int(protocol.get("confirmatory", {}).get("bootstrap_samples", 0)) != 10000:
         raise ValueError("KV action protocol requires 10,000 bootstrap resamples")
     if protocol.get("confirmatory", {}).get("bootstrap_unit") != "trace_id":
@@ -300,31 +339,54 @@ def _model_features(row: dict[str, Any]) -> list[float]:
     return [float(row[field]) for field in MODEL_FEATURES]
 
 
+def _paired_delta_features(row: dict[str, Any], interaction_names: list[str]) -> list[float]:
+    features = _model_features(row)
+    for name in interaction_names:
+        if name not in DELTA_INTERACTION_FEATURES:
+            raise ValueError(f"unknown paired-delta interaction feature: {name}")
+        left, right = DELTA_INTERACTION_FEATURES[name]
+        features.append(features[left] * features[right])
+    return features
+
+
+def _paired_delta_key(regime: str, action: str, regime_conditioned: bool) -> tuple[str, str]:
+    return (regime if regime_conditioned else "pooled", action)
+
+
 class _OnlineRidge:
     """Exact Python replay of server_kv_action_policy::ridge_model."""
 
-    def __init__(self, ridge_lambda: float) -> None:
+    def __init__(
+        self, ridge_lambda: float, *, feature_count: int = 9, nonnegative: bool = True
+    ) -> None:
         self.inverse = [
-            [1.0 / ridge_lambda if row == column else 0.0 for column in range(9)]
-            for row in range(9)
+            [
+                1.0 / ridge_lambda if row == column else 0.0
+                for column in range(feature_count)
+            ]
+            for row in range(feature_count)
         ]
-        self.rhs = [0.0] * 9
+        self.rhs = [0.0] * feature_count
         self.observations = 0
         self.residual_variance_ewma = 0.0
+        self.nonnegative = nonnegative
 
     def predict(self, features: list[float]) -> float:
+        if len(features) != len(self.rhs):
+            raise ValueError("ridge feature count differs from model")
         result = 0.0
-        for row in range(9):
+        for row in range(len(self.rhs)):
             theta = sum(
-                self.inverse[row][column] * self.rhs[column] for column in range(9)
+                self.inverse[row][column] * self.rhs[column]
+                for column in range(len(self.rhs))
             )
             result += theta * features[row]
-        return max(0.0, result)
+        return max(0.0, result) if self.nonnegative else result
 
     def radius(self, features: list[float], beta: float) -> float:
         quadratic = sum(
             features[row] * self.inverse[row][column] * features[column]
-            for row in range(9) for column in range(9)
+            for row in range(len(self.rhs)) for column in range(len(self.rhs))
         )
         sigma = math.sqrt(max(1e-9, self.residual_variance_ewma))
         return beta * sigma * math.sqrt(max(0.0, quadratic))
@@ -332,14 +394,17 @@ class _OnlineRidge:
     def observe(self, features: list[float], cost: float) -> None:
         previous = self.predict(features)
         inverse_x = [
-            sum(self.inverse[row][column] * features[column] for column in range(9))
-            for row in range(9)
+            sum(
+                self.inverse[row][column] * features[column]
+                for column in range(len(self.rhs))
+            )
+            for row in range(len(self.rhs))
         ]
         denominator = 1.0 + sum(
-            features[row] * inverse_x[row] for row in range(9)
+            features[row] * inverse_x[row] for row in range(len(self.rhs))
         )
-        for row in range(9):
-            for column in range(9):
+        for row in range(len(self.rhs)):
+            for column in range(len(self.rhs)):
                 self.inverse[row][column] -= (
                     inverse_x[row] * inverse_x[column] / denominator
                 )
@@ -357,8 +422,16 @@ def _percentile(values: list[float], quantile: float) -> float:
     return ordered[min(len(ordered) - 1, int(quantile * (len(ordered) - 1)))]
 
 
+def _conformal_upper_quantile(values: list[float], quantile: float) -> float:
+    if not values:
+        return math.inf
+    ordered = sorted(values)
+    rank = math.ceil((len(ordered) + 1) * quantile) - 1
+    return ordered[min(len(ordered) - 1, max(0, rank))]
+
+
 def evaluate_kv_action_models(
-    rows: list[dict[str, Any]], protocol: dict[str, Any]
+    rows: list[dict[str, Any]], protocol: dict[str, Any], *, _include_ablations: bool = True
 ) -> dict[str, Any]:
     validate_kv_action_rows(rows, protocol)
     train = [row for row in rows if row["split"] == "train"]
@@ -375,6 +448,78 @@ def evaluate_kv_action_models(
         learned[str(row["action"])].observe(
             _model_features(row), float(row["observed_cost_ms"])
         )
+    delta_config = protocol["paired_delta"]
+    regime_conditioned = bool(delta_config["regime_conditioned"])
+    interaction_names = [str(name) for name in delta_config["interaction_features"]]
+    delta_feature_names = [*MODEL_FEATURES, *interaction_names]
+    delta_models: dict[tuple[str, str], _OnlineRidge] = {}
+    train_snapshots: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in train:
+        train_snapshots[str(row["snapshot_id"])].append(row)
+    ordered_train_traces = sorted(
+        {str(row["trace_id"]): int(row["timestamp_order"]) for row in train}.items(),
+        key=lambda item: item[1],
+    )
+    calibration_trace_count = int(delta_config["calibration_traces"])
+    if calibration_trace_count <= 0 or calibration_trace_count >= len(ordered_train_traces):
+        raise ValueError("paired-delta calibration trace count is invalid")
+    calibration_traces = {
+        trace for trace, _ in ordered_train_traces[-calibration_trace_count:]
+    }
+    fit_snapshots = [
+        snapshot for snapshot in train_snapshots.values()
+        if str(snapshot[0]["trace_id"]) not in calibration_traces
+    ]
+    calibration_snapshots = [
+        snapshot for snapshot in train_snapshots.values()
+        if str(snapshot[0]["trace_id"]) in calibration_traces
+    ]
+    for snapshot in sorted(
+        fit_snapshots, key=lambda value: int(value[0]["observation_order"])
+    ):
+        by_action = {str(row["action"]): row for row in snapshot}
+        baseline = str(snapshot[0]["baseline_action"])
+        baseline_cost = float(by_action[baseline]["observed_cost_ms"])
+        regime = str(snapshot[0]["regime"])
+        features = _paired_delta_features(snapshot[0], interaction_names)
+        for action, row in by_action.items():
+            if action == baseline:
+                continue
+            key = _paired_delta_key(regime, action, regime_conditioned)
+            model = delta_models.setdefault(
+                key,
+                _OnlineRidge(
+                    float(delta_config["ridge_lambda"]),
+                    feature_count=len(delta_feature_names),
+                    nonnegative=False,
+                ),
+            )
+            model.observe(features, float(row["observed_cost_ms"]) - baseline_cost)
+    calibration_residuals: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for snapshot in calibration_snapshots:
+        by_action = {str(row["action"]): row for row in snapshot}
+        baseline = str(snapshot[0]["baseline_action"])
+        baseline_cost = float(by_action[baseline]["observed_cost_ms"])
+        regime = str(snapshot[0]["regime"])
+        features = _paired_delta_features(snapshot[0], interaction_names)
+        for action, row in by_action.items():
+            key = _paired_delta_key(regime, action, regime_conditioned)
+            if action == baseline or key not in delta_models:
+                continue
+            observed_delta = float(row["observed_cost_ms"]) - baseline_cost
+            calibration_residuals[key].append(
+                observed_delta - delta_models[key].predict(features)
+            )
+    delta_calibration = (
+        {
+            key: max(0.0, _conformal_upper_quantile(
+                values, float(delta_config["one_sided_quantile"])
+            ))
+            for key, values in calibration_residuals.items()
+        }
+        if bool(delta_config["calibration_enabled"])
+        else {key: 0.0 for key in delta_models}
+    )
     minimum = int(protocol["learned"]["minimum_action_observations"])
     snapshots: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in evaluation:
@@ -416,11 +561,54 @@ def evaluate_kv_action_models(
                 if candidate != baseline and upper + margin < baseline_lower:
                     learned_choice = candidate
         choices["L1"] = learned_choice
+        delta_choice = baseline
+        delta_candidates: list[tuple[float, str, float, float, float]] = []
+        delta_minimum = int(delta_config["minimum_action_observations"])
+        features = _paired_delta_features(snapshot[0], interaction_names)
+        for action in by_action:
+            if action == baseline:
+                continue
+            key = _paired_delta_key(
+                str(snapshot[0]["regime"]), str(action), regime_conditioned
+            )
+            model = delta_models.get(key)
+            if model is None or model.observations < delta_minimum:
+                continue
+            prediction = model.predict(features)
+            radius = model.radius(features, float(delta_config["confidence_beta"]))
+            calibration = delta_calibration.get(key, math.inf)
+            upper_delta = prediction + radius + calibration
+            delta_candidates.append(
+                (upper_delta, str(action), prediction, radius, calibration)
+            )
+        delta_detail: dict[str, Any] = {
+            "candidate": baseline,
+            "predicted_delta_ms": 0.0,
+            "ridge_radius_ms": 0.0,
+            "calibration_offset_ms": 0.0,
+            "upper_delta_ms": 0.0,
+            "switch_margin_ms": float(delta_config["switch_margin_ms"]),
+            "reason": "insufficient_observations",
+        }
+        if delta_candidates:
+            best_upper_delta, candidate, prediction, radius, calibration = min(delta_candidates)
+            delta_detail.update({
+                "candidate": candidate,
+                "predicted_delta_ms": prediction,
+                "ridge_radius_ms": radius,
+                "calibration_offset_ms": calibration,
+                "upper_delta_ms": best_upper_delta,
+                "reason": "nonnegative_upper_bound",
+            })
+            if best_upper_delta + float(delta_config["switch_margin_ms"]) < 0.0:
+                delta_choice = candidate
+                delta_detail["reason"] = "negative_upper_bound"
+        choices["D1"] = delta_choice
         oracle_cost = float(oracle["observed_cost_ms"])
         baseline_cost = float(by_action[baseline]["observed_cost_ms"])
         for model, action in choices.items():
             cost = float(by_action[action]["observed_cost_ms"])
-            results[model].append({
+            result_row = {
                 "snapshot_id": snapshot_id,
                 "trace_id": snapshot[0]["trace_id"],
                 "regime": snapshot[0]["regime"],
@@ -429,7 +617,10 @@ def evaluate_kv_action_models(
                 "cost_ms": cost,
                 "regret_ms": cost - oracle_cost,
                 "harmful": cost > baseline_cost * (1.0 + harm_ratio),
-            })
+            }
+            if model == "D1":
+                result_row.update(delta_detail)
+            results[model].append(result_row)
     summary: dict[str, Any] = {}
     h0_by_snapshot = {
         str(row["snapshot_id"]): float(row["regret_ms"]) for row in results["H0"]
@@ -463,11 +654,38 @@ def evaluate_kv_action_models(
             "cumulative_regret_ms": sum(regrets),
             "harmful_decisions": sum(bool(row["harmful"]) for row in decisions),
             "harmful_rate": statistics.fmean(bool(row["harmful"]) for row in decisions),
+            "switches_vs_h0": sum(
+                row["chosen"] != next(
+                    baseline["chosen"] for baseline in results["H0"]
+                    if baseline["snapshot_id"] == row["snapshot_id"]
+                )
+                for row in decisions
+            ),
             "paired_trace_cluster_mean_regret_delta_vs_h0_ci95_ms": [
                 _percentile(bootstrapped, 0.025), _percentile(bootstrapped, 0.975)
             ],
             "choices": {action: sum(row["chosen"] == action for row in decisions) for action in ACTIONS},
         }
+    delta_acceptance_config = delta_config["acceptance"]
+    delta_summary = summary["D1"]
+    h0_summary = summary["H0"]
+    delta_acceptance = {
+        "minimum_switches_vs_h0": (
+            int(delta_summary["switches_vs_h0"])
+            >= int(delta_acceptance_config["minimum_switches_vs_h0"])
+        ),
+        "mean_regret_delta_ci95_upper_negative": (
+            float(delta_summary["paired_trace_cluster_mean_regret_delta_vs_h0_ci95_ms"][1])
+            < 0.0
+        ),
+        "p95_regret_not_above_h0": (
+            float(delta_summary["p95_regret_ms"]) <= float(h0_summary["p95_regret_ms"])
+        ),
+        "harmful_rate_not_above_h0": (
+            float(delta_summary["harmful_rate"]) <= float(h0_summary["harmful_rate"])
+        ),
+    }
+    delta_acceptance["passed"] = all(delta_acceptance.values())
     max_feature_delta = [0.0] * 9
     for row in rows:
         for index, (canonical, actual) in enumerate(zip(
@@ -476,6 +694,23 @@ def evaluate_kv_action_models(
             max_feature_delta[index] = max(
                 max_feature_delta[index], abs(float(canonical) - float(actual))
             )
+    ablations: dict[str, Any] = {}
+    if _include_ablations:
+        no_interactions = copy.deepcopy(protocol)
+        no_interactions["paired_delta"]["interaction_features"] = []
+        ablations["D1-I0-no-interactions"] = evaluate_kv_action_models(
+            rows, no_interactions, _include_ablations=False
+        )["models"]["D1"]
+        pooled = copy.deepcopy(protocol)
+        pooled["paired_delta"]["regime_conditioned"] = False
+        ablations["D1-R0-pooled-regimes"] = evaluate_kv_action_models(
+            rows, pooled, _include_ablations=False
+        )["models"]["D1"]
+        uncalibrated = copy.deepcopy(protocol)
+        uncalibrated["paired_delta"]["calibration_enabled"] = False
+        ablations["D1-C0-no-calibration"] = evaluate_kv_action_models(
+            rows, uncalibrated, _include_ablations=False
+        )["models"]["D1"]
     return {
         "train_traces": len({row["trace_id"] for row in train}),
         "evaluation_traces": len({row["trace_id"] for row in evaluation}),
@@ -483,6 +718,20 @@ def evaluate_kv_action_models(
         "max_action_feature_delta": max_feature_delta,
         "models": summary,
         "decisions": results,
+        "paired_delta": {
+            "feature_names": list(delta_feature_names),
+            "fit_traces": len(ordered_train_traces) - calibration_trace_count,
+            "calibration_traces": calibration_trace_count,
+            "one_sided_quantile": float(delta_config["one_sided_quantile"]),
+            "regime_conditioned": regime_conditioned,
+            "calibration_enabled": bool(delta_config["calibration_enabled"]),
+            "calibration_offsets_ms": {
+                f"{regime}:{action}": value
+                for (regime, action), value in sorted(delta_calibration.items())
+            },
+            "acceptance": delta_acceptance,
+        },
+        "ablations": ablations,
     }
 
 
@@ -568,7 +817,7 @@ def validate_kv_action_artifact(artifact: Path, protocol_path: Path) -> dict[str
     protocol = load_kv_action_protocol(protocol_path)
     manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
     report = json.loads((artifact / "report.json").read_text(encoding="utf-8"))
-    if manifest.get("artifact_version") != "h4-kv-action-v1.3.0":
+    if manifest.get("artifact_version") != protocol.get("artifact_version"):
         raise ValueError("KV action artifact version differs")
     if manifest.get("protocol_sha256") != _sha256(protocol_path):
         raise ValueError("KV action protocol hash differs")

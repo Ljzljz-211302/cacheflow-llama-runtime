@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect paired real-service action costs and evaluate H0/A1/T1/L1."""
+"""Collect paired real-service action costs and evaluate H0/A1/T1/L1/D1."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from llama_lab.kv_action_evidence import (
 from llama_lab.server_bench import wait_until_ready
 
 
-ARTIFACT = ROOT / "results/research/h4-kv-action-v1.3.0"
+ARTIFACT = ROOT / "results/research/h4-kv-action-v1.4.0"
 PROTOCOL_PATH = ROOT / "config/kv_action_policy_protocol.json"
 SERVER = ROOT / "build/patched-cuda-ninja3/bin/llama-server.exe"
 MODEL = ROOT / "models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
@@ -271,17 +271,17 @@ def main() -> None:
 
         rows: list[dict[str, Any]] = []
         raw_evidence: list[dict[str, Any]] = []
-        repeats = (24, 48, 96, 128)
+        repeats = (12, 18, 24, 32, 40, 48, 64, 80, 96, 112, 128, 144)
         trace_markers = "甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉天地玄黄宇宙洪荒日月盈昃寒来暑往秋收冬藏"
         action_orders = make_balanced_action_orders(
-            MODES, 40, int(protocol["confirmatory"]["order_seed"])
+            MODES, 120, int(protocol["confirmatory"]["order_seed"])
         )
         order = 0
         observation_order = 0
-        for trace in range(40):
+        for trace in range(120):
             order += 1
             family = f"prefix-family-{trace:02d}"
-            prompt = trace_markers[trace] * 4 + " " + (
+            prompt = trace_markers[trace % len(trace_markers)] * 4 + " " + (
                 "cacheflow action evidence token " * repeats[trace % len(repeats)]
             )
             unrelated = f"unrelated-{trace:02d} " + ("eviction control token " * 32)
@@ -309,7 +309,7 @@ def main() -> None:
                     value["observation_order"] = observation_order
                     value["observation_id"] = observation_id
                     observed[key] = value
-            split = "train" if trace < 20 else "evaluation"
+            split = "train" if trace < 80 else "evaluation"
             identity = {
                 "trace_id": f"trace-{trace:02d}",
                 "session_id": f"session-{trace:02d}",
@@ -440,12 +440,31 @@ def main() -> None:
         )
     t1 = analysis["models"]["T1"]
     h0 = analysis["models"]["H0"]
+    d1 = analysis["models"]["D1"]
     if t1 == h0:
         table_conclusion = "T1 also matched H0 on this held-out run and established no advantage."
     elif t1["harmful_rate"] > h0["harmful_rate"]:
         table_conclusion = "T1 produced a higher harmful-decision rate than H0."
     else:
         table_conclusion = "T1 differed from H0; the complete metrics above define the retained result."
+    d1_acceptance = analysis["paired_delta"]["acceptance"]
+    if d1_acceptance["passed"]:
+        delta_conclusion = (
+            f"D1 made {d1['switches_vs_h0']} held-out switches and passed every "
+            "pre-registered paired-replay acceptance gate. It remains an offline candidate "
+            "until a separately gated production canary."
+        )
+    else:
+        failed = [name for name, passed in d1_acceptance.items() if name != "passed" and not passed]
+        delta_conclusion = (
+            f"D1 made {d1['switches_vs_h0']} held-out switches but failed the retained "
+            f"paired-replay gates: {', '.join(failed)}. H0 therefore remains selected."
+        )
+    ablation_lines = [
+        f"| {name} | {value['median_regret_ms']:.3f} | {value['p95_regret_ms']:.3f} | "
+        f"{value['cumulative_regret_ms']:.3f} | {value['switches_vs_h0']} |"
+        for name, value in analysis["ablations"].items()
+    ]
     report_markdown = "\n".join([
         "# H4 unified KV action policy report",
         "",
@@ -460,9 +479,18 @@ def main() -> None:
         "|---|---:|---:|---:|",
         *model_lines,
         "",
-        "L1 made no held-out switch because its conservative bound did not beat H0. "
-        "It therefore matched H0. " + table_conclusion + " "
-        "The selected production behavior is H0 execution with L1 shadow recommendations.",
+        "L1 made no held-out switch because its independent absolute-cost bounds did not beat H0. "
+        "It therefore matched H0. " + table_conclusion,
+        "",
+        delta_conclusion,
+        "",
+        "D1 predicts the paired complete-action delta `candidate - H0`, conditions models by "
+        "runtime regime, adds four pre-registered mechanism interactions, and adds a one-sided "
+        "held-out calibration offset before the switch margin.",
+        "",
+        "| D1 ablation | Median regret (ms) | P95 regret (ms) | Cumulative regret (ms) | Switches |",
+        "|---|---:|---:|---:|---:|",
+        *ablation_lines,
         "",
         f"Decision overhead: p99 {overhead_result['p99_choose_microseconds']:.3f} us; "
         f"observed max {overhead_result['measured_max_choose_microseconds']:.3f} us; "
@@ -484,7 +512,7 @@ def main() -> None:
     (ARTIFACT / "report.md").write_text(report_markdown, encoding="utf-8")
     manifest = {
         "schema_version": 1,
-        "artifact_version": "h4-kv-action-v1.3.0",
+        "artifact_version": protocol["artifact_version"],
         "protocol_sha256": sha256(PROTOCOL_PATH),
         "model_path": MODEL.relative_to(ROOT).as_posix(),
         "model_sha256": sha256(MODEL),

@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
-  "protocol_version": "1.3.0",
+  "protocol_version": "1.4.0",
+  "artifact_version": "h4-kv-action-v1.4.0",
   "claim_id": "H4-adaptive-action-policy",
   "cost_boundary": "scheduler snapshot ready through next useful decode runnable",
   "production_actions": ["direct", "device_swap", "host_swap", "recompute"],
@@ -8,13 +9,13 @@
     "remap": "operator exists but no complete-action llama_decode adapter",
     "paged": "H3 K1 regressed 10.41%-13.05% in every medium/long regime and has no production adapter"
   },
-  "models": ["H0", "A1", "T1", "L1"],
+  "models": ["H0", "A1", "T1", "L1", "D1"],
   "split": {
     "unit": "trace_id",
     "group_fields": ["session_id", "prefix_family"],
     "ordering": "training traces precede evaluation traces",
-    "minimum_train_traces": 20,
-    "minimum_evaluation_traces": 20,
+    "minimum_train_traces": 80,
+    "minimum_evaluation_traces": 40,
     "row_randomization_prohibited": true
   },
   "features": [
@@ -37,6 +38,28 @@
     "switch_margin_ms": 0.25,
     "minimum_action_observations": 4
   },
+  "paired_delta": {
+    "ridge_lambda": 1.0,
+    "confidence_beta": 1.0,
+    "switch_margin_ms": 0.25,
+    "minimum_action_observations": 4,
+    "regime_conditioned": true,
+    "calibration_enabled": true,
+    "calibration_traces": 20,
+    "one_sided_quantile": 0.95,
+    "interaction_features": [
+      "cached_tokens_x_prefill_cost",
+      "kv_bytes_x_kv_pressure",
+      "host_transfer_x_reuse_distance",
+      "fragmentation_x_kv_bytes"
+    ],
+    "acceptance": {
+      "minimum_switches_vs_h0": 1,
+      "mean_regret_delta_ci95_upper_must_be_negative": true,
+      "p95_regret_must_not_exceed_h0": true,
+      "harmful_rate_must_not_exceed_h0": true
+    }
+  },
   "harm": {
     "relative_to_h0_percent": 3.0
   },
@@ -50,10 +73,10 @@
   "confirmatory": {
     "regimes": ["resident", "preempted"],
     "order_randomization": "seeded balanced Latin blocks",
-    "order_seed": 6042027,
-    "minimum_pairs_per_regime": 20,
+    "order_seed": 6042029,
+    "minimum_pairs_per_regime": 40,
     "bootstrap_samples": 10000,
-    "bootstrap_seed": 6042026,
+    "bootstrap_seed": 6042028,
     "bootstrap_unit": "trace_id",
     "max_action_feature_delta": [0.0, 4.0, 0.0, 4.0, 1.0, 4.0, 1.0, 4.0, 4.0],
     "negative_results_retained": true
