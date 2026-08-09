@@ -216,6 +216,9 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
     promotion_passed = p95_regression <= promotion_limit and (
         not median_not_slower_required or summarize(effects)["median"] <= 0.0
     )
+    kernel_pattern = protocol["production_envelope"].get(
+        "mechanism_kernel_pattern", "cacheflow_paged_decode_fattn_k1"
+    )
     expected_conclusions = {
         "schema_version": 1,
         "protocol_version": protocol["protocol_version"],
@@ -251,9 +254,6 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
            for field in ("name", "compute_capability")):
         raise AssertionError("artifact device differs from the preregistered device")
     mechanism = json.loads((output / "mechanism.json").read_text(encoding="utf-8"))
-    kernel_pattern = protocol["production_envelope"].get(
-        "mechanism_kernel_pattern", "cacheflow_paged_decode_fattn_k1"
-    )
     reparsed_mechanism = parse_nsys_sqlite(
         output / "profile/production-paged.sqlite",
         kernel_patterns=(kernel_pattern,),
