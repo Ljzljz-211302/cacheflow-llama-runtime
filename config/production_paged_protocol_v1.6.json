@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "protocol_version": "1.6.0",
+  "preregistered_at_utc": "2026-08-09T12:11:00Z",
+  "supersedes": "v1.5 passed the P95 gate but missed the paired-median gate by 0.976 ms",
+  "claim": "H7-production-paged-k2-lane0-softmax-cross-page-service",
+  "random_seed": 20260809,
+  "paired_trials": 20,
+  "order": "alternate direct-paged and paged-direct by pair",
+  "server_binary": "build/patched-cuda-ninja3/bin/llama-server.exe",
+  "model": "models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+  "device": {
+    "name": "NVIDIA GeForce RTX 4050 Laptop GPU",
+    "compute_capability": "8.9"
+  },
+  "service_configuration": {
+    "context_tokens": 512,
+    "parallel_slots": 1,
+    "gpu_layers": 99,
+    "flash_attention": true,
+    "kv_block_size_tokens": 16,
+    "paged_decode_enabled": true,
+    "policy": "analytical",
+    "controlled_actions": ["direct", "paged"]
+  },
+  "request": {
+    "endpoint": "/completion",
+    "prompt": " one one one one one one one one one one one one one one one one one",
+    "predicted_tokens": 1,
+    "temperature": 0,
+    "cache_prompt": true,
+    "warm_requests_before_measurement": 1,
+    "measured_requests_per_process": 1
+  },
+  "production_envelope": {
+    "architecture": "Qwen2.5-0.5B",
+    "layers": 24,
+    "query_heads": 14,
+    "kv_heads": 2,
+    "gqa_ratio": 7,
+    "head_dimension": 64,
+    "page_size_tokens": 16,
+    "measured_context_tokens": 17,
+    "maximum_context_tokens": 17,
+    "batch": 1,
+    "query_tokens": 1,
+    "kv_dtype": "fp16",
+    "kernel_variant": "K2-T2-lane0-softmax",
+    "query_heads_per_cta": 2,
+    "query_dtype_conversion_nodes": 0,
+    "mechanism_kernel_pattern": "cacheflow_paged_decode_fattn_k2_t2",
+    "unsupported_behavior": "retain K1 or fail closed to Direct before KV mutation"
+  },
+  "candidate_selection": {
+    "development_only": false,
+    "observed_before_preregistration": "v1.5 retained a 1.049% P95 regression and +0.976 ms paired median; code inspection found all 32 lanes redundantly evaluating identical online-softmax exponentials",
+    "intervention": "compute online-softmax max, normalizer, alpha, and beta only in lane 0 and broadcast alpha/beta/normalizer with warp shuffles; preserve the one-warp-head mapping, double buffering, workload, and gates",
+    "confirmatory_service_results_observed_before_preregistration": false,
+    "frozen_candidate": "K2-T2-lane0-softmax"
+  },
+  "measurements": {
+    "primary": "client_elapsed_ms for the measured cached request",
+    "secondary": [
+      "server prompt_ms",
+      "complete action observation cost from Prometheus",
+      "production paged graph entries",
+      "paged fallbacks"
+    ],
+    "startup_and_model_load_excluded": true,
+    "profiler_timing_is_not_primary": true
+  },
+  "analysis": {
+    "paired_effect": "paged minus direct",
+    "summaries": ["median", "p95", "minimum", "maximum"],
+    "confidence": "paired bootstrap 95% interval for the median, 10000 resamples",
+    "no_outcome_based_deletion": true
+  },
+  "acceptance": {
+    "outputs_must_match_exactly": true,
+    "every_paged_trial_requires_production_graph_entry": true,
+    "paged_fallbacks_must_be_zero": true,
+    "policy_action_observation_required": true,
+    "promotion_latency_p95_maximum_regression_percent": 5.0,
+    "promotion_requires_paired_median_not_slower": true,
+    "promotion_is_not_required_for_research_retention": true,
+    "failed_promotion_keeps_paged_opt_in_and_evidence_gated": true
+  },
+  "claim_rules": {
+    "results_apply_only_to_the_preregistered_short_context_envelope": true,
+    "v1_2_through_v1_5_are_retained_with_their_failure_boundaries": true,
+    "negative_and_neutral_results_are_retained": true,
+    "no_long_context_service_speedup_claim": true,
+    "no_memory_bound_or_occupancy_claim_without_ncu": true,
+    "real_user_service_path_is_not_inferred_from_microbenchmark_results": true
+  }
+}
+
+
