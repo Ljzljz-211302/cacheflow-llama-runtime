@@ -114,6 +114,15 @@ def render_report(
     interval = summary["paired_median_bootstrap_95_ms"]
     device = summary["device"]
     outcome = "passed" if summary["promotion_passed"] else "did not pass"
+    versioned_kernel = "kernel_variant" in summary
+    kernel_pattern = summary.get(
+        "mechanism_kernel_pattern", "cacheflow_paged_decode_fattn_k1"
+    )
+    kernel_variant = summary.get("kernel_variant", "K1")
+    kernel_variant_line = f"- Kernel variant: {kernel_variant}\n" if versioned_kernel else ""
+    mechanism_label = (
+        kernel_pattern if versioned_kernel else "cacheflow_paged_decode_fattn_k1<64>"
+    )
     return f"""# Issue #7 production Paged service experiment
 
 - Protocol: `{summary['protocol_version']}` (`{summary['protocol_sha256']}`)
@@ -125,7 +134,7 @@ def render_report(
 - Paired median bootstrap 95% interval: [{interval[0]:+.3f}, {interval[1]:+.3f}] ms
 - P95 regression: {summary['p95_regression_percent']:+.2f}% (preregistered promotion limit: +{summary['promotion_limit_percent']:.2f}%)
 - Correctness: exact output match in every pair; {summary['production_graph_entries']} production Paged graph entries; {summary['paged_fallbacks']} fallbacks
-- Mechanism replay: {mechanism['kernel_launches']} `cacheflow_paged_decode_fattn_k1<64>` launches (one per model layer); profiler timing is non-primary
+{kernel_variant_line}- Mechanism replay: {mechanism['kernel_launches']} `{mechanism_label}` launches (one per model layer); profiler timing is non-primary
 
 The opt-in production promotion gate **{outcome}**. This result applies only to the preregistered Qwen2.5-0.5B, batch-1, short-context envelope. It is not a long-context, memory-bound, or universal speedup claim.
 """
@@ -201,6 +210,12 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
     promotion_limit = float(
         protocol["acceptance"]["promotion_latency_p95_maximum_regression_percent"]
     )
+    median_not_slower_required = bool(
+        protocol["acceptance"].get("promotion_requires_paired_median_not_slower", False)
+    )
+    promotion_passed = p95_regression <= promotion_limit and (
+        not median_not_slower_required or summarize(effects)["median"] <= 0.0
+    )
     expected_conclusions = {
         "schema_version": 1,
         "protocol_version": protocol["protocol_version"],
@@ -208,7 +223,7 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
         "paired_median_bootstrap_95_ms": bootstrap_interval,
         "p95_regression_percent": p95_regression,
         "promotion_limit_percent": promotion_limit,
-        "promotion_passed": p95_regression <= promotion_limit,
+        "promotion_passed": promotion_passed,
         "correctness_passed": all(
             pair["direct"]["content"] == pair["paged"]["content"]
             for pair in by_pair.values()
@@ -220,6 +235,11 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
             row["paged_fallbacks"] for row in rows if row["action"] == "paged"
         )),
     }
+    if "kernel_variant" in protocol["production_envelope"]:
+        expected_conclusions.update({
+            "kernel_variant": protocol["production_envelope"]["kernel_variant"],
+            "mechanism_kernel_pattern": kernel_pattern,
+        })
     for field, expected in expected_conclusions.items():
         if summary.get(field) != expected:
             raise AssertionError(f"{field} is not derived from raw trials and protocol")
@@ -231,15 +251,18 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
            for field in ("name", "compute_capability")):
         raise AssertionError("artifact device differs from the preregistered device")
     mechanism = json.loads((output / "mechanism.json").read_text(encoding="utf-8"))
+    kernel_pattern = protocol["production_envelope"].get(
+        "mechanism_kernel_pattern", "cacheflow_paged_decode_fattn_k1"
+    )
     reparsed_mechanism = parse_nsys_sqlite(
         output / "profile/production-paged.sqlite",
-        kernel_patterns=("cacheflow_paged_decode_fattn_k1",),
+        kernel_patterns=(kernel_pattern,),
     )
     for field, expected in reparsed_mechanism.items():
         if mechanism.get(field) != expected:
             raise AssertionError(f"mechanism {field} is not derived from the NSYS SQLite")
     if mechanism["kernel_launches"] != 24 or not any(
-        "cacheflow_paged_decode_fattn_k1" in name for name in mechanism["kernel_names"]
+        kernel_pattern in name for name in mechanism["kernel_names"]
     ):
         raise AssertionError("profile does not contain one production Paged kernel per model layer")
     if summary.get("nsys_production_paged_kernel_launches") != mechanism["kernel_launches"]:
@@ -280,6 +303,9 @@ def main() -> None:
         return
 
     protocol = json.loads(args.protocol.read_text(encoding="utf-8"))
+    kernel_pattern = protocol["production_envelope"].get(
+        "mechanism_kernel_pattern", "cacheflow_paged_decode_fattn_k1"
+    )
     pairs = int(protocol["paired_trials"])
     seed = int(protocol["random_seed"])
     device = device_identity()
@@ -352,6 +378,9 @@ def main() -> None:
     effect_summary = summarize(effects)
     p95_regression = (paged_summary["p95"] / direct_summary["p95"] - 1.0) * 100.0
     promotion_limit = float(protocol["acceptance"]["promotion_latency_p95_maximum_regression_percent"])
+    median_not_slower_required = bool(
+        protocol["acceptance"].get("promotion_requires_paired_median_not_slower", False)
+    )
 
     nsys = discover_nsys()
     profile_dir = args.output / "profile"
@@ -384,7 +413,7 @@ def main() -> None:
     if exported.returncode or not sqlite_path.exists():
         raise RuntimeError(f"Nsight Systems export failed: {exported.stderr}")
     mechanism = parse_nsys_sqlite(
-        sqlite_path, kernel_patterns=("cacheflow_paged_decode_fattn_k1",),
+        sqlite_path, kernel_patterns=(kernel_pattern,),
     )
     if mechanism["kernel_launches"] != 24:
         raise AssertionError(f"expected 24 production Paged layer launches, got {mechanism}")
@@ -400,6 +429,8 @@ def main() -> None:
     summary = {
         "schema_version": 1,
         "protocol_version": protocol["protocol_version"],
+        "kernel_variant": protocol["production_envelope"].get("kernel_variant", "K1"),
+        "mechanism_kernel_pattern": kernel_pattern,
         "protocol_sha256": sha256(args.protocol),
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_revision": git_output("rev-parse", "HEAD"),
@@ -415,7 +446,9 @@ def main() -> None:
         "paired_median_bootstrap_95_ms": bootstrap_median_interval(effects, seed),
         "p95_regression_percent": p95_regression,
         "promotion_limit_percent": promotion_limit,
-        "promotion_passed": p95_regression <= promotion_limit,
+        "promotion_passed": p95_regression <= promotion_limit and (
+            not median_not_slower_required or effect_summary["median"] <= 0.0
+        ),
         "correctness_passed": True,
         "production_graph_entries": int(sum(row["paged_calls"] for row in rows if row["action"] == "paged")),
         "paged_fallbacks": int(sum(row["paged_fallbacks"] for row in rows if row["action"] == "paged")),
