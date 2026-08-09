@@ -1,5 +1,5 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>CacheFlow 面试追问题库</title><link rel="stylesheet" href="../assets/course.css"></head><body><main>
-<div class="kicker">Reference · 25 questions</div><h1>推免面试追问题库</h1><p class="lead">先闭卷回答，再展开要点。优秀答案不只给定义，还要连接项目代码、实验与边界。</p>
+<div class="kicker">Reference · 65 questions</div><h1>推免面试追问题库</h1><p class="lead">先闭卷回答，再展开要点。优秀答案不只给定义，还要连接项目代码、实验与边界；遇到新名词先给定义，再讲机制、数据和适用条件。</p>
 <h2>A. 模型与推理</h2>
 <details><summary>1. 为什么 Attention 要除以 √dₖ？</summary><p>若 Q/K 各维近似独立、方差为 1，点积方差随 dₖ 增长。尺度过大会让 softmax 接近 one-hot、梯度区间变差。除以 √dₖ 把点积分布尺度稳定在相近范围。项目连接：它解释模型图，但不是本项目个人实现。</p></details>
 <details><summary>2. KV cache 节省了什么，没节省什么？</summary><p>节省历史 token 在每层的 K/V 投影重算；没有省掉新 query 对历史 K/V 的读取和 attention，也没有消除跨生成 token 的自回归串行依赖。上下文越长，decode 仍可能更慢。</p></details>
@@ -34,6 +34,56 @@
 <details><summary>23. 为什么需要 paired Latin，而非各跑若干次取中位？</summary><p>配对让同一 trial 的共同环境被差值抵消；Latin 轮换策略顺序，降低热机/温度/时间趋势混杂。必须先算 pair effect，再汇总；仍需足够样本和原始数据。</p></details>
 <details><summary>24. 最终 CUDA 因果结果的最强结论是什么？</summary><p>强制策略确实改变决策、prefill 分块和 CUDA KV 中介，并伴随 material Engine/TTFT 恶化；局部 copy/Event 下降未转化为端到端改善。不能据此断言具体 SM/occupancy 根因，也不能外推其他模型/GPU。</p></details>
 <details><summary>25. 如何证明个人贡献不是原仓库？</summary><p>固定上游 commit，以可逆 patch 统计 59 files、+8445/−99 C/C++/CUDA；逐模块展示新 Engine、Scheduler、KV/CUDA、在线策略持久化、控制器、测试和实验。明确上游保留 GGML/GGUF/model graph/sampling/HTTP，不声称重写 llama.cpp。</p></details>
+
+<h2>F. D1 / D2 / D3 学习策略</h2>
+<details><summary>26. D1 是什么，为什么没有切换？</summary><p>D1 是对每个动作建立全局线性 Ridge 成本模型，并用不确定性下的保守收益门决定是否偏离 H0。它没有切换，表示所有候选的可信收益都未覆盖 margin；安全门生效，但全局线性关系不足以找到局部获益区，不应包装成“学习成功”。</p></details>
+<details><summary>27. D2 的 piecewise 模型解决什么？</summary><p>Piecewise 表示把输入空间分段后分别拟合。D2 以 512-token context 区间建模，让不同长度不必共享同一斜率；但 v1.5 calibration offset 为 7.446 ms，保守估计仍不允许切换，说明分段表达力提高不等于校准已可靠。</p></details>
+<details><summary>28. D3 的风险门禁与安全 margin 有什么区别？</summary><p>Margin 是单次 replay 选择必须跨过的固定安全间隔：成本差上界加 0.25 ms 仍小于 0 才切换。风险门禁在整批留出 replay 完成后验收 harmful rate、gain/harm、P95 和 CI；当前实现没有会逐次扣减的在线 harm budget。若 canary 要增加累计停止预算，那是下一阶段的新状态。</p></details>
+<details><summary>29. Regret 是什么，为什么不用普通准确率？</summary><p>Regret 是所选动作成本减去同一 workload 可行动作中的最低成本。分类准确率把差 0.01 ms 与差 10 ms 的错误同等计数，而 regret 按工程代价加权，更符合调度目标。</p></details>
+<details><summary>30. D3 最新结果如何完整口述？</summary><p>120 traces=60 fit+20 calibration+40 evaluation，共 600 observations。评估中 H0/D3 累计 regret 为 42.590/2.082 ms，下降 95.1%；P95 为 3.169/0 ms。D3 在 80 个 eligible decisions 中切换 24 次，1 次 harmful，总 gain/harm 为 41.480/0.972 ms。</p></details>
+<details><summary>31. 为什么 harmful rate 有 1.25% 和 4.17% 两个值？</summary><p>协议把成本超过同 workload 的 H0 成本 3% 定义为 harmful，不把微小抖动算成伤害。1/80=1.25% 以全部 eligible decisions 为分母，回答所有决策机会中多常有害；1/24=4.17% 以实际 switches 为分母，回答一旦偏离 H0 后多常有害。报告比例必须同时给事件数和分母。</p></details>
+<details><summary>32. 材料中的 5% 能否叫 95% 安全保证？</summary><p>不能。5% 是实验前注册的 harmful-rate 晋级阈值，不是观测比例；实际观测是 1/80=1.25% 或 1/24=4.17%。该阈值不是总体 harmful rate 的 95% 置信上界，也不是 SLO。要做概率上界需预先确定二项事件、分母和区间方法，并满足抽样假设。</p></details>
+<details><summary>33. D3 的 trace-cluster CI 表示什么？</summary><p>以完整 trace 为 cluster 做 bootstrap，估计 D3 与 H0 的 mean-regret delta；95% CI 为 [−0.7232,−0.3069] ms，负值表示当前固定回放中 D3 regret 更低。它不是 95% 请求延迟区间，也不是线上因果效应。</p></details>
+<details><summary>34. 为什么训练/校准/评估要分开？</summary><p>训练集拟合参数，校准集选择 offset、margin 或阈值，评估集只做最终一次无偏比较。若反复看评估结果调阈值，评估集就泄漏成训练信息，漂亮数字会过拟合这批 traces。</p></details>
+<details><summary>35. H0 fallback 为什么是算法的一部分？</summary><p>H0 是证据不足、能力不支持、预算耗尽或运行异常时的确定安全动作。生产策略不只定义“何时优化”，还必须定义“何时不优化”和如何恢复；fail closed 是决策规则的一部分，不是异常补丁。</p></details>
+
+<h2>G. 实验设计、统计与因果边界</h2>
+<details><summary>36. Formal Trial Pair 的最低条件是什么？</summary><p>同一实验单位上的处理/对照必须由预注册协议配成一对，并绑定输入、顺序、进程、请求、指标和原始证据；先算 pair 内效应再汇总。仅按相同标签拼两行不自动成为 formal pair。</p></details>
+<details><summary>37. Matched-workload replay 与线上 A/B 的差别？</summary><p>Replay 在已采集的各动作 observation 上离线模拟选择；线上 A/B 让策略真实决定生产或 canary 请求并随机分配。Replay 可比较规则但不捕获策略改变后续队列/缓存状态的反馈。</p></details>
+<details><summary>38. action×process confounding 是什么？</summary><p>若动作 A 总由进程 1 执行、动作 B 总由进程 2 执行，进程热身、内存布局或 GPU 状态与动作共同变化，观察差无法唯一归因于动作。当前 D3 正有此边界，需同进程交替/随机执行缓解。</p></details>
+<details><summary>39. 为什么按 trace cluster bootstrap？</summary><p>同一 trace 内多个动作 observation 共享请求结构，彼此相关。逐行重采样会伪造独立样本并低估不确定性；按完整 trace 重采样保留组内相关关系。</p></details>
+<details><summary>40. P95 为 0 是否意味着没有任何伤害？</summary><p>不意味着。P95 regret 为 0 表示至少 95% 经验分布不超过 0；仍可能有少量正 regret，D3 就有 1 次 harmful。必须同时看 max、事件数、累计 harm 和原始行。</p></details>
+<details><summary>41. 置信区间不跨 0 能否证明因果？</summary><p>不能。它只说明在估计器与抽样假设下方向较稳定；若存在混杂、选择偏差或协议不是干预实验，再窄的区间也只是精确估计了有偏对象。</p></details>
+<details><summary>42. 什么是 profiler effect？</summary><p>Profiler 会插桩、收集事件和改变同步/调度，使被测程序本身变慢或时序改变。主性能结果应来自 no-profiler trials，NSYS/NCU replay 用于解释机制，两者不能混成一个 latency 估计。</p></details>
+<details><summary>43. 为什么 Engine execute 与 TTFT 可能反向？</summary><p>execute 是阶段累计时间，TTFT 还包含请求到达、队列、分块轮次、batch 竞争和 socket 首字节。一个阶段总量降低不保证某请求关键路径缩短，尤其当调度改变了等待结构。</p></details>
+<details><summary>44. 怎样设计 same-process monitored canary？</summary><p>在同一长驻进程中对符合条件的请求随机或按平衡序列选择 H0/D3，限制流量与 harm budget，记录选择概率、上下文、动作、队列/KV 状态和结果；达到停止阈值立即回退，并按请求/会话 cluster 分析。</p></details>
+<details><summary>45. 多重比较为什么危险？</summary><p>尝试大量指标、切片和阈值后只报告最好结果，即使无真实效应也容易出现偶然亮点。应预注册主指标和 promotion gate，其他结果标为探索性，并保留完整数据。</p></details>
+
+<h2>H. Paged Attention 与算子细节</h2>
+<details><summary>46. Paged Attention 的“页”是什么？</summary><p>它是 KV cache 的固定 token block，不是操作系统虚拟内存页。逻辑 token 通过 block table 找到物理 KV block，从而允许非连续分配、共享和 COW。</p></details>
+<details><summary>47. online softmax 为什么只需有限状态？</summary><p>扫描分块 logits 时维护当前最大值 m、按新最大值重缩放后的指数和 l、以及同样重缩放的加权 value 累积 o。每合并一块都先把旧状态乘 exp(m_old−m_new)，因此无需保存全部 logits，且数值稳定。</p></details>
+<details><summary>48. causal mask 与最后一页 tail 如何处理？</summary><p>每个 query 只能访问不晚于当前位置的 key；最后物理页可能未填满，只允许 context length 以内的 lane 参与 max、sum 与 value 累积。越界值即使内存可读也必须被 mask。</p></details>
+<details><summary>49. K1、K2、K3 分别是什么？</summary><p>K1 为一个 CTA 负责一个 query head，结构简单、易验证；K2 利用 GQA 中多个 query heads 共享 KV head，协同加载减少重复读取；K3 把超长 KV 维度切给多个 CTA 后合并 partial softmax，提高并行度但增加合并开销。</p></details>
+<details><summary>50. 为什么真实 Qwen2.5-0.5B 不是 D128？</summary><p>当前 0.5B 几何是 24 层、14 query heads、2 KV heads、head dimension 64，GQA ratio 7。D128 的 model-faithful 例子是 Qwen2.5-7B 的 28Q/4KV/D128；把合成 D128 benchmark 描述成 0.5B 会造成模型事实错误。</p></details>
+<details><summary>51. FlashInfer 为什么不是当前 ratio-7 的直接 oracle？</summary><p>固定依赖版本的 CUDA-core 专门化只实例化若干 GQA ratio，未含 7。可以用数学 CPU/框架 reference 做正确性 oracle，或新增受验证的 ratio-7 specialization；不能因库名相同就宣称 drop-in 对照。</p></details>
+<details><summary>52. 为什么正确 kernel 仍可能更慢？</summary><p>page-table 寻址、低 occupancy、重复 KV 读取、同步和 launch 固定成本可能超过省下的 remap；短 context 并行度不足，长 context 又可能带宽受限。正确性是上线必要条件，promotion 还需分 regime 性能门。</p></details>
+<details><summary>53. NCU 失败时还能声称什么？</summary><p>若因权限得到 ERR_NVGPUCTRPERM，就不能声称 occupancy、DRAM throughput 或 cache hit 根因。仍可报告 no-profiler latency 与 NSYS 可观察的 launch/copy/timeline，并把硬件计数器解释标为待验证假设。</p></details>
+
+<h2>I. 生产可靠性与可观测性</h2>
+<details><summary>54. 为什么 capability gate 必须在评分前？</summary><p>不支持的动作没有合法成本语义，让模型给它打高分后再失败会污染反馈并伤害 SLO。应先按模型几何、backend、内存、alignment 和资源预算构造 feasible set，再只在其中比较。</p></details>
+<details><summary>55. 事务式 Engine 如何处理部分失败？</summary><p>prepare/plan 阶段不发布外部状态；execute 产生带 completion 的结果；commit 只有在全部不变量满足后更新 slot/block 映射。失败走 abort，释放 reservation/lease 并保留旧映射，避免半提交。</p></details>
+<details><summary>56. 指标为什么区分 counter、gauge、histogram？</summary><p>Counter 表示累计事件且只增，Gauge 表示当前状态可升降，Histogram 保存分桶计数/总数/总和。对 gauge 做 phase 差值或把最后值当事件次数都会产生错误结论。</p></details>
+<details><summary>57. 如何验证证据没有被手工改摘要？</summary><p>manifest 绑定原始树和派生文件 hash；validator 从 CSV、evidence、trace/SQLite 独立重算主结果，并比较 trial/request/PID/计数器与 causal links。仅校验 JSON 格式或 passed=true 不够。</p></details>
+<details><summary>58. OOM 时为何不能盲目 swap？</summary><p>swap 需要 pinned host/file 容量、传输时间和可恢复句柄；传输可能比重算更慢并阻塞关键 stream。策略应检查资源与 SLO，必要时 preempt/recompute/fallback，所有失败都要回滚 reservation。</p></details>
+<details><summary>59. 用户取消怎样传播到 GPU 工作？</summary><p>HTTP/SSE 断开应标记 request cancelled，调度器停止新增工作；已提交 kernel 通常不能任意撤销，需等待 event 后安全释放 lease。取消语义必须避免响应已断却持续占槽和 KV。</p></details>
+<details><summary>60. 线上 drift 触发后怎么做？</summary><p>停止非基线动作、进入 cooldown、保存触发上下文和模型版本，按 action/backend 重置或降权统计，再用受限 canary 恢复。单次慢请求不足以判 drift，应看成熟模型的连续标准化残差或执行失败。</p></details>
+
+<h2>J. 架构、贡献与开放追问</h2>
+<details><summary>61. 为什么这是 AI Infra 而不是普通 Agent 项目？</summary><p>核心改动位于模型 serving 热路径：iteration scheduler、KV 内存生命周期、GPU kernel/stream/event、Paged Attention、在线动作策略与端到端观测。它优化“模型怎样被执行”，而不是只调用模型 API 编排工具。</p></details>
+<details><summary>62. 最大创新点如何只用一句话表达？</summary><p>把 KV 内存动作、分页算子和在线学习统一进一个 evidence-gated runtime：先证明可行，再预测成本、限制风险，最后用可重算证据决定是否 promotion。</p></details>
+<details><summary>63. 如果面试官说“都是已有论文思想”怎么办？</summary><p>承认 paging、continuous batching、Ridge 等思想来源，再说明个人问题在于把它们接入固定 llama.cpp 热路径、定义不变量和失败回退、自研受限算子、建立统一动作 cost boundary，并产出可篡改检测的实验制品。科研贡献可以是新系统组合与实证发现，不等于宣称原创基础理论。</p></details>
+<details><summary>64. 为什么负结果也能体现能力？</summary><p>负结果只有在假设、对照、阈值、原始数据和后续决策完整时才有价值。Paged K1 中长 context 更慢促使方向转向 GQA reuse；promotion gate 阻止不成熟快路径默认上线，这体现系统判断而非“失败美化”。</p></details>
+<details><summary>65. 下一步最有研究价值的工作是什么？</summary><p>先做 same-process monitored canary，消除 D3 最大的 action×process 混杂并观察策略对后续队列/KV 状态的反馈；算子侧再做 ratio-7 GQA reuse K2，并用正确性 oracle、no-profiler 延迟、NSYS 与有权限时 NCU 分层验收。</p></details>
 
 <div class="task"><strong>模拟方法：</strong>让同伴随机报题号，你必须在 90 秒内按“结论—原理—项目证据—边界”回答。若只能复述本页文字，记 1 分；能画公式/状态并指出源码，记 2 分；能接受反例并设计验证，记 3 分。</div>
 <nav class="nav"><a href="formulas-and-code-map.html">← 公式与代码地图</a><a href="../lessons/0008-interview-defense-lab.html">答辩实验室 →</a></nav>

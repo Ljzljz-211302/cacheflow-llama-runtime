@@ -16,6 +16,13 @@
 <p>这比“某一时刻最大置信度”强，因为门禁同时要求连续 wave 和终态仍有置信；但它仍只证明当前模型/硬件/workload。分布切换由结构条件直接回退，并未触发统计 drift，这同样是正确结果。</p>
 <div class="task"><strong>手算练习：</strong>设 upstream 预测 20±3ms，CacheFlow 14±2ms，margin=1ms，判断是否启用。再把 CacheFlow 半径改成 6ms，解释为何平均预测仍更好却必须回退。</div>
 <div class="quiz"><h3>主动回忆</h3><p>为什么一次 SLO miss 不应立刻 reset 模型？</p><button data-answer="true">高成本可能已被模型准确预测</button><button data-answer="false">服务目标与反馈成本完全无关</button><button data-answer="false">岭回归模型无法处理较大数值</button><div class="feedback"></div><details><summary>解析</summary>drift 关心预测关系失效，即成熟模型的连续大残差；SLO miss 会加 penalty，但可能早已被模型预测。</details></div>
+<h2>7. 从 D1 到 D3：学习策略如何变成可控决策</h2>
+<p><strong>D1</strong> 是全局线性 Ridge，它给每个动作估计成本和不确定性。它在当前回放中保持安全但不切换：这说明“没有错误启用”，不说明“已经学到收益”。<strong>D2</strong> 把 context length 按 512 token 分段，使不同长度区间能有不同参数；但校准 offset 为 7.446 ms，保守收益仍不足，所以仍不切换。</p>
+<p><strong>D3</strong> 新增风险约束的离线晋级规则。单次 replay 选择仍只比较分段 Ridge 的成本差上界：上界加 0.25 ms margin 小于 0 才偏离 H0；它不会在每次选择时扣减“剩余 harm budget”。完成整批留出 replay 后，策略还必须同时满足 harmful empirical rate 不超过 5%、累计 gain 大于累计 harm、P95 不劣于 H0 和 mean-regret delta 区间上界小于 0，才获准进入下一阶段 canary。</p>
+<div class="formula">regret<sub>i</sub> = cost(chosen<sub>i</sub>) − min<sub>a</sub> cost(a,i)<br>harm<sub>i</sub> = max(0, cost(chosen<sub>i</sub>) − cost(H0,i))</div>
+<p>v1.6 固定回放使用 60 条 fit、20 条 calibration、40 条 evaluation trace，共 600 个原始动作观测。H0 累计 regret 42.590 ms，D3 为 2.082 ms，下降 95.1%；D3 在 80 个 eligible decisions 中切换 24 次，仅 1 次 harmful。这里 harmful 定义为动作成本超过同 workload 的 H0 成本 3%，不是任意微小变慢。按 eligible 分母为 1.25%，按 switch 分母为 4.17%，两种比例回答不同问题，不能混用。</p>
+<div class="callout"><strong>为什么仍不能说“线上有效”？</strong>回放中的各动作来自独立 fixed-mode 进程，动作与进程状态可能混杂；它也没有真的让 D3 在线改变生产请求。当前最强结论是：独立固定数据上，D3 比 H0 更接近 oracle，并且伤害受控，值得进入同进程 monitored canary。</div>
+<div class="task"><strong>口述练习：</strong>依次解释 D1 为什么不切换、D2 为什么仍不切换、D3 新增了什么状态；最后分别用 1/80 与 1/24 解释 harmful rate。</div>
 <p class="source">主阅读：<a href="https://arxiv.org/abs/1003.0146">Li et al., Contextual Bandit / LinUCB</a>。项目实现：<code>server-benefit-policy.*</code>、<code>test-benefit-policy.cpp</code>。</p>
 <nav class="nav"><a href="0004-cuda-kernels-streams-correctness.html">← CUDA</a><a href="0006-adaptive-prefill-and-speculation.html">下一课：Adaptive 算法 →</a></nav><p>如果矩阵公式不熟，请让学习助手用二维数值例子带你完整算一次 A、b、预测和置信半径。</p>
 </main></body></html>

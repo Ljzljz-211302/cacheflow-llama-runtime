@@ -224,3 +224,37 @@ CUDA mixed workload 缺少 backend-aware policy guard；Hybrid/Recurrent 只有 
 - 不说 CacheFlow 在 CUDA workload 普遍更快；
 - 不用单次 trial 或微基准代替端到端结论；
 - 最终 `verify.ps1 -Full` 未通过前，不说项目已严格验收。
+
+## 最新统一动作研究线：D1 → D2 → D3
+
+这部分的核心问题是：面对 H0、Remap、Paged、Swap 等可行动作，系统如何在收益不确定时决定是否偏离安全基线。它不是文本分类，而是带工程代价的成本敏感决策。
+
+### 三个版本分别解决什么
+
+- **D1（global linear Ridge）**：用全局线性关系预测每个动作成本，以正则化缓解少样本病态，再用置信 margin 阻止证据不足的切换。结果是安全但没有切换，说明“一条全局直线”未找到可信局部收益区。
+- **D2（512-token piecewise）**：按 context 区间分别建模，让不同长度拥有不同斜率。但 v1.5 calibration offset 为 7.446 ms，偏差仍吃掉保守收益，仍未产生切换。
+- **D3（risk-budgeted evaluation）**：单次 replay 选择仍只依据分段 Ridge 的成本差上界与 0.25 ms margin；“risk-budgeted”指整批留出评估还必须满足 harmful rate 不超过 5%、累计 gain 大于累计 harm 等晋级门禁。当前实现不维护逐决策扣减的在线 harm budget。
+
+Regret 定义为同一固定 workload 上“所选动作成本减 oracle 最低可行成本”。它比动作分类准确率更适合系统：错 0.01 ms 与错 10 ms 不应获得同样惩罚。
+
+### 最新数据必须按同一口径回答
+
+- 120 traces：60 fit + 20 calibration + 40 evaluation，共 600 raw observations；
+- H0 cumulative regret 42.590 ms，D3 2.082 ms，下降 95.1%；
+- H0 P95 regret 3.169 ms，D3 P95 0；
+- D3 switches 24/80，harmful 1 次；
+- harmful/eligible = 1/80 = 1.25%，harmful/switch = 1/24 = 4.17%；
+- total gain 41.480 ms，total harm 0.972 ms；
+- trace-cluster mean-regret delta 95% CI 为 [-0.7232, -0.3069] ms。
+
+这里的 harmful 不是任意微小变慢，而是所选动作成本超过同一 workload 的 H0 成本 3%，阈值在协议中预注册。
+
+材料中的 5% 是实验前注册的 harmful-rate 晋级阈值，不是观测结果；实际 replay 比例是按 eligible decisions 的 1.25% 和按 switches 的 4.17%。该阈值没有构造总体 harmful rate 的 95% 置信上界。CI 的抽样单位是 trace cluster，估计对象是 mean regret delta，也不能解释为“95% 请求都提速”。
+
+### 当前最强结论与下一步
+
+可以说：在固定 matched-workload 独立评估上，D3 比 H0 更接近 oracle，并在有限切换下显著减少累计 regret，观察到的伤害较小。
+
+不能说：已经通过线上 A/B、证明生产因果提速或满足 formal Trial Pair。不同动作 observation 来自独立 fixed-mode 进程，动作与进程状态绑定，存在 action×process confounding。
+
+下一步是同进程 monitored canary：在单一长驻进程内对 eligible 请求随机或平衡交替 H0/D3，限制流量，并为 canary 新增明确的累计 harm 停止预算；记录选择概率、上下文、动作、队列/KV 状态和端到端结果，触发停止条件立即回退。这个在线停止预算是下一步设计，不是当前 D3 replay 已有状态。

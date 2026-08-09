@@ -349,7 +349,7 @@ final output = o / l</div>
 <tr><td>Remap 机制</td><td>方法隔离 NSYS</td><td>scalar/vector 每 regime 均 10/10 launches</td><td>收益不是减少 launch 数，而是单次访问/指令路径。</td></tr>
 <tr><td>Paged H3</td><td>9 regimes ×20 pairs×2 methods=360</td><td>oracle max error 3.6e-8；17-token +22.87% 但区间 [0,47.08]；中长 context 10.41%–13.05% slower</td><td>K1 数学正确；短跨页有信号，K2 GQA reuse 是下一优化方向。</td></tr>
 <tr><td>Paged production H7</td><td>10 AB/BA，17-token 跨页</td><td>10 graph entries、0 fallback、24 NSYS layer launches；Direct/Paged P95 27.354/29.210 ms</td><td>真实生产接入和正确性成立；promotion gate 正常阻止未达阈值路径成为默认。</td></tr>
-<tr><td>统一动作 H4</td><td>40 traces、200 observations</td><td>H0/A1/L1 regret 0/1.953/15.543 ms；T1 0/1.516/5.506 ms，harmful 0</td><td>本次 matched-workload replay 中，冻结分桶表的 regret 低于 H0；L1 因置信门控未切换。</td></tr>
+<tr><td>统一动作 H4 / D3</td><td>120 traces：60 fit + 20 calibration + 40 evaluation；600 raw observations</td><td>H0 累计 regret 42.590 ms，D3 2.082 ms，下降 95.1%；D3 切换 24/80，harmful 1 次</td><td>固定 matched-workload replay 支持“通过离线风险晋级门的策略更会少犯代价大的错”；action 与独立进程绑定，尚不是线上因果证明。</td></tr>
 <tr><td>chooser overhead</td><td>5 regimes、500 万 choose</td><td>P99 1 μs，ratio P99 0.0644%，0 allocation</td><td>决策模块满足热路径预算。</td></tr>
 <tr><td>短期 Benefit</td><td>8 backend×mode treatments，16 trials，两套 Williams block</td><td>CPU/CUDA oracle regret 5.04%/10.52%；P99 最坏 2/5 μs</td><td>控制器在 50 μs 预算内保守选择。</td></tr>
 <tr><td>长期 Benefit</td><td>53 waves，cold→stable→shift</td><td>125 positive lower bound，最长 streak 35；shift 时 3 safety fallback</td><td>展示在线学习、稳定启用和漂移回退闭环。</td></tr>
@@ -522,7 +522,7 @@ kv_index=(((2×16+0)×2+1)×64+dim)</div>
 <ul>
 <li>Remap：<code>llama-kv-cache*</code>/CUDA descriptor → overlap 保持 snapshot 语义 → 160 no-profiler rows + 4 traces → aligned-1 +57.10%。</li>
 <li>Paged：<code>llama-paged-decode-cuda.cu</code> → page/table/context 在 mutation 前校验 → 360 micro observations + 10 production pairs → oracle error 3.6e-8、10 entry/0 fallback。</li>
-<li>Action policy：<code>server-kv-action-policy.*</code> → infeasible action 永不参与排序 → 200 observations + 5M choose → P99 1 μs、0 allocation。</li>
+<li>Action policy：<code>server-kv-action-policy.*</code> → infeasible action 永不参与排序、D3 用成本差上界与 margin 选择并接受整批离线风险门禁 → 600 raw observations + 5M choose → H0/D3 regret 42.590/2.082 ms，choose P99 1 μs、0 allocation。</li>
 <li>Benefit policy：<code>server-benefit-policy.*</code> → 低置信 fail closed、backend 状态隔离 → 16 trials/8 treatments → regret 5.04%/10.52%、P99 2/5 μs。</li>
 </ul>
 
@@ -539,6 +539,15 @@ kv_index=(((2×16+0)×2+1)×64+dim)</div>
 <div class="qa"><strong>Q34：SSE 是什么？</strong><p>Server-Sent Events 是服务器通过一个 HTTP 长连接持续向客户端发送文本事件，适合 token 流。客户端断开要传播 cancellation，避免后台继续占 GPU。</p></div>
 <div class="qa"><strong>Q35：AI Infra 体现在哪里？</strong><p>它体现在模型执行周围的基础设施：请求调度、KV 容量/生命周期、GPU kernel、CPU-GPU 异步、性能观测、在线决策与故障回退。Paged Attention 又直接修改模型算子的访存与 softmax，因此兼有模型侧算法。</p></div>
 <div class="qa"><strong>Q36：如果只让你保留一个亮点？</strong><p>保留“统一的 evidence-gated KV action runtime”：它把系统状态、CUDA/Attention 动作、在线 Ridge 和可复核实验连起来。Remap 的数据是强证据，Paged 的生产 gate 展示判断力，二者共同支撑完整故事。</p></div>
+
+<h3>11.19 D1 → D2 → D3：为什么模型越来越复杂，却仍然要 fail closed</h3>
+<p>这一条研究线解决的问题不是“预测哪个动作最快”这么简单，而是：<strong>在不同请求状态下，是否有足够证据承担切换动作的风险</strong>。一个动作即使平均更快，只要偶尔造成很大的尾延迟伤害，也可能不适合生产默认选择。</p>
+<p><strong>D1</strong> 是全局线性 Ridge：它假设特征变化对成本的影响近似线性，并用正则化稳定少样本估计。真实回放中它保持安全，但没有产生切换，说明统一直线无法在不确定性门槛下识别可放心启用的局部区域。<strong>D2</strong> 按 512-token 区间建立 piecewise 模型，让短、中、长 context 能有不同斜率；但 v1.5 中校准 offset 达 7.446 ms，保守门仍然不切换。这不是“模型没运行”，而是估计偏差仍大于可证明收益。</p>
+<p><strong>D3</strong> 不再只问点预测谁更小：单次 replay 中，候选动作的成本差上界加安全 margin 后仍小于 0 才切换；证据不足就选择 H0。完成整批留出 replay 后，再检查 5% harmful-rate、gain&gt;harm、P95 和 CI 等晋级门。当前选择器没有逐决策扣减的在线 harm budget。这里 <strong>regret</strong> 指所选动作成本减去同一固定 workload 上 oracle 最低成本；<strong>harmful decision</strong> 指所选动作成本超过 H0 成本 3% 的决策，不是任意微小变慢。</p>
+<div class="formula">regret = cost(chosen) − min<sub>a∈feasible</sub> cost(a)<br>switch if upper_delta + 0.25 ms &lt; 0<br>promote only if held-out harmful_rate ≤ 5% and total_gain &gt; total_harm</div>
+<p>v1.6 固定了 120 条 trace：60 条拟合、20 条校准、40 条独立评估，共 600 条原始 observation。评估集包含 80 个可比较决策：H0 累计 regret 42.590 ms，D3 为 2.082 ms，下降 95.1%；H0 P95 regret 3.169 ms，D3 为 0；D3 实际切换 24 次，其中 1 次 harmful。总收益 41.480 ms、总伤害 0.972 ms。</p>
+<p>“harmful rate”必须带分母：实际观测按全部 eligible decisions 是 1/80=1.25%，按实际 switches 是 1/24=4.17%。材料中的 5% 是实验前注册的<strong>晋级阈值</strong>，不是第三种观测比例，也不是总体 harmful rate 的 95% 置信上界。matched-workload 的 trace-cluster mean-regret delta 95% CI 为 [−0.7232, −0.3069] ms；区间对象是按 trace 成组重采样的平均 regret 差，而不是单次请求延迟，更不是线上人口效应。</p>
+<div class="callout danger"><strong>证据边界：</strong>四个动作的成本来自独立 fixed-mode 进程，动作与进程身份绑定，因此可能存在 action×process 混杂。D3 结果足以支持进入“同进程 monitored canary”，但不能写成生产因果提速、线上 A/B 或已满足 Trial Pair。下一步是在同一长驻进程内随机或交替执行动作，记录每次策略版本、状态、选择概率和端到端结果。</div>
 
 <h2 id="whiteboard">12. 白板、代码地图与最后速记</h2>
 <h3>12.1 五张必画白板</h3>
@@ -569,6 +578,8 @@ H2 aligned-1：+57.10%，CI [38.51,57.14]；launch 10/10
 Paged：360 observations；oracle max error 3.6e-8
 H7：10 production entries，0 fallback，24 layer launches
 Chooser：5,000,000 choices，P99 1μs，0 allocation，ratio 0.0644%
+D3：120 traces / 600 observations；H0/D3 regret 42.590/2.082ms
+D3：24/80 switches；1 harmful；trace-cluster CI [-0.7232,-0.3069]ms
 Benefit：16 trials，8 treatments；regret CPU/CUDA 5.04/10.52%；P99 2/5μs
 Long online：53 waves；125 positive lower bound；streak 35；shift fallback 3
 应用：456 cached tokens；19 chunks；6 kernels；5,603,330 vector bytes
