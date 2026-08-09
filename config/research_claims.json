@@ -187,7 +187,7 @@
         "changing action availability",
         "backend and context-bucket distribution"
       ],
-      "baselines": ["kv-action-h0", "kv-action-a1", "kv-action-t1", "kv-action-l1", "kv-action-d1", "kv-action-d2"],
+      "baselines": ["kv-action-h0", "kv-action-a1", "kv-action-t1", "kv-action-l1", "kv-action-d1", "kv-action-d2", "kv-action-d3"],
       "mechanism": "No single action minimizes cost across copy legality, bytes, fragmentation, memory pressure, and decode work; an uncertainty-aware policy should choose only when predicted benefit exceeds risk and overhead.",
       "falsification": [
         "The policy exceeds preregistered paired-regret or upstream-regression gates.",
@@ -200,21 +200,21 @@
         "docs/experiment-limitations.md",
         "docs/research/primary-source-foundations.md",
         "docs/research/unified-action-cost-model.md",
-        "results/research/h4-kv-action-v1.5.0/manifest.json",
-        "results/research/h4-kv-action-v1.5.0/report.json"
+        "results/research/h4-kv-action-v1.6.0/manifest.json",
+        "results/research/h4-kv-action-v1.6.0/report.json"
       ],
       "observed_results": [
         "The v1.0.0 replay is superseded because it used client HTTP round-trip latency instead of the registered internal complete-action boundary and evaluated a different Ridge contract; it remains under results/research/superseded for audit only.",
         "The v1.1.0 replay is also superseded because it used synthetic canonical model inputs, resampled decisions rather than trace clusters, lacked preregistered balanced collection order, and reported CUDA synchronization from a literal rather than a source-bound audit.",
         "The v1.2.0 replay is superseded because it did not retain raw Prometheus evidence, reused one Recompute observation across two regimes, ignored physical observation order in Ridge replay, and described a lexical synchronization audit too strongly.",
-        "The v1.5.0 CUDA matched-workload replay collected 120 new trace-isolated groups, split chronologically into 60 fit, 20 one-sided calibration, and 40 evaluation traces, and hash-bound 600 raw Prometheus/response observations.",
-        "H0, A1, L1, D1, and the preregistered 512-token piecewise D2 each recorded median/P95/cumulative regret of 0/3.297/44.958 ms with zero harmful decisions. D2 made no switch because its low-context Recompute calibration offset was 7.446 ms.",
-        "Offline T1 recorded median/P95/cumulative regret of 0/1.763/23.138 ms; its paired trace-cluster mean-regret delta versus H0 had a 10,000-resample 95% CI of -0.5216 to -0.0663 ms, but three of 80 decisions were harmful and therefore T1 failed promotion.",
-        "The D2 improvement seen only when replaying v1.4 development evidence was not reproduced as a safe switch on fresh v1.5 evaluation data and is not reported as a confirmatory improvement.",
-        "The v1.5 overhead benchmark recorded p99 0.500 us, decision/action ratio p99 0.0875%, and zero heap allocations. A hash-bound lexical audit found no direct CUDA synchronization symbol or backend include in the policy module; it does not prove runtime indirect synchronization is absent."
+        "The v1.6.0 CUDA matched-workload replay collected 120 new trace-isolated groups with new collection and bootstrap seeds, split chronologically into 60 fit, 20 calibration, and 40 evaluation traces, and hash-bound 600 raw Prometheus/response observations.",
+        "Risk-budgeted D3 made 24 of 80 held-out decisions away from H0. Its cumulative regret was 2.082 ms versus H0's 42.590 ms, a 95.1% reduction; P95 regret was 0 versus 3.169 ms; and the paired trace-cluster mean-regret delta 95% CI was -0.7232 to -0.3069 ms.",
+        "D3 had one harmful decision (1.25%), below the preregistered 5% budget. Its 41.480 ms total measured gain exceeded 0.972 ms total measured harm, so every v1.6 acceptance gate passed.",
+        "D1 and D2 made no held-out switch. T1 reached 18.061 ms cumulative regret with one harmful decision. The v1.4 and v1.5 negative results remain retained and are not overwritten by v1.6.",
+        "The v1.6 overhead benchmark recorded p99 0.900 us, decision/action ratio p99 0.0874%, and zero heap allocations on the existing bounded production chooser seam. D3 remains offline and requires a separately monitored canary before online enablement."
       ],
       "scope_limits": [
-        "The unified policy currently executes H0 and runs per-action Ridge in shadow; the held-out run did not justify active L1 selection.",
+        "The unified policy currently executes H0; v1.6 justifies a monitored D3 canary but does not silently enable D3 online.",
         "Issue #6 production-complete evidence covers Direct, CUDA-managed pinned-host swap, transactional host swap, and Recompute. Issue #7 separately added real Remap and a restricted Paged llama_decode adapter without rewriting the Issue #6 replay.",
         "No reinforcement-learning claim",
         "Held-out evaluation is restricted to the available single-GPU workload matrix"

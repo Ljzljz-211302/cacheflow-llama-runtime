@@ -31,3 +31,5 @@ v1.5 必须重新采集 trace，并同时满足：至少一次留出切换；配
 ## v1.6 风险预算扩展
 
 v1.5 证明了 D2 的“harmful rate 不高于 H0”与 95% 单侧残差门禁会在观测噪声下拒绝全部动作：H0 和任何非基线策略不同，H0 相对自身不可能被标记 harmful，因此该条件实际要求候选零次负优化。D3 保留 512-token 分段、Ridge 半径和 H0 回退，但用 calibration residual 的中位数修正系统偏差，并显式预注册 5% harmful-rate budget。它仍须同时满足 paired CI 上界小于 0、P95 不高于 H0、累计正收益大于累计负收益。该设计优化的是有风险约束的期望完整动作成本，不声称保证每个请求都加速。
+
+v1.6 的全新留出数据通过了全部预注册门禁：D3 产生 24 次切换，累计 regret 从 42.590 ms 降至 2.082 ms，P95 从 3.169 ms 降至 0，paired trace-cluster 95% CI 为 [-0.7232, -0.3069] ms；1/80 harmful decision 位于 5% 预算内，41.480 ms 累计收益覆盖 0.972 ms 累计损失。该结论的边界是单模型、单 GPU、matched-workload 离线 replay；生产上线仍需独立 canary。
