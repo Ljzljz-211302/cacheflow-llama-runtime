@@ -9,7 +9,7 @@
 </head>
 <body><main>
 <div class="kicker">CacheFlow Runtime · Interview Handbook · 2026-08-09</div>
-<h1>只读这一份：从基础原理到项目深挖</h1>
+<h1>只读这一份：用一条请求讲透 CacheFlow Runtime</h1>
 <p class="lead">这不是名词表，而是一条可以完整复述的因果链：大模型逐 token（模型处理文本时使用的整数片段）生成导致 KV Cache（保存各层历史 Key/Value、避免重复计算的缓存）持续增长；缓存增长带来容量、碎片和搬运问题；项目用分块管理、GPU（擅长大规模并行计算的图形处理器）算子与在线决策解决这些问题；最后用配对实验（同一条件分别运行基线和候选）与置信区间（效果估计的不确定范围）判断优化是否值得进入默认路径。</p>
 
 <details open><summary><strong>开场会出现的核心词：零基础先读这里</strong></summary>
@@ -22,6 +22,7 @@
 
 <h2 id="toc">目录与使用方法</h2>
 <ol>
+  <li><a href="#story">先看懂整条故事：问题如何一步步逼出六个模块</a></li>
   <li><a href="#pitch">30 秒、3 分钟与简历逐条陈述</a></li>
   <li><a href="#foundation">从零理解大模型推理</a></li>
   <li><a href="#architecture">项目整体架构与一次请求</a></li>
@@ -36,6 +37,75 @@
   <li><a href="#whiteboard">白板推导、代码定位与速记</a></li>
 </ol>
 <p>第一次阅读按顺序；复习时先闭卷回答每节末尾“自测”，再看答案。核心缩写在开场或首次使用处给出中文含义，其他术语均在对应正文中给出定义、原理和项目落点。</p>
+
+<h2 id="story">0. 先看懂整条故事：这个项目为什么会长成现在这样</h2>
+
+<h3>0.1 不从模块名开始，从一个真实服务场景开始</h3>
+<p>设想实验室部署了一台只有一块 RTX 4050 Laptop GPU 的问答服务。用户 A 发送“你是东北大学推免面试官……”加上一段长材料；几乎同时，用户 B 使用同一段系统提示词，只替换了最后一个问题；用户 C 已经拿到首 token，正在等待后续回答。此时显存接近上限，又到来用户 D。</p>
+<p>如果把每个请求从头到尾独占执行，C 的每个新 token 都要等 A、B 的长输入处理完，交互会卡顿；如果让所有请求同时进入，又可能没有足够显存保存它们的历史状态。A 与 B 的公共前缀重复计算很浪费，但直接共享缓存后，任何一方继续写入又可能污染另一方。即使逻辑上决定“搬一块缓存”，GPU 上仍要面对不连续地址、重叠复制、异步执行和错误回滚。最后，即便某个 CUDA kernel 在小数据上更快，也不代表服务端应该永远选它。</p>
+<p>CacheFlow Runtime 的故事，就是依次解决下面六个冲突：</p>
+
+<div class="story-chain">
+  <div><b>冲突 1：谁先运行？</b><span>长 Prefill 会阻塞正在 Decode 的请求。</span><em>→ Engine + Scheduler</em></div>
+  <div><b>冲突 2：历史状态放哪？</b><span>KV Cache 随上下文和并发线性增长，连续显存难找。</span><em>→ KV Block Runtime</em></div>
+  <div><b>冲突 3：公共前缀怎样安全复用？</b><span>共享能省计算，但共享尾块不能被原地写坏。</span><em>→ Prefix Index + refcount + COW</em></div>
+  <div><b>冲突 4：物理数据怎样真正搬？</b><span>映射可能碎片、重叠、错位，而且 GPU 调用是异步的。</span><em>→ CUDA Remap / Swap</em></div>
+  <div><b>冲突 5：能否不搬就直接算？</b><span>先整理 KV 再 Attention 会多一次显存读写。</span><em>→ Paged Decode Attention</em></div>
+  <div><b>冲突 6：不同场景到底选哪条路？</b><span>Direct、Remap、Paged、Swap、Recompute 的胜负随状态变化。</span><em>→ Gate + Cost Model + Benefit Policy</em></div>
+</div>
+
+<h3>0.2 一条请求经过系统时，每个模块具体接了哪一棒</h3>
+<div class="diagram">① HTTP 层收到 A/B/C/D，建立 request 与取消、deadline 信息
+        ↓
+② Scheduler 只选择“下一轮”要运行的 sequence：C 的 decode 优先，A/B prefill 切块
+        ↓
+③ KV Block Manager 估算本轮需要多少块；不够时给出淘汰、Swap 或 Recompute 候选
+        ↓
+④ Prefix Index 发现 B 与 A 有公共 token 前缀，让 B 的 Block Table 指向已有物理块
+        ↓
+⑤ B 要在共享尾块后追加 token：COW 先复制尾块，再把 B 的映射切到新块
+        ↓
+⑥ Action Policy 先排除不合法动作，再估计 Direct/Remap/Paged/Swap/Recompute 成本
+        ↓
+⑦ CUDA Backend 根据计划执行向量化 Remap、异步 Swap，或让 Paged Attention 直接查页表
+        ↓
+⑧ llama_decode 完成一次模型计算；Engine 只有成功后才 commit 新映射与 sequence 状态
+        ↓
+⑨ SSE 向用户推送 token；Prometheus、trace 与实验制品记录“做了什么、花了多久、结果怎样”</div>
+<p>这条链有两个控制方向：请求和 KV 数据从上往下流；完成事件、错误、容量与耗时从下往上反馈。调度器不能绕过 Block Manager 随便承诺显存，Block Manager 也不能绕过 CUDA 完成事件提前发布映射。模块划分的真正依据不是文件类型，而是<strong>状态所有权与失败边界</strong>。</p>
+
+<h3>0.3 六个模块的职责、原理与基础知识总图</h3>
+<table class="module-map"><thead><tr><th>模块</th><th>一句话职责</th><th>为什么需要</th><th>核心原理</th><th>对应基础知识</th></tr></thead><tbody>
+<tr><td><b>M1 Engine / Scheduler</b></td><td>决定下一轮谁运行，并保证失败不留下半提交状态。</td><td>请求长度不同、会动态加入/取消；GPU 和 KV 容量有限。</td><td>连续批处理、aging、公平预算、prepare-plan-execute-commit。</td><td>408 操作系统调度与饥饿；数据库事务；状态机；C++ RAII。</td></tr>
+<tr><td><b>M2 KV Block Runtime</b></td><td>管理逻辑 token 到物理 KV 块的映射、共享和回收。</td><td>连续分配导致碎片；相同 Prefix 重复计算和占显存。</td><td>页表、哈希索引、引用计数、COW、容量账本。</td><td>操作系统虚拟内存/页表；数据结构哈希表；引用计数与写时复制。</td></tr>
+<tr><td><b>M3 CUDA Remap / Swap</b></td><td>把控制面的块动作变成真实 K/V Tensor 搬运。</td><td>CPU 修改块号不会自动搬 GPU 数据；映射还可能重叠和错位。</td><td>SIMT、合并访存、128-bit 向量化、staging snapshot、stream/event。</td><td>计组存储层次与带宽；并行程序；内存对齐；happens-before。</td></tr>
+<tr><td><b>M4 Paged Decode</b></td><td>Attention 通过页表直接读非连续 KV，避免先 Remap。</td><td>Remap 会多读写一遍显存；Decode 又常受显存带宽限制。</td><td>QK 点积、GQA 映射、causal 范围、FP32 online softmax。</td><td>线性代数点积/矩阵乘；概率中的 softmax；数值稳定性；Transformer。</td></tr>
+<tr><td><b>M5 Action / Benefit Policy</b></td><td>在合法动作中按当前状态选预期成本最低且证据足够的动作。</td><td>任何固定策略都有反例，微基准赢家不一定是服务赢家。</td><td>先 capability gate，再 per-action Ridge；置信下界、冷启动与回退。</td><td>机器学习线性回归/L2；线性代数正规方程；概率置信区间；在线算法。</td></tr>
+<tr><td><b>M6 Evidence System</b></td><td>证明干预真的生效，并把局部机制连接到端到端结果。</td><td>缓存、热机、顺序和 profiler 都会制造“看似提升”。</td><td>配对实验、交替顺序、bootstrap、PID/request/kernel 因果关联、哈希绑定。</td><td>概率统计；实验设计；数据库主外键；可观测性；科学可复现。</td></tr>
+</tbody></table>
+
+<h3>0.4 为什么不是把所有功能写在一个大循环里</h3>
+<p>上游推理服务的大循环可以“能跑”，但当调度、缓存映射、CUDA 生命周期和网络输出都修改同一批状态时，一次 OOM 或异步错误会留下难以判断的半完成状态。项目重构的核心贡献不是把函数拆小，而是建立所有权：</p>
+<ul>
+  <li>Scheduler 拥有<strong>选择权</strong>，但只输出计划，不能直接改物理映射。</li>
+  <li>Block Manager 拥有<strong>块与引用计数</strong>，是容量账本的唯一真相来源。</li>
+  <li>CUDA Adapter 拥有<strong>异步资源租约</strong>，event 完成前不能释放 source、destination、staging 或 pinned buffer。</li>
+  <li>Engine 拥有<strong>提交权</strong>，execute 成功才把 shadow plan 变成对外可见状态。</li>
+  <li>Evidence System 不参与决策，但记录可关联 ID，使每个结论能回到原始请求和 GPU 操作。</li>
+</ul>
+<div class="callout"><strong>贯穿全手册的判断方法：</strong>看到一个类或算法时，先问“它拥有哪份状态、输入和输出是什么、失败后由谁恢复”，再学习公式和实现。答清这三问，模块就不再是孤立名词。</div>
+
+<h3>0.5 基础知识不是附录：它们分别解释项目中的哪一个决定</h3>
+<table><thead><tr><th>基础课知识</th><th>项目里真正用到的地方</th><th>必须能回答的连接问题</th></tr></thead><tbody>
+<tr><td>操作系统：进程/线程、调度、饥饿、虚拟内存、页表</td><td>迭代级调度、aging、Block Table、Swap、backpressure。</td><td>为什么逻辑连续不要求物理连续？为什么 decode 优先仍要 aging？</td></tr>
+<tr><td>数据结构与算法：哈希、引用计数、复杂度、贪心</td><td>Prefix Index、块回收、victim 选择、在线调度。</td><td>哈希碰撞如何校验？为什么当前不用全局最优求解？</td></tr>
+<tr><td>计算机组成：Cache、访存带宽、对齐、SIMD/SIMT</td><td>KV 是带宽型状态；Remap 的 uint4、coalescing 与尾部回退。</td><td>为什么 128-bit load 可能更快？为什么错位后反而更慢？</td></tr>
+<tr><td>数据库：事务、原子性、WAL/临时文件+rename 思想</td><td>iteration commit、Swap Store、故障恢复。</td><td>这里保证了哪一种原子性，又没有保证什么？</td></tr>
+<tr><td>线性代数：向量点积、矩阵、逆/解方程、二次型</td><td>Attention、Ridge 参数更新和不确定半径。</td><td>QK 点积为何表示相关性？L2 如何进入正规方程？</td></tr>
+<tr><td>概率统计：分位数、重采样、偏差、混杂变量</td><td>P95/P99、paired bootstrap、Williams 顺序和平衡实验。</td><td>为什么不能用两个独立 median 相除代替 paired effect？</td></tr>
+<tr><td>机器学习：回归、正则化、在线学习、探索/利用</td><td>动作成本模型、冷启动、置信门控与漂移回退。</td><td>为什么每个 action 单独建模？为什么预测均值更好仍可能不启用？</td></tr>
+<tr><td>软件工程：状态机、RAII、接口、测试替身与可观测性</td><td>请求生命周期、资源释放、capability seam、故障注入。</td><td>如何证明测试走的是生产接口，而不是另一套模拟实现？</td></tr>
+</tbody></table>
 
 <h2 id="pitch">1. 先会讲项目</h2>
 <h3>1.1 30 秒版本</h3>
@@ -95,6 +165,13 @@ output = PV</div>
 <div class="quiz"><strong>自测：</strong>为什么 kernel 快 50% 不能直接说 TTFT 快 50%？<details><summary>答案</summary>TTFT 还包含排队、CPU 调度、Prefill、其他 kernel、数据传输和同步；目标 kernel 只占其中一部分，且策略变化还可能改变 batch 与 prefill 形状。</details></div>
 
 <h2 id="architecture">3. 项目架构与一次请求</h2>
+<div class="module-card"><div class="module-title">M1 · Engine / Scheduler：控制面</div>
+<dl><dt>它接收什么？</dt><dd>等待中的 request/sequence、剩余 Prefill/Decode token、deadline、取消状态、KV 可用容量。</dd>
+<dt>它产出什么？</dt><dd>本轮不可变 iteration plan：哪些 sequence 运行、各自处理多少 token、需要预留或释放哪些资源。</dd>
+<dt>它为什么存在？</dt><dd>GPU 一次可以批量处理多条 sequence，但请求动态到达且长度不同；没有逐轮决策，就无法同时兼顾交互延迟、吞吐、公平和显存约束。</dd>
+<dt>原理是什么？</dt><dd>continuous batching 把调度点放到每次模型迭代；decode priority 控制相邻 token 间隔，aging 防止 Prefill 饥饿；事务式提交隔离“做决定”和“发布状态”。</dd>
+<dt>对应基础知识</dt><dd>操作系统 CPU 调度、优先级与饥饿；数据库原子性；有限状态机；C++ RAII 资源释放。</dd>
+<dt>代码与证据</dt><dd><code>server-inference-engine.*</code>、scheduler/sequence state；Engine trace 中 execute 占 99.9145%，说明控制面分层没有吞掉主执行时间。</dd></dl></div>
 <div class="diagram">HTTP/SSE 请求（HTTP 是网页通信协议；SSE 是服务器在长连接上持续推送 token 的文本事件格式）
   ↓ server-context：接入、限流、取消、指标
 Inference Scheduler：选择本轮 runnable sequences
@@ -125,6 +202,13 @@ token stream + Prometheus + trace + research artifacts</div>
 <p>一次 CPU mixed workload 记录 242 个完整 span，总时长 9.553 秒：execute 占 99.9145%，commit 0.0674%，plan 0.0148%，prepare 0.0033%。Span 是带开始与结束时间的阶段记录。这个结果说明控制面的事务分层开销很小，主要时间仍在模型执行；它不是采样调用栈火焰图，不能据此推断某个 CPU 函数的周期占比。</p>
 
 <h2 id="kv">4. KV Cache：从内存问题到系统设计</h2>
+<div class="module-card"><div class="module-title">M2 · KV Block Runtime：状态与容量平面</div>
+<dl><dt>它接收什么？</dt><dd>sequence 的 token 位置、Prefix 命中结果、本轮容量 reservation，以及 Engine 提交或释放动作。</dd>
+<dt>它产出什么？</dt><dd>逻辑块到物理块的 Block Table、refcount、可复用 Prefix、COW/Swap/Recompute 所需的资源计划。</dd>
+<dt>它为什么存在？</dt><dd>KV 是生成过程必须保存的动态状态；按整段连续分配既产生外部碎片，也无法安全共享相同前缀。</dd>
+<dt>原理是什么？</dt><dd>借鉴虚拟内存：逻辑地址与物理地址解耦；借鉴共享页：refcount 管生命周期；写共享页前 COW，容量不足时在搬运与重算间选择。</dd>
+<dt>对应基础知识</dt><dd>操作系统分页/页表/缺页与 Swap；哈希表；引用计数；写时复制；摊还分析与资源守恒不变式。</dd>
+<dt>代码与证据</dt><dd><code>server-kv-block-manager.*</code>、Prefix Index、Swap Store；真实 Qwen 请求验证 21 个 Prefix block、324 token 共享且输出与 cold decode 一致。</dd></dl></div>
 <h3>4.1 逻辑块、物理块与 Block Table</h3>
 <p><strong>逻辑块</strong>是某条序列看到的第 0、1、2…块；<strong>物理块</strong>是设备内存里真正占容量的块；<strong>Block Table</strong>是逻辑块号到物理块号的数组。类似操作系统页表，它允许逻辑上连续的 token 分布在不连续物理块中，减少必须寻找大段连续显存造成的外部碎片。</p>
 <p>物理块记录引用计数 <code>refcount</code>。它表示有多少序列或索引仍指向该块；只有 refcount 归零才能回收。核心不变式是：每个有效映射都对应一个引用，空闲块不被任何有效映射引用。</p>
@@ -143,6 +227,13 @@ recompute cost ≈ cached_tokens × prefill_ms_per_token</div>
 <p>Swap handle 必须绑定模型身份、布局、校验和和生命周期。保存失败不能发布 handle，恢复失败要清理临时状态并回到可行的 Recompute，保证事务完整性。</p>
 
 <h2 id="cuda">5. CUDA 基础与 Remap 算子</h2>
+<div class="module-card"><div class="module-title">M3 · CUDA Remap / Swap：GPU 数据平面</div>
+<dl><dt>它接收什么？</dt><dd>Block Manager 生成的 descriptor、真实 Attention K/V Tensor 地址、元素大小、stride、stream 和资源租约。</dd>
+<dt>它产出什么？</dt><dd>完成 Remap/COW/D2H/H2D 的异步 GPU 工作，以及可供 Engine 等待和提交的 CUDA event。</dd>
+<dt>它为什么存在？</dt><dd>块表只是元数据。物理 K/V 不随 C++ 映射自动变化，必须由正确处理布局、重叠和生命周期的真实后端完成搬运。</dd>
+<dt>原理是什么？</dt><dd>aligned fast path 用 128-bit load/store 降低指令数；重叠映射使用 gather→staging→scatter 保证 snapshot 语义；stream 保序，event 建立跨 stream happens-before。</dd>
+<dt>对应基础知识</dt><dd>计组存储层次、带宽与对齐；SIMT/warp；并发中的 happens-before；<code>memcpy</code> 与 <code>memmove</code> 语义；异步资源生命周期。</dd>
+<dt>代码与证据</dt><dd><code>server-kv-block-cuda.cu</code> 与 paged KV adapter；CPU oracle、memcheck/racecheck、CUDA-event 主结果和 NSYS 机制回放共同验证。</dd></dl></div>
 <h3>5.1 CUDA 执行词汇</h3>
 <p><strong>kernel</strong>是在 GPU 上并行执行的函数。CPU 发起一次 kernel 得到一个 <strong>grid</strong>；grid 由多个 <strong>block/CTA</strong> 组成，CTA 是可共享 shared memory 并同步的一组线程；NVIDIA GPU 通常每 32 个线程组成一个 <strong>warp</strong>按同一指令执行。<strong>stream</strong>是一条按序的 GPU 命令队列；同一 stream 内天然有先后关系，不同 stream 需要 event 等依赖。kernel launch 通常异步，只说明提交成功，不说明 GPU 已完成。</p>
 <p>内存层次：register 是线程私有最快存储；shared memory 是 CTA 内共享的片上存储；global memory 是容量大的显存。相邻线程访问相邻且对齐地址可形成合并访存，减少内存事务。<strong>CUDA event</strong>是插入 stream 的标记，可用于建立依赖或测设备时间。</p>
@@ -164,6 +255,13 @@ recompute cost ≈ cached_tokens × prefill_ms_per_token</div>
 </ul>
 
 <h2 id="paged">6. Paged Decode Attention：模型侧算法与 CUDA 实现</h2>
+<div class="module-card"><div class="module-title">M4 · Paged Decode Attention：模型算子平面</div>
+<dl><dt>它接收什么？</dt><dd>当前 token 的 Query、分页 K/V、page table、context length、GQA 头映射和模型形状。</dd>
+<dt>它产出什么？</dt><dd>每个 query head 聚合历史 Value 后的 Attention 输出，语义应与连续 KV 的参考实现一致。</dd>
+<dt>它为什么存在？</dt><dd>Remap 后再算 Attention 要额外读写完整 KV；若 kernel 能直接查页表，理论上可省掉中间搬运和临时缓冲。</dd>
+<dt>原理是什么？</dt><dd>逐历史 token 计算缩放 Q·K；按 GQA 将多个 Query head 映射到 KV head；用 online softmax 单遍维护最大值、分母与加权和。</dd>
+<dt>对应基础知识</dt><dd>线性代数点积/矩阵乘；指数与 softmax；浮点溢出和数值稳定；Transformer causal attention；CUDA reduction。</dd>
+<dt>代码与证据</dt><dd><code>llama-kv-cache-paged.cu</code> 受限 K1 dispatch；FP32 oracle、跨页/碎片/边界测试和生产服务 A/B 决定它保持 evidence-gated。</dd></dl></div>
 <h3>6.1 它与 Remap 的根本差别</h3>
 <p>Remap 先把非连续 KV 搬到目标布局，再由普通 Attention 读取；Paged Decode Attention 让 Attention kernel 自己查询 page table，直接读取物理页。前者付出搬运成本但后续计算访问规则简单；后者省掉中间搬运，却在每个历史 token 上增加页表寻址，性能取决于上下文、布局和 KV 复用。</p>
 
@@ -190,6 +288,13 @@ final output = o / l</div>
 <p>生产结果触发了关键工程机制：Paged P95 为 29.210 ms，Direct 为 27.354 ms，超过预注册 +5% promotion limit，因此策略保持默认 Direct、Paged 保留 opt-in。面试中的正面表达是：<strong>我不仅实现了算子和生产接入，还实现了数据驱动的 promotion gate，证明“能运行”与“应默认上线”是两个验收阶段。</strong></p>
 
 <h2 id="policy">7. 从固定规则到统一动作成本模型</h2>
+<div class="module-card"><div class="module-title">M5 · Action / Benefit Policy：在线决策平面</div>
+<dl><dt>它接收什么？</dt><dd>backend、上下文长度、并发、布局、字节数、复用距离、KV 压力、历史动作耗时及 capability/resource 状态。</dd>
+<dt>它产出什么？</dt><dd>Direct、Remap、Paged、device/host Swap 或 Recompute 中的一个合法动作，并给出选择理由与回退原因。</dd>
+<dt>它为什么存在？</dt><dd>动作成本由固定开销、数据规模、GPU 批处理形态和当前负载共同决定；不存在跨 CPU/CUDA、长短上下文都最优的常数规则。</dd>
+<dt>原理是什么？</dt><dd>先 gate 保证正确性，再用每动作 Ridge 预测完整动作边界的成本；置信证据不足、漂移或 SLO 风险出现时 fail closed 回基线。</dd>
+<dt>对应基础知识</dt><dd>多元线性回归、L2 正则、正规方程、二次型置信半径、在线学习、探索—利用、算法中的可行域与目标函数。</dd>
+<dt>代码与证据</dt><dd>统一 chooser 与 backend-local benefit policy；500 万次零分配开销测试，以及 CPU/CUDA paired-oracle regret 和 harmful-decision 评估。</dd></dl></div>
 <h3>7.1 六个动作分别解决什么</h3>
 <table><thead><tr><th>动作</th><th>含义</th><th>主要成本/约束</th></tr></thead><tbody>
 <tr><td>Direct</td><td>当前布局已可直接服务，不搬 KV。</td><td>要求 token、layout、ownership 全兼容。</td></tr>
@@ -226,6 +331,13 @@ final output = o / l</div>
 <p><strong>有限探索</strong>是在安全预算内主动收集少量缺失动作样本；不是随机把所有流量暴露给未知方案。<strong>distribution shift</strong>是在线特征/残差分布变化；连续异常触发 cooldown 和安全回退。长期实验 53 waves 中，稳定阶段产生 26 次探索、125 次 positive-lower-bound 决策、最长连续正下界 35；shift 阶段 CacheFlow/positive 为 0，并触发 3 次 safety fallback，展示了“学会启用，也学会停止”。</p>
 
 <h2 id="experiment">8. 实验方法与关键数据</h2>
+<div class="module-card"><div class="module-title">M6 · Evidence System：把“现象”变成可复核结论</div>
+<dl><dt>它接收什么？</dt><dd>预注册协议、相同请求轨迹、基线/候选 trial、Prometheus 快照、Engine span、GPU 采样和 NSYS/NCU 输出。</dd>
+<dt>它产出什么？</dt><dd>成对 effect、P95/P99、bootstrap 区间、机制因果链、manifest/hash，以及能拒绝篡改或缺失证据的验证结果。</dd>
+<dt>它为什么存在？</dt><dd>GPU 热机、进程位置、请求顺序、缓存和 profiler 扰动都可能产生虚假提升；单张 benchmark 表无法说明真实机制。</dd>
+<dt>原理是什么？</dt><dd>在同一 pair 内比较以消除共享扰动；平衡顺序控制 carryover；无 profiler 数据估计结果，profiler replay 解释机制；ID 和哈希建立来源约束。</dd>
+<dt>对应基础知识</dt><dd>控制变量、配对检验、重采样、分位数、混杂变量；数据库键约束；监控指标类型；软件供应链式制品完整性。</dd>
+<dt>代码与证据</dt><dd><code>results/research/*</code> 的 raw/summary/report/manifest，验证器会从原始 CSV/JSON/SQLite 重建结论，而不是相信复制进报告的数字。</dd></dl></div>
 <h3>8.1 为什么必须成对和交替顺序</h3>
 <p>GPU 温度、频率、缓存和 Windows 调度会随时间漂移。<strong>paired experiment（配对实验）</strong>让同一个输入、seed 和初始条件分别运行 baseline（基线）与 treatment（待评估方案），再分析每对差值，消除大量共同噪声。AB/BA 表示一部分 pair 先跑 A 再跑 B，另一部分反过来；它或随机顺序可避免总是后运行的一方享受热缓存。Warm-up（预热）只用于进入稳定状态，不进入确认性统计。</p>
 <p>改善率定义为 <code>100×(baseline-treatment)/baseline</code>。主估计用 paired improvement 的中位数，减少极端值影响。<strong>bootstrap 置信区间</strong>是反复有放回重采样完整 pair，计算 10,000 次统计量，再取 2.5% 和 97.5% 分位数；它表达当前样本下估计不确定性，不保证跨硬件普遍成立。</p>
