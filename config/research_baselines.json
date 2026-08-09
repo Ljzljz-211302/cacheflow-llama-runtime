@@ -153,7 +153,7 @@
       "controlled_mode": "--kv-action-policy fixed; Direct -> device Swap -> host Swap -> Remap -> Paged -> Recompute after capability gates",
       "comparability_limits": [
         "The formal CUDA run exposes only Direct, CUDA-managed Swap, transactional host Swap, and Recompute; Remap and Paged are masked.",
-        "All H0/A1/T1/L1 comparisons reuse the same paired scheduler snapshots and complete-action boundary.",
+        "All H0/A1/T1/L1 comparisons reuse matched-workload scheduler snapshots and the same complete-action boundary; independent action processes prevent a formal Trial Pair interpretation.",
         "Evidence is limited to one Qwen2.5-0.5B Q4_K_M model and one RTX 4050 Laptop GPU."
       ]
     },
@@ -171,7 +171,7 @@
         "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_patched_server.ps1",
         "python scripts/run_kv_action_policy_experiment.py"
       ],
-      "controlled_mode": "--kv-action-policy analytical; bandwidth, launch, prefill, decode, reuse, and pressure terms evaluated on paired snapshots",
+      "controlled_mode": "--kv-action-policy analytical; bandwidth, launch, prefill, decode, reuse, and pressure terms evaluated on matched-workload snapshots",
       "comparability_limits": [
         "Analytical constants are protocol-locked and are not fitted on evaluation traces.",
         "The production capability gate is applied before scoring, so masked Remap and Paged cannot win.",
@@ -191,7 +191,7 @@
         "python scripts/run_kv_action_policy_experiment.py",
         "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1"
       ],
-      "controlled_mode": "offline median lookup keyed by action/context/batch/page-runs/pressure buckets on chronological train traces, evaluated on held-out paired traces",
+      "controlled_mode": "offline median lookup keyed by action/context/batch/page-runs/pressure buckets on chronological train traces, evaluated on held-out matched-workload traces",
       "comparability_limits": [
         "T1 is an offline ablation and is not enabled as the production selector.",
         "It intentionally uses literal bucket medians without a confidence gate to measure whether sparse table switching is unsafe.",
@@ -221,7 +221,7 @@
     },
     {
       "id": "kv-action-d1",
-      "name": "D1 regime-conditioned paired-delta Ridge",
+      "name": "D1 regime-conditioned matched-workload delta Ridge",
       "kind": "local",
       "comparison_class": "quantitative",
       "runnable": true,
@@ -232,7 +232,7 @@
         "python scripts/run_kv_action_policy_experiment.py",
         "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1"
       ],
-      "controlled_mode": "offline signed candidate-minus-H0 Ridge per runtime regime with preregistered mechanism interactions, one-sided calibration, confidence radius, switch margin, and exact H0 fallback",
+      "controlled_mode": "offline signed matched-workload candidate-minus-H0 Ridge per runtime regime with preregistered mechanism interactions, one-sided calibration, confidence radius, switch margin, and exact H0 fallback",
       "comparability_limits": [
         "D1 made zero held-out switches in v1.5.0 and therefore does not establish a learned-policy speedup.",
         "The negative result is retained because it identifies global-linear underfitting without weakening the safety gate.",
@@ -241,7 +241,7 @@
     },
     {
       "id": "kv-action-d2",
-      "name": "D2 context-piecewise paired-delta Ridge",
+      "name": "D2 context-piecewise matched-workload delta Ridge",
       "kind": "local",
       "comparison_class": "quantitative",
       "runnable": true,
@@ -252,7 +252,7 @@
         "python scripts/run_kv_action_policy_experiment.py",
         "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1"
       ],
-      "controlled_mode": "offline signed paired-delta Ridge split at the preregistered 512-token boundary, calibrated per regime and context band with a 0.75 ms switch margin and exact H0 fallback",
+      "controlled_mode": "offline signed matched-workload delta Ridge split at the preregistered 512-token boundary, calibrated per regime and context band with a 0.75 ms switch margin and exact H0 fallback",
       "comparability_limits": [
         "D2 made zero held-out switches in v1.5.0 because the one-sided calibration bound rejected every candidate.",
         "The v1.4 development replay is retained only as model-design evidence and not as a confirmatory speedup.",
@@ -261,7 +261,7 @@
     },
     {
       "id": "kv-action-d3",
-      "name": "D3 risk-budgeted context-piecewise paired-delta Ridge",
+      "name": "D3 risk-budgeted context-piecewise matched-workload delta Ridge",
       "kind": "local",
       "comparison_class": "quantitative",
       "runnable": true,
@@ -272,7 +272,7 @@
         "python scripts/run_kv_action_policy_experiment.py",
         "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1"
       ],
-      "controlled_mode": "offline 512-token piecewise paired-delta Ridge with median residual calibration, confidence radius, 0.25 ms margin, 5% harmful-rate budget, total-gain-over-total-harm gate, and exact H0 fallback",
+      "controlled_mode": "offline 512-token piecewise matched-workload delta Ridge with median residual calibration, confidence radius, 0.25 ms margin, 5% harmful-rate budget, total-gain-over-total-harm gate, and exact H0 fallback",
       "comparability_limits": [
         "The v1.6 result is a held-out matched-workload replay on one model and one GPU, not an online production or cross-hardware claim.",
         "Each action is observed on an independent fixed-mode server process, so action-by-process confounding prevents a formal Trial Pair or action-causal interpretation.",
