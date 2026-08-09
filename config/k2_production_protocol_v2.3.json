@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "protocol_version": "2.3.0",
+  "preregistered_at_utc": "2026-08-09T13:00:10Z",
+  "claim": "K2 replaces K1 inside the same steady-state production Paged action and serving process",
+  "supersedes": {"protocol": "2.2.0", "reason": "v2.2 used separate serving processes and did not bind exact server/model bytes or structured raw response/metrics; it remains an immutable matched-workload result, not the final same-process promotion artifact"},
+  "execution_scope": "single_server",
+  "raw_schema": "structured-arm-v1",
+  "random_seed": 20260809,
+  "paired_trials": 30,
+  "order": "seeded random K1-K2 or K2-K1 order independently within each pair",
+  "device": {"name": "NVIDIA GeForce RTX 4050 Laptop GPU", "compute_capability": "8.9", "driver_version": "561.19"},
+  "artifact_binding": {
+    "server_sha256": "8fc2ee1db8de87f0fefa421e263cdf66c08c53c142df233ac69fedcbcdeee2d0",
+    "model_sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+    "vendor_revision": "c1febaa73560b69a38544ab3e001b8a28921dbcf",
+    "build_command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_cuda_kv.ps1"
+  },
+  "request": {
+    "prompt": " one one one one one one one one one one one one one one one one one",
+    "predicted_tokens": 1,
+    "cache_prompt": true,
+    "warm_requests_before_measurement": 5
+  },
+  "controlled_boundary": {
+    "same_process": true,
+    "slot_reset_before_each_arm": true,
+    "same_model": "Qwen2.5-0.5B Q4_K_M",
+    "same_action": "paged",
+    "same_graph_and_layout": true,
+    "steady_state_definition": "erase the single slot, run one full-prompt warm request and four cached warm requests, then measure one cached request",
+    "same_page_size": 16,
+    "same_context_tokens": 17,
+    "same_gqa": "14 query heads / 2 KV heads / D64",
+    "only_intervention": "an opt-in control file read by the Paged CUDA dispatcher selects incumbent K1 or candidate K2 before each arm inside one long-lived server",
+    "k1_kernel": "cacheflow_paged_decode_fattn_k1",
+    "k2_kernel": "cacheflow_paged_decode_fattn_k2_t2"
+  },
+  "measurements": {
+    "primary": "paired server prompt_ms reconstructed from each raw JSON response",
+    "production_guardrail": "unprofiled client_elapsed_ns P95 reconstructed from each raw timing record",
+    "secondary": ["paired client elapsed median and bootstrap interval", "Prometheus deltas reconstructed from before/after snapshots", "method-isolated NSYS kernel identity, launches, and duration"],
+    "profiler_timing_is_not_primary": true,
+    "no_outcome_based_deletion": true
+  },
+  "acceptance": {
+    "outputs_must_match": true,
+    "each_arm_requires_five_paged_graph_entries": true,
+    "fallbacks_must_be_zero": true,
+    "paired_median_metric": "server_prompt_ms",
+    "paired_median_must_not_be_slower": true,
+    "p95_maximum_regression_percent": 5.0
+  },
+  "claim_rules": {
+    "promotion_is_k2_over_k1_not_paged_over_direct": true,
+    "all_prior_paged_vs_direct_failures_remain_valid": true,
+    "result_is_limited_to_the_registered_short_context_envelope": true,
+    "nsys_duration_is_mechanism_only": true
+  }
+}

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import shutil
 import subprocess
+import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,6 +20,13 @@ from run_production_paged_experiment import (
     git_output,
     sha256,
     summarize,
+)
+from production_journey import (
+    cuda_environment,
+    get_text,
+    request_json,
+    terminate_process,
+    wait_ready,
 )
 from run_production_paged_journey import metric, run_mode
 
@@ -32,6 +42,134 @@ VARIANTS = {
 }
 
 
+def metric_delta(before: str, after: str, name: str) -> float:
+    return metric(after, name) - metric(before, name)
+
+
+def erase_slot(port: int) -> None:
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/slots/0?action=erase", data=b"", method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        if response.status != 200:
+            raise AssertionError("failed to erase the single controlled slot")
+
+
+def randomized_arm_plan(protocol: dict[str, Any]) -> list[tuple[int, int, str]]:
+    generator = random.Random(int(protocol["random_seed"]))
+    plan: list[tuple[int, int, str]] = []
+    for pair in range(1, int(protocol["paired_trials"]) + 1):
+        variants = list(VARIANTS)
+        generator.shuffle(variants)
+        plan.extend((pair, order, variant) for order, variant in enumerate(variants, 1))
+    return plan
+
+
+def parse_structured_rows(protocol: dict[str, Any], output: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for arm, (pair, order_in_pair, variant) in enumerate(randomized_arm_plan(protocol), 1):
+        directory = output / f"raw/arm-{arm:03d}-{variant}"
+        response = json.loads((directory / "response.json").read_text(encoding="utf-8"))
+        timing = json.loads((directory / "client-timing.json").read_text(encoding="utf-8"))
+        before = (directory / "metrics-before.prom").read_text(encoding="utf-8")
+        after = (directory / "metrics-after.prom").read_text(encoding="utf-8")
+        if timing != {
+            "pair": pair,
+            "order_in_pair": order_in_pair,
+            "variant": variant,
+            "client_elapsed_ns": timing.get("client_elapsed_ns"),
+        } or not isinstance(timing["client_elapsed_ns"], int) or timing["client_elapsed_ns"] <= 0:
+            raise AssertionError("raw client timing does not match the seeded arm plan")
+        rows.append({
+            "pair": pair,
+            "order_in_pair": order_in_pair,
+            "variant": variant,
+            "content": response["content"],
+            "client_elapsed_ms": timing["client_elapsed_ns"] / 1.e6,
+            "prompt_ms": float(response["timings"]["prompt_ms"]),
+            "action_decisions": metric_delta(
+                before, after, 'llamacpp:kv_action_decisions_total{action="paged"}'),
+            "action_reason_decisions": (
+                action_reason_total(after, "paged") - action_reason_total(before, "paged")),
+            "action_observations": metric_delta(
+                before, after, 'llamacpp:kv_action_observations_total{action="paged"}'),
+            "action_cost_seconds": metric_delta(
+                before, after, 'llamacpp:kv_action_observation_seconds_total{action="paged"}'),
+            "paged_calls": metric_delta(before, after, "llamacpp:paged_decode_calls_total "),
+            "paged_fallbacks": metric_delta(
+                before, after, "llamacpp:paged_decode_fallbacks_total "),
+            "raw": str(directory.relative_to(output).as_posix()),
+        })
+    return rows
+
+
+def collect_single_process_rows(
+    protocol: dict[str, Any], server: Path, model: Path, output: Path, port: int,
+) -> list[dict[str, Any]]:
+    raw = output / "raw"
+    raw.mkdir(parents=True, exist_ok=False)
+    log_path = raw / "server.log"
+    control_file = ROOT / "results/raw/k2-kernel-control.txt"
+    control_file.parent.mkdir(parents=True, exist_ok=True)
+    control_file.write_bytes(b"K1")
+    command = [
+        str(server.resolve()), "-m", str(model.resolve()),
+        "--host", "127.0.0.1", "--port", str(port),
+        "-c", "512", "-np", "1", "-t", "8", "-ngl", "99",
+        "--flash-attn", "on", "--no-warmup", "--metrics", "--slots",
+        "--kv-block-runtime", "--kv-block-size", "16", "--kv-paged-decode",
+        "--kv-action-policy", "analytical", "--kv-action-override", "paged", "-lv", "4",
+    ]
+    environment = cuda_environment({
+        "LLAMA_CACHEFLOW_PAGED_KERNEL_CONTROL_FILE": str(control_file.resolve()),
+    })
+    payload = {
+        "prompt": str(protocol["request"]["prompt"]),
+        "n_predict": 1,
+        "temperature": 0,
+        "seed": 20260808,
+        "cache_prompt": True,
+    }
+    base_url = f"http://127.0.0.1:{port}"
+    with log_path.open("wb") as log:
+        process = subprocess.Popen(
+            command, cwd=ROOT, env=environment, stdout=log, stderr=subprocess.STDOUT,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        try:
+            wait_ready(base_url, process, log_path, attempts=120)
+            for arm, (pair, order_in_pair, variant) in enumerate(
+                randomized_arm_plan(protocol), 1,
+            ):
+                control_file.write_bytes(VARIANTS[variant][0].encode("ascii"))
+                erase_slot(port)
+                before = get_text(f"{base_url}/metrics")
+                for _ in range(int(protocol["request"]["warm_requests_before_measurement"])):
+                    request_json(f"{base_url}/completion", payload)
+                started = time.perf_counter_ns()
+                status, response = request_json(f"{base_url}/completion", payload)
+                elapsed = time.perf_counter_ns() - started
+                after = get_text(f"{base_url}/metrics")
+                if status != 200 or "error" in response or not response.get("content"):
+                    raise AssertionError(f"{variant} controlled request failed: {response}")
+                directory = raw / f"arm-{arm:03d}-{variant}"
+                directory.mkdir()
+                (directory / "response.json").write_text(
+                    json.dumps(response, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                (directory / "client-timing.json").write_text(json.dumps({
+                    "pair": pair,
+                    "order_in_pair": order_in_pair,
+                    "variant": variant,
+                    "client_elapsed_ns": elapsed,
+                }, indent=2) + "\n", encoding="utf-8")
+                (directory / "metrics-before.prom").write_text(before, encoding="utf-8")
+                (directory / "metrics-after.prom").write_text(after, encoding="utf-8")
+        finally:
+            terminate_process(process)
+            control_file.unlink(missing_ok=True)
+    return parse_structured_rows(protocol, output)
+
+
 def percentile(values: list[float], probability: float) -> float:
     ordered = sorted(values)
     position = (len(ordered) - 1) * probability
@@ -43,6 +181,20 @@ def percentile(values: list[float], probability: float) -> float:
 
 def expected_summary(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
     pairs = int(protocol["paired_trials"])
+    if protocol.get("execution_scope") == "single_server":
+        expected_plan = randomized_arm_plan(protocol)
+    else:
+        expected_plan = [
+            (pair, order, variant)
+            for pair in range(1, pairs + 1)
+            for order, variant in enumerate(
+                ["k1", "k2"] if pair % 2 else ["k2", "k1"], 1)
+        ]
+    actual_plan = [
+        (int(row["pair"]), int(row["order_in_pair"]), str(row["variant"])) for row in rows
+    ]
+    if actual_plan != expected_plan:
+        raise AssertionError("trial order does not match the preregistered arm plan")
     by_pair: dict[int, dict[str, dict[str, Any]]] = {}
     for row in rows:
         by_pair.setdefault(int(row["pair"]), {})[str(row["variant"])] = row
@@ -180,6 +332,10 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
     protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
     rows = json.loads((output / "trials.json").read_text(encoding="utf-8"))
+    if protocol.get("raw_schema") == "structured-arm-v1":
+        reconstructed = parse_structured_rows(protocol, output)
+        if rows != reconstructed:
+            raise AssertionError("trials are not exactly reconstructed from structured raw arms")
     expected = expected_summary(protocol, rows)
     for key, value in expected.items():
         if summary.get(key) != value:
@@ -190,21 +346,36 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
         raise AssertionError("formal artifact did not start from a clean worktree")
     expected_entries = int(protocol["request"].get("warm_requests_before_measurement", 1))
     for row in rows:
-        log = output / row["log"]
-        if row["log_sha256"] != sha256(log):
-            raise AssertionError("raw service log hash mismatch")
+        if protocol.get("raw_schema") != "structured-arm-v1":
+            log = output / row["log"]
+            if row["log_sha256"] != sha256(log):
+                raise AssertionError("raw service log hash mismatch")
         if row["paged_calls"] != expected_entries or row["paged_fallbacks"] != 0:
             raise AssertionError("trial did not execute the preregistered Paged warm/measured entries")
         if row["action_observations"] != expected_entries or row["action_decisions"] != expected_entries:
             raise AssertionError("trial lacks the preregistered complete production observations")
     mechanisms = json.loads((output / "mechanisms.json").read_text(encoding="utf-8"))
-    for variant, (_, pattern) in VARIANTS.items():
+    for variant, (selector, pattern) in VARIANTS.items():
         reparsed = parse_nsys_sqlite(
             output / f"profile/{variant}.sqlite", kernel_patterns=(pattern,),
         )
         for key, value in reparsed.items():
             if mechanisms[variant].get(key) != value:
                 raise AssertionError(f"{variant} mechanism is not derived from SQLite: {key}")
+        if mechanisms[variant]["variant"] != variant or \
+                mechanisms[variant]["selector"] != selector or \
+                mechanisms[variant]["kernel_pattern"] != pattern:
+            raise AssertionError(f"{variant} mechanism metadata mismatch")
+    if protocol.get("raw_schema") == "structured-arm-v1" and \
+            (output / "report.md").read_text(encoding="utf-8") != render_report(summary, mechanisms):
+        raise AssertionError("report is not rendered from the validated summary and mechanisms")
+    if "artifact_binding" in protocol:
+        binding = protocol["artifact_binding"]
+        for key in ("server_sha256", "model_sha256", "vendor_revision", "build_command"):
+            if summary.get(key) != binding[key]:
+                raise AssertionError(f"formal artifact binding mismatch: {key}")
+        if summary.get("device") != protocol["device"] or not summary.get("vendor_clean_before_run"):
+            raise AssertionError("formal artifact device/vendor provenance mismatch")
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     actual = {
         str(path.relative_to(output).as_posix()): sha256(path)
@@ -229,42 +400,64 @@ def main() -> None:
         return
 
     protocol = json.loads(args.protocol.read_text(encoding="utf-8"))
-    if device_identity()["name"] != protocol["device"]["name"]:
+    device = device_identity()
+    if device != protocol["device"]:
         raise RuntimeError("device differs from preregistration")
     clean = not bool(git_output("status", "--porcelain"))
-    raw = args.output / "raw"
-    raw.mkdir(parents=True, exist_ok=True)
-    rows: list[dict[str, Any]] = []
-    for pair in range(1, int(protocol["paired_trials"]) + 1):
-        order = ["k1", "k2"] if pair % 2 else ["k2", "k1"]
-        for order_in_pair, variant in enumerate(order, 1):
-            selector, _ = VARIANTS[variant]
-            result, metrics, log = run_mode(
-                args.server, args.model,
-                args.port_base + (pair - 1) * 2 + order_in_pair - 1,
-                "paged", f"k2-pair-{pair:02d}-{variant}",
-                prompt=str(protocol["request"]["prompt"]),
-                environment_overrides={"LLAMA_CACHEFLOW_PAGED_KERNEL": selector},
-                warm_requests=int(protocol["request"].get("warm_requests_before_measurement", 1)),
-            )
-            artifact_log = raw / f"{variant}-pair-{pair:02d}-{order_in_pair}.log"
-            shutil.copy2(log, artifact_log)
-            row = {
-                "pair": pair, "order_in_pair": order_in_pair, "variant": variant,
-                "content": result["content"],
-                "client_elapsed_ms": float(result["_client_elapsed_ms"]),
-                "prompt_ms": float(result["timings"]["prompt_ms"]),
-                "action_decisions": metric(metrics, 'llamacpp:kv_action_decisions_total{action="paged"}'),
-                "action_reason_decisions": action_reason_total(metrics, "paged"),
-                "action_observations": metric(metrics, 'llamacpp:kv_action_observations_total{action="paged"}'),
-                "action_cost_seconds": metric(metrics, 'llamacpp:kv_action_observation_seconds_total{action="paged"}'),
-                "paged_calls": metric(metrics, "llamacpp:paged_decode_calls_total "),
-                "paged_fallbacks": metric(metrics, "llamacpp:paged_decode_fallbacks_total "),
-                "log": str(artifact_log.relative_to(args.output).as_posix()),
-                "log_sha256": sha256(artifact_log),
-            }
-            rows.append(row)
-            print(json.dumps(row, ensure_ascii=False), flush=True)
+    vendor = ROOT / "vendor/llama.cpp"
+    vendor_revision = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=vendor, text=True).strip()
+    vendor_clean = not bool(subprocess.check_output(
+        ["git", "status", "--porcelain"], cwd=vendor, text=True).strip())
+    if not clean or not vendor_clean:
+        raise RuntimeError("formal experiment requires clean outer and vendor worktrees")
+    binding = protocol.get("artifact_binding")
+    if binding:
+        actual_binding = {
+            "server_sha256": sha256(args.server),
+            "model_sha256": sha256(args.model),
+            "vendor_revision": vendor_revision,
+            "build_command": binding["build_command"],
+        }
+        if actual_binding != binding:
+            raise RuntimeError(f"binary/model/vendor binding differs from preregistration: {actual_binding}")
+    if args.output.exists():
+        raise FileExistsError(f"formal output already exists: {args.output}")
+    if protocol.get("execution_scope") == "single_server":
+        rows = collect_single_process_rows(
+            protocol, args.server, args.model, args.output, args.port_base)
+    else:
+        raw = args.output / "raw"
+        raw.mkdir(parents=True)
+        rows = []
+        for pair in range(1, int(protocol["paired_trials"]) + 1):
+            order = ["k1", "k2"] if pair % 2 else ["k2", "k1"]
+            for order_in_pair, variant in enumerate(order, 1):
+                selector, _ = VARIANTS[variant]
+                result, metrics, log = run_mode(
+                    args.server, args.model,
+                    args.port_base + (pair - 1) * 2 + order_in_pair - 1,
+                    "paged", f"k2-pair-{pair:02d}-{variant}",
+                    prompt=str(protocol["request"]["prompt"]),
+                    environment_overrides={"LLAMA_CACHEFLOW_PAGED_KERNEL": selector},
+                    warm_requests=int(protocol["request"].get("warm_requests_before_measurement", 1)),
+                )
+                artifact_log = raw / f"{variant}-pair-{pair:02d}-{order_in_pair}.log"
+                shutil.copy2(log, artifact_log)
+                rows.append({
+                    "pair": pair, "order_in_pair": order_in_pair, "variant": variant,
+                    "content": result["content"],
+                    "client_elapsed_ms": float(result["_client_elapsed_ms"]),
+                    "prompt_ms": float(result["timings"]["prompt_ms"]),
+                    "action_decisions": metric(metrics, 'llamacpp:kv_action_decisions_total{action="paged"}'),
+                    "action_reason_decisions": action_reason_total(metrics, "paged"),
+                    "action_observations": metric(metrics, 'llamacpp:kv_action_observations_total{action="paged"}'),
+                    "action_cost_seconds": metric(metrics, 'llamacpp:kv_action_observation_seconds_total{action="paged"}'),
+                    "paged_calls": metric(metrics, "llamacpp:paged_decode_calls_total "),
+                    "paged_fallbacks": metric(metrics, "llamacpp:paged_decode_fallbacks_total "),
+                    "log": str(artifact_log.relative_to(args.output).as_posix()),
+                    "log_sha256": sha256(artifact_log),
+                })
 
     derived = expected_summary(protocol, rows)
     mechanisms = {
@@ -279,10 +472,11 @@ def main() -> None:
         "protocol_sha256": sha256(args.protocol),
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_revision": git_output("rev-parse", "HEAD"),
-        "vendor_revision": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT / "vendor/llama.cpp", text=True,
-        ).strip(),
+        "vendor_revision": vendor_revision,
         "worktree_clean_before_run": clean,
+        "vendor_clean_before_run": vendor_clean,
+        "device": device,
+        **(binding or {}),
         **derived,
     }
     (args.output / "trials.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")

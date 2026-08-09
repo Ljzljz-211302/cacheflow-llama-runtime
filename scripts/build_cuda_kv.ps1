@@ -51,7 +51,7 @@ if ($LASTEXITCODE -ne 0) { throw "CPU/CUDA KV correctness matrix failed" }
 if ($LASTEXITCODE -ne 0) { throw "vectorized CUDA KV remap correctness matrix failed" }
 & $pagedTestExe
 if ($LASTEXITCODE -ne 0) { throw "restricted paged decode differential tests failed" }
-& $backendOpsExe -b CUDA0 -o FLASH_ATTN_EXT -p "context=17"
+& $backendOpsExe -b CUDA0 -o FLASH_ATTN_EXT -p "hsk=64,nh=14,nkv=2,kv=64"
 if ($LASTEXITCODE -ne 0) { throw "production paged Flash Attention backend-op differential test failed" }
 & $policyTestExe
 if ($LASTEXITCODE -ne 0) { throw "unified KV action policy tests failed" }

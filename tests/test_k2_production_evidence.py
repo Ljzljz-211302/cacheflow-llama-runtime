@@ -63,12 +63,17 @@ class K2ProductionEvidenceTests(unittest.TestCase):
             (1, 10.0, 20.0, 4.0, 3.0),
             (2, 10.0, 20.0, 4.0, 3.0),
         ]:
-            for variant, client, prompt in [
+            variants = [
                 ("k1", k1_client, k1_prompt),
                 ("k2", k2_client, k2_prompt),
-            ]:
+            ] if pair % 2 else [
+                ("k2", k2_client, k2_prompt),
+                ("k1", k1_client, k1_prompt),
+            ]
+            for order_in_pair, (variant, client, prompt) in enumerate(variants, 1):
                 rows.append({
                     "pair": pair,
+                    "order_in_pair": order_in_pair,
                     "variant": variant,
                     "content": ",",
                     "client_elapsed_ms": client,
