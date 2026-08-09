@@ -138,7 +138,11 @@ def profile_variant(
         "selector": selector,
         "kernel_pattern": kernel_pattern,
         "request_content": result["content"],
-        "timing_role": "mechanism only; no-profiler paired service latency is primary",
+        "timing_role": (
+            "mechanism only; unprofiled server prompt is primary and client P95 is the guardrail"
+            if protocol["acceptance"].get("paired_median_metric") == "server_prompt_ms"
+            else "mechanism only; no-profiler paired client latency is primary"
+        ),
     })
     return mechanism
 

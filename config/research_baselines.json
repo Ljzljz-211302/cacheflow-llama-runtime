@@ -117,6 +117,26 @@
       ]
     },
     {
+      "id": "production-paged-k1",
+      "name": "Restricted production Paged K1 incumbent",
+      "kind": "local",
+      "comparison_class": "quantitative",
+      "runnable": true,
+      "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
+      "source_revision": "vendor/llama.cpp@b6ce0f289fda9c9b8a7829f24ae2aca2e86eb74c",
+      "license": "MIT",
+      "commands": [
+        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_cuda_kv.ps1",
+        "python scripts/run_k2_production_experiment.py --protocol config/k2_production_protocol_v2.2.json --output results/research/h8-k2-production-v2.2.0"
+      ],
+      "controlled_mode": "LLAMA_CACHEFLOW_PAGED_KERNEL=K1 inside the same Qwen2.5-0.5B production Paged graph, layout, request, warm-up, and process-isolated measurement boundary as K2",
+      "comparability_limits": [
+        "This baseline compares K2 against K1 inside Paged; it is not a Direct or upstream comparator.",
+        "Quantitative evidence is limited to D64, GQA ratio 7, page 16, batch/query token 1, context 17, and complete CUDA offload on one RTX 4050 Laptop GPU.",
+        "The process-scoped selector exists for controlled A/B and does not expand the production capability envelope."
+      ]
+    },
+    {
       "id": "fixed-rule",
       "name": "Deterministic rule-based benefit gate",
       "kind": "local",

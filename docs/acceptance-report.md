@@ -21,7 +21,7 @@
 | #2 | 已关闭 | `research-charter.md` 锁定研究问题、假设、机制、证伪条件和负结果规则。 |
 | #3 | 已关闭 | `research_protocol.json` 与人类可读协议冻结变量、配对统计、bootstrap、主指标和 pass/fail gate。 |
 | #4 | 已关闭 | H2 KV/profile 与真实服务 NSYS 因果链，保留 native report、SQLite、无 profiler 主结果及 NCU 不可用边界。 |
-| #5 | 已关闭 | 受限 Qwen Paged Decode K1 CUDA kernel、FP32 online softmax、CPU oracle、跨页/非连续页和 fail-closed 测试。 |
+| #5 | 已关闭 | 受限 Qwen Paged Decode K1/K2 CUDA kernel、FP32 stable softmax、GQA KV reuse、CPU oracle、跨页/非连续页和 fail-closed 测试。 |
 | #6 | 已关闭 | 建立 Direct/Remap/Paged/Swap/Recompute 统一候选接口；正式 H0/A1/T1/L1 artifact 仅 replay Direct、device/host Swap、Recompute 的 200 条观测，Remap/Paged 因能力门禁被 mask；另完成 500 万次 chooser 开销微基准。 |
 | #7 | 实现完成，Issue 尚未关闭 | 生产 Remap/Paged dispatch、原子故障回退、v1.1 负结果、联合 Williams 实验、在线 Ridge 与 chooser P99 证据。 |
 | #10 | 已关闭 | 一手论文、官方实现和本地可复现基线审计；外部系统只作 related work，不挪用其性能数字。 |
@@ -111,6 +111,8 @@ Nsight Compute 已实际执行，但当前 driver/tool compatibility 检查和 `
 
 K1 CUDA 原型直接按 block table 从非连续物理页读取 K/V 并输出 attention，不在 timed path materialize contiguous KV。独立 CPU FP32 oracle 与相同数学的 contiguous CUDA 路径共同覆盖 `14/2/D64`、`28/4/D128`、ratio-7 GQA、context `1/15/16/17/31/32`、ragged batch、fragmented pages、unused-page poison、output guards 和 invalid shape/page table fail closed。
 
+K2 针对生产 `14Q/2KV/D64`、context≤17 的 GQA7 envelope，把 K1 的每 query-head CTA 改为每 CTA 两个 query-head warp；同一 KV head 的 K/V 先共享装载，K 采用按维度转置的 shared-memory 布局，logit 与 stable softmax 用 warp reduction 并行。生产默认 dispatch K2，K1 仅由进程级实验 selector 保留为 incumbent；上层 capability gate 确保长 context 和未支持 shape 不会进入该 kernel。
+
 正式实验保存 9 个 regime × 20 pairs × 2 methods = 360 条无 profiler observations；每个 regime 计时前的独立 CPU FP32 oracle 最大绝对误差为 `3.6e-8`。0.5B 的 16-token case 为 neutral；17-token case 的中位改善为 +22.87%，但 95% CI 为 0.00%–47.08%，不能据此宣称稳定材料性获益。所有 medium/long regime 回退 10.41%–13.05%；0.5B shape 的 context 1024/batch 1 回退 13.05%（95% CI 12.91%–13.12%），7B shape 回退 11.59%（11.37%–11.78%）。4 份 NSYS trace 各精确包含 5 次对应方法 launch。batch-1 与 batch-4 的长 context 回退差只有 0.84/1.18 个百分点，未触发 K3 split-K；因长 context 回退超过 3%，预注册规则选择 K2 GQA reuse 作为下一待验证假设。环境记录为 RTX 4050 `sm_89`、6141 MiB 显存，最大 benchmark device allocation 16,864,272 B，全部 resource gate 通过。
 
 本验收只证明受限算法正确、负结果可复现并能给出下一内核决策，不证明生产可用或端到端加速。NCU 仍报告 driver incompatibility 与 `ERR_NVGPUCTRPERM`，因此 memory-bound、occupancy 和 hardware DRAM-byte 解释继续禁止。完整 hash-bound artifact 位于 `results/research/h3-paged-decode-v1.0.0/`。
@@ -184,6 +186,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify.ps1 -Full
 - 能力门禁：Remap 只在真实 donor prefix 可执行时开放；Paged 只支持 Qwen2.5-0.5B、FP16 KV、page 16、D64、单 token/batch 1、context ≤ 17、完整 GPU offload，默认关闭。超出 envelope 的受控用户请求回退 Recompute，不把 H3 microbenchmark 当作生产证据。
 - 验收入口：`scripts/run_issue7_acceptance.ps1` 串行执行 Direct/Paged differential、真实 Remap、KV pressure fallback、晚到 CUDA failure/recovery；CUDA build gate 另执行 `test-backend-ops` 的 Paged Flash Attention CPU/CUDA 交叉验证、独立 F16 CUDA oracle、策略与 block-table 单测。
 - 正式 Paged 服务证据：v1.1 在干净提交 `9182882` 上用 17-token 跨页请求完成 10 组 AB/BA，均逐字输出 `,`，Paged 进入真实 production graph 10 次、fallback 0；机制隔离 NSYS replay 恰有 24 个 `cacheflow_paged_decode_fattn_k1<64>` layer launch。Paged client P95 29.210 ms 对 Direct 27.354 ms，回退 6.78%；配对 Paged-Direct 中位差 +2.705 ms，bootstrap 95% 区间 [-1.185, +12.019] ms。因此 +5% promotion gate 失败，保留 opt-in/默认不选，不把正确性通过写成性能通过。完整 hash-bound 工件位于 `results/research/h7-production-paged-v1.1.0/`；未跨页的 v1.0 仅保留为 superseded 审计记录。
+- 正式 K2 替换证据：v2.2 在干净提交 `2c2f7f9` 上完成 30 组稳态 K1/K2 配对，累计 300 次 production Paged graph entry、fallback 0、输出一致。服务内部 prompt 中位数 K1/K2 为 4.3785/4.1585 ms（K2 -5.02%），客户端中位数 6.8473/5.7631 ms（-15.83%），P95 30.1442/29.8194 ms（-1.08%）；PID 隔离 NSYS 的 24 层 kernel 总时长 0.414371/0.205313 ms（-50.45%）。K2 通过预注册的 Paged 内部替换门槛；v2.0/v2.1 失败 artifact 继续留档，且该结果不改写 Paged-vs-Direct 的负结论。
 - 算法：H0 固定安全规则、A1 解析模型、T1 分桶查表、L1 置信约束 Ridge 使用相同 snapshot 和完整动作边界；无效/OOD/冷启动/不确定性均 fail closed。
 - 数据隔离：20 个 trace group 按时间顺序切为 12 train / 8 evaluation，session、prefix family 与 trace 均无交叉；16 个 held-out resident/preempted snapshot 采用 paired action observation。
 - v1.0.0 因错误使用 HTTP 往返计时且 L1 合同与生产不一致而被否决，仅保留在 `results/research/superseded/`。v1.1.0 从干净提交 `32c8fe7` 重采集：40 trace 按时间切为 20 train/20 evaluation，resident/preempted 各 20 个 held-out pair。

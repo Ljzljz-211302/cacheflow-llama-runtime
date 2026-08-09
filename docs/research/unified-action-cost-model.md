@@ -14,7 +14,7 @@ Issue #6 不应实现成“给五个动作各拍一个权重，然后取最小�
 
 推荐同时比较三个模型：透明的确定性启发式 `H0`、按环境与 regime 分桶的查表模型 `T1`、每动作独立的正则化线性模型 `L1`。分析式模型 `A1` 作为所有模型共享的结构先验和冷启动估计。最终进入真实调度路径的优先候选是 `L1 + H0 fallback`，而不是树模型或神经网络：它能够复用本仓库已有的在线 ridge、置信半径、漂移和 cooldown 机制，且可用固定大小数组实现有界、无分配的热路径。
 
-当前 H3 实验已经证明受限 Paged K1 在中长 context 上比相同数学路径的 contiguous CUDA comparator 慢约 10.41%--13.05%。因此 Issue #6 中的 Paged 必须默认是 **evidence-gated experimental action**；在 K2 或后续生产 adapter 取得独立正证据以前，它可以参加离线反事实评估，但不能因分析式模型预测“省去了 remap bytes”而自动进入用户请求路径。
+H3 实验已经证明受限 Paged K1 在中长 context 上比相同数学路径的 contiguous CUDA comparator 慢约 10.41%--13.05%。后续 K2 只在 Qwen2.5-0.5B、D64/GQA7、context17 的生产 Paged 内部通过了 K1 替换门槛；它没有提供中长 context 或 Paged 相对 Direct 的正证据。因此 Issue #6 中的 Paged 仍是 **evidence-gated experimental action**，不能因分析式模型预测“省去了 remap bytes”而自动进入用户请求路径。
 
 ## 2. 动作语义必须先固定
 
@@ -291,7 +291,7 @@ zero allocation and zero CUDA synchronization in choose()
 ## 13. 本研究仍未证明什么
 
 - 没有证明统一模型已经优于 H0；
-- 没有证明 Paged 已适合生产，现有中长 context 证据反而支持禁用 K1；
+- 没有证明 Paged 已普遍优于 Direct；K2 仅在受限短 context envelope 内替换 K1，现有中长 context 证据仍支持禁用该路径；
 - 没有证明 Swap 比 Recompute 普遍更快，或反之；
 - 没有证明 50 us/1% 开销门槛已经通过；
 - 没有用离线 replay 替代真实 scheduler path；

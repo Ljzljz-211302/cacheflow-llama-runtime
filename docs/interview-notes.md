@@ -195,6 +195,22 @@ CUDA mixed workload 缺少 backend-aware policy guard；Hybrid/Recurrent 只有 
 
 当前已完成 prefill 级 Conservative Benefit Gating、53-wave 长驻收敛、CUDA Event/Engine/TTFT 服务因果链，以及 4-regime Nsight Systems KV kernel timeline。下一步是在管理员启用 GPU performance counter、并匹配 driver/NCU 版本后补 DRAM/L2/occupancy/roofline；在此之前只讲 NSYS launch/copy/sync 与 paired latency，不假装已有硬件计数器。之后再把动作空间扩展到 slot placement/KV admission/speculation，而不是继续堆外围功能。
 
+### K1 为什么慢，K2 到底改了什么？
+
+先定义对象。一次 decode attention 要用当前 token 的 Query（Q）与历史 Key（K）做点积得到相关性权重，再用这些权重加权 Value（V）。Paged Decode 表示历史 K/V 不保证物理连续，kernel 通过 block table 把逻辑 token 映射到物理 KV cell。GQA（Grouped-Query Attention，分组查询注意力）表示多个 Q head 共用一个 KV head；Qwen2.5-0.5B 是 14 个 Q head、2 个 KV head，所以每 7 个 Q head 共用一份 K/V。
+
+K1 的做法是“一个 query head 一个 CTA”。CTA（CUDA thread block）是一组能共享 shared memory 并进行 block 内同步的线程。K1 正确且结构直观，但同一 KV head 会被 7 个 CTA 重复读取；而且它逐 token 做点积、block-wide reduction、online softmax 更新，短短 17 token 也要反复同步。online softmax 是无需保存全部 logits 的流式算法：维护截至当前 token 的最大值、指数和与加权输出；最大值变化时按指数比例重缩放旧状态，因此仍保持数值稳定。
+
+K2-T2 的 T2 表示一个 CTA 同时处理两个 query heads。CTA 内有两个 warp；warp 是 NVIDIA GPU 按 32 个线程锁步调度的基本执行组，每个 warp 独立负责一个 Q head。CTA 把这两个 head 共用的 K/V 从 global memory 装到低延迟 shared memory 一次。K 采用 `[dimension][token]` 转置布局：当一个 warp 的 lane 0～16 同时读取不同 token 的同一 dimension 时，地址映射到不同 shared-memory bank，避免 bank conflict（多个线程争用同一存储 bank 而被串行化）。V 保持 token-major，方便每个 lane 累加两个输出维度。
+
+计算时，一个 lane 负责一个 token 的 Q·K 点积；warp shuffle 允许 lane 之间不经过 shared memory 直接交换寄存器值，用它求最大 logit 和指数和，完成 stable softmax。然后各 lane 广播 token 权重并累加 V。这个设计没有把 7 个 head 全塞进一个 CTA，因为那会令每层只剩 2 个 CTA，在 batch 1 时并行度不足；T2 保留每层 8 个 CTA，是 KV 复用、同步成本和可调度并行度的折中。
+
+证据链要分三层回答。第一层是正确性：K1/K2 确定性输出逐字一致，真实生产图累计执行 300 次且 0 fallback。第二层是服务指标：30 组预注册稳态配对中，prompt 中位数 4.3785→4.1585 ms（-5.02%），客户端中位数 6.8473→5.7631 ms（-15.83%），客户端 P95 30.1442→29.8194 ms（-1.08%）。第三层是机制：PID 隔离 NSYS 中 24 层目标 kernel 总时长 0.414371→0.205313 ms（-50.45%）。NSYS 证明执行的是哪个 kernel 以及其时间；因为 NCU hardware counter 不可用，不能声称已直接测得 DRAM byte、occupancy 或 bank-conflict counter。
+
+为什么 v2.0/v2.1 失败而 v2.2 通过？v2.0 冷态请求与 v2.1 的客户端配对中位数受到 Windows 调度和本机 HTTP 的 15～30 ms 尖峰影响，量级远大于 0.2 ms kernel 干预。旧结果没有删除。v2.2 在看新结果前预注册：用服务进程内部 `prompt_ms` 判断算子主效应，同时保留未加 profiler 的客户端 P95 回退≤5%作为生产保护线。它既能归因，又不能用内部小指标掩盖端到端尾延迟恶化。
+
+最后必须区分两个问题：K2 已证明在同一受限 Paged 路径内优于 K1；Paged 相对 Direct 的 v1.1 P95 仍回退 6.78%，所以 Paged 整体仍是 opt-in。前者是算子替换成功，后者是动作选择边界，二者不矛盾。
+
 ### Benefit Gating 怎么讲？
 
 先讲负结果：固定adaptive chunk在不同backend/workload上结论反号。然后画出同一生产Seam的两条shadow plan，说明learned policy只在悲观CacheFlow cost仍低于乐观upstream cost加安全margin时启用。重点追问是置信半径、SLO reward、drift与探索预算。最后展示16-trial联合 `backend×mode` Williams验收：每个treatment×位置和有向前驱各2次，trial边界有washout，并报告paired oracle regret；不声称这是所有模型和硬件上的全局最优。

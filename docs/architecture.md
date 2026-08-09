@@ -1190,11 +1190,11 @@ Issue #4 在这条服务因果链下新增 H2 算子机制切片。`bench-kv-blo
 
 ## 25. 受限 Paged Decode Attention 原型
 
-`llama-paged-decode-cuda.cuh` 定义单层、单 token decode 的实验 seam。Host `plan_create` 固定并上传页表与 context length；paged launch 直接按 `[physical_page, page_token, kv_head, head_dim]` 读取 FP16 K/V，不先生成连续 KV；contiguous launch 只提供相同数学路径的 CUDA 对照。K1 kernel 为每个 `(sequence, query_head)` 一个 CTA，用 FP32 online softmax 直接产生 FP32 attention output。
+`llama-paged-decode-cuda.cuh` 定义单层、单 token decode 的实验 seam。Host `plan_create` 固定并上传页表与 context length；paged launch 直接按 `[physical_page, page_token, kv_head, head_dim]` 读取 FP16 K/V，不先生成连续 KV；contiguous launch 只提供相同数学路径的 CUDA 对照。K1 kernel 为每个 `(sequence, query_head)` 一个 CTA，用 FP32 online softmax 直接产生 FP32 attention output。K2 在 D64/GQA7/短 context envelope 内把两个 query head 合并为一个 CTA：两个 warp 共享一次 K/V 装载，K 用 `[dim][token]` 转置 shared-memory 布局，softmax 的 max/sum 通过 warp shuffle 归约；其余 shape 仍走 K1 或更上层 fail-closed 路径。
 
 原型只接受 page size 16、D64/D128 和整除 GQA；当前模型忠实 shape 是 Qwen2.5-0.5B 的 `14/2/64`，`28/4/128` 仅是 Qwen2.5-7B 的 kernel geometry，不代表本机已经完成 7B 服务。无效 shape、空 context、已使用的越界物理页和空指针全部 fail closed；生产 fallback 与 dtype adapter 不属于该 seam。
 
-验证分成三层：独立 CPU FP32 oracle 检查跨页、ragged GQA、边界、poison 和 guard；20-pair无 profiler CUDA-event 实验给出 D64/D128、短/中/长 context 和 batch 1/4 的效应与 bootstrap 区间；方法隔离的 NSYS replay 只绑定 kernel identity/launch count。NCU counter 缺失时禁止 memory-bound、occupancy 和 DRAM-byte 归因。预注册规则只选择下一候选 K2（GQA KV reuse）、K3（split-KV）或保留 K1，不把候选选择写成已实现加速。生产 dispatch、真实 llama attention tensor adapter 和用户请求 A/B 由后续 Issue 单独验收。
+验证分成三层：独立 CPU FP32 oracle 检查跨页、ragged GQA、边界、poison 和 guard；20-pair无 profiler CUDA-event 实验给出 D64/D128、短/中/长 context 和 batch 1/4 的效应与 bootstrap 区间；方法隔离的 NSYS replay 只绑定 kernel identity/launch count。K1 frontier 先选择 K2（GQA reuse）而非 K3（split-KV）；随后 K2 通过生产图输出差分、30 组无 profiler 服务配对和 PID 隔离 NSYS 复验。NCU counter 缺失时仍禁止 memory-bound、occupancy 和硬件 DRAM-byte 归因。
 
 ## 26. Unified KV Action Policy（Issue #6）
 
@@ -1232,7 +1232,7 @@ Remap 只有在真实 donor prefix 大于目标 slot 的 resident prefix 时才�
 
 ## 27. Production Paged Dispatch 与故障原子性（Issue #7）
 
-生产路径不是调用 H3 benchmark。`llama_kv_cache::build_paged_decode_layout` 从真实 cell metadata 和当前 `prepare()` destination 构造 block table；重算缓存尾 token 时，pending destination 必须覆盖相同 logical position 的旧 cell。该布局通过 `GGML_OP_FLASH_ATTN_EXT` 的额外输入进入每一层 attention，CUDA K1 直接使用真实 K/V tensor stride 和物理 cell base，不生成 contiguous K/V 临时副本，输出继续进入原有 `wo`、logits 与 sampler。Paged 分支的 CUDA buffer size 必须至少包含普通输出 tensor bytes，即使额外 scratch 为零；`test-backend-ops` 用 F32 Q/FP16 KV 与 CPU Flash Attention 交叉验证，独立 CUDA oracle 继续覆盖生产 F16 Q。
+生产路径不是调用 H3 benchmark。`llama_kv_cache::build_paged_decode_layout` 从真实 cell metadata 和当前 `prepare()` destination 构造 block table；重算缓存尾 token 时，pending destination 必须覆盖相同 logical position 的旧 cell。该布局通过 `GGML_OP_FLASH_ATTN_EXT` 的额外输入进入每一层 attention，CUDA K2 直接使用真实 K/V tensor stride 和物理 cell base，不生成 contiguous K/V 临时副本，输出继续进入原有 `wo`、logits 与 sampler。K2 仅在 D64/GQA7 envelope 默认 dispatch；`LLAMA_CACHEFLOW_PAGED_KERNEL=K1` 只作为进程级可复现实验 seam。Paged 分支的 CUDA buffer size 必须至少包含普通输出 tensor bytes，即使额外 scratch 为零；`test-backend-ops` 用 F32 Q/FP16 KV 与 CPU Flash Attention 交叉验证，独立 CUDA oracle继续覆盖生产 F16 Q。
 
 `llama_context` 在 `mctx->apply()` 前完成 envelope 与布局检查。只有 Qwen2.5-0.5B `24L/14Q/2KV/D64`、page 16、FP16 K/V、非转置 V、单 sequence/单 query token、context ≤ 17、causal Flash Attention、无 ALiBi/softcap/sink、完整 GPU offload 才设置 Paged graph topology；其余请求保持 Direct/Recompute。graph reuse key 包含 Paged topology，避免复用错误图。
 
@@ -1241,6 +1241,8 @@ Remap 只有在真实 donor prefix 大于目标 slot 的 resident prefix 时才�
 统一入口 `scripts/run_issue7_acceptance.ps1` 覆盖 Direct、真实 CUDA Remap、Paged、out-of-envelope Recompute、容量压力回收和晚到 CUDA failure 后完整重算；Paged 还与原生 Flash/non-Flash backend envelope 做端到端 top-logprob 差分，并要求动作计数可由 `{action,reason}` 联合指标完整归因。算子级独立 oracle 继续使用 `atol=rtol=1e-3`。性能只采用预注册的 paired no-profiler 服务实验；若 +5% P95 promotion gate 失败，Paged 保持 opt-in，不因功能正确而默认启用。
 
 正式 `h7-production-paged-v1.1.0` 工件在干净外层提交 `9182882`、vendor 提交 `130bd22` 上完成 10 组 17-token 跨页 AB/BA：Direct/Paged 输出全部一致，Paged graph entry 10、fallback 0，机制 replay 的 24 个 K1 launch 与 24 层模型一致。Paged client P95 29.210 ms 相对 Direct 27.354 ms 回退 6.78%；配对差中位数 +2.705 ms，bootstrap 95% 区间 [-1.185, +12.019] ms。故策略 capability 可以描述“可执行”，但 promotion 状态必须为 false；H0/L1 都不得把 Paged 当成默认性能动作。v1.0 因请求没有跨过物理 page boundary 而仅保留为 superseded 审计记录。该边界仅适用于 Qwen2.5-0.5B、batch 1、17-token context。
+
+K2 的正式 `h8-k2-production-v2.2.0` 工件从干净外层提交 `2c2f7f9`、vendor 提交 `b6ce0f2` 运行 30 组稳态 K1/K2 进程隔离配对。每 arm 在计时前执行 1 次完整 prompt 与 4 次 cached warm request，随后测量 cached request；累计 300 次 Paged graph entry、输出逐字一致、fallback 0。K2 相对 K1 的服务内部 prompt 中位数下降 5.02%，客户端中位数下降 15.83%，客户端 P95 下降 1.08%；NSYS 的 24 层 kernel 总时长下降 50.45%。因此 K2 通过“服务内部配对中位数不慢 + 客户端 P95 回退≤5%”的预注册替换门槛。v2.0/v2.1 的冷态或客户端中位数门槛失败记录保留；v2.2 只晋级 Paged 内部的 K2，不改变 Paged-vs-Direct 的 opt-in 结论。
 
 ### 26.5 正式证据与边界
 

@@ -317,6 +317,55 @@
         "NSYS launch identity is mechanism evidence and its timing is not used for the primary latency result"
       ],
       "negative_result_policy": "Keep Paged opt-in and fail closed when the promotion gate loses; preserve exact correctness and mechanism evidence without relabeling it as a speedup."
+    },
+    {
+      "id": "H7-production-paged-k2-replacement",
+      "question": "Can a GQA-reusing K2 kernel replace the correct but slower K1 inside the restricted production Paged path?",
+      "hypothesis": "For the registered Qwen2.5-0.5B D64/GQA7/context-17 steady-state envelope, K2 preserves output, does not regress unprofiled client P95 by more than 5%, and does not slow paired in-process prompt time relative to K1.",
+      "status": "existing-evidence",
+      "independent_variables": [
+        "process-scoped K1 versus K2 kernel selector",
+        "alternating K1-K2 and K2-K1 pair order"
+      ],
+      "dependent_metrics": [
+        "exact response content, production graph entries, and fallbacks",
+        "paired server prompt time and unprofiled client P95",
+        "PID-isolated NSYS target-kernel identity, launches, and duration"
+      ],
+      "confounders": [
+        "Windows scheduling and localhost HTTP outliers",
+        "profiler perturbation",
+        "fresh serving process and GPU clock state"
+      ],
+      "baselines": ["production-paged-k1"],
+      "mechanism": "K2-T2 maps two query heads to two warps in one CTA, stages their shared GQA K/V once, transposes shared K to avoid the token-read bank-conflict pattern, and uses warp reductions for stable softmax; the production capability gate restricts dispatch to D64/GQA7/context no greater than 17.",
+      "falsification": [
+        "Any K1/K2 output differs or either arm falls back.",
+        "Paired server prompt median is slower for K2.",
+        "Unprofiled K2 client P95 regresses by more than 5%.",
+        "PID-isolated NSYS does not show one target K1 or K2 launch per model layer."
+      ],
+      "evidence_sources": [
+        "config/k2_production_protocol_v2.2.json",
+        "results/research/h8-k2-production-v2.2.0/manifest.json",
+        "results/research/h8-k2-production-v2.2.0/summary.json",
+        "results/research/h8-k2-production-v2.2.0/trials.json",
+        "results/research/h8-k2-production-v2.2.0/mechanisms.json"
+      ],
+      "observed_results": [
+        "Thirty steady-state pairs produced exact matching content, 300 production Paged graph entries, and zero fallbacks.",
+        "K1/K2 server prompt medians were 4.3785/4.1585 ms, a 5.02% K2 reduction; client medians were 6.8473/5.7631 ms, a 15.83% reduction.",
+        "K1/K2 client P95 values were 30.1442/29.8194 ms, a 1.08% K2 reduction that passed the preregistered 5% guardrail.",
+        "PID-isolated NSYS recorded 24 layer launches in each arm; aggregate target-kernel duration was 0.414371 ms for K1 and 0.205313 ms for K2, a 50.45% reduction.",
+        "The v2.0 and v2.1 failed artifacts remain retained. The v2.2 promotion is K2 over K1 only and does not reverse the failed Paged-over-Direct result."
+      ],
+      "scope_limits": [
+        "Qwen2.5-0.5B, F32 Q, FP16 KV, D64, GQA ratio 7, page 16, batch/query token 1, context 17, complete CUDA offload",
+        "One RTX 4050 Laptop GPU on Windows",
+        "No long-context, prefill, larger-model, Paged-over-Direct, or universal throughput claim",
+        "No hardware DRAM-byte, occupancy, bank-conflict-counter, or memory-bound claim because NCU counters remain unavailable"
+      ],
+      "negative_result_policy": "Retain failed K1/K2 protocols and keep the Paged-over-Direct action boundary unchanged; do not promote unsupported shapes or contexts."
     }
   ]
 }

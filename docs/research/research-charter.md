@@ -25,7 +25,7 @@
 |---|---|---|---|---|
 | H1 | 128-bit 向量化何时降低 snapshot-preserving Remap 成本？ | existing-evidence | 锁定环境中 1/4/16/32 blocks 的配对改善非递增 | 趋势不再非递增、任一规模回归超过 3%、没有规模改善至少 10%，或正确性失败 |
 | H2 | KV 搬运何时成为请求级瓶颈？ | limited evidence | 对齐小搬运中向量化材料性获益，规模增大后收益低于门槛；错位 layout 明确反转 | 所有预注册高搬运场景中 KV 均不 material，或没有 CUDA mediator |
-| H3 | Paged Decode Attention 何时优于 Direct/Remap？ | limited evidence | K1 相对同数学 contiguous comparator 在已测 regime 全部回退；下一步验证 GQA reuse | 所有场景既无延迟 non-inferiority 也无容量收益，或数值不正确 |
+| H3 | Paged Decode Attention 何时优于 Direct/Remap？ | limited evidence | K1 中长 context 相对 contiguous comparator 回退；K2 在受限短 context 内通过 K1 替换门槛 | 所有场景既无延迟 non-inferiority 也无容量收益，或数值不正确 |
 | H4 | 可解释代价模型能否安全优于固定规则？ | limited evidence | 当前 L1 安全回退到 H0；尚未证明 learned 收益 | regret/回归超门槛、开销吃掉收益、分布切换后仍持续错误启用 |
 | H5 | 调度能否改变 CUDA 工作却在 execute 汇总下降时恶化 TTFT？ | existing-evidence | 请求排队结构可使 phase aggregate 与请求 SLO 反向 | 决策、CUDA mediator、请求结果三段因果链任一不存在 |
 
@@ -74,7 +74,7 @@ Issue #4 现有 4 个预注册 regime、160 条无 profiler paired observations 
 
 Paged 路径省去 materialization，却增加 page-table lookup、不规则访存、mask、softmax 和归约。它可能只改善容量、不改善 batch-1 latency；这仍是有效结果，但必须明确属于哪一层收益。若所有预注册场景既没有延迟 non-inferiority 也没有容量收益，则否定当前受限实现，而不是更换 workload 追正结果。
 
-Issue #5 的 H3 v1.0.0 已得到受限混合结果：K1 直接分页 kernel 在每个 regime 计时前通过独立 CPU FP32 oracle，最大绝对误差 `3.6e-8`。0.5B 的 16-token case 为 neutral，17-token case 有高噪声的 +22.87% 中位改善但区间跨过材料性门槛；所有 medium/long regime 回退 10.41%–13.05%。0.5B/7B-shape 在 context 1024、batch 1 分别回退 13.05% 与 11.59%；对应 batch-1/batch-4 差只有 0.84/1.18 个百分点，不支持优先做 split-K。预注册规则因此选择 K2 GQA KV reuse 作为下一可证伪假设。环境为 RTX 4050 `sm_89`、6141 MiB，最大 benchmark device allocation 16,864,272 B；4 个方法隔离 NSYS capture 各有 5 次目标 launch。NCU 不完整，禁止 memory/occupancy 机制归因。该结果不表示 K2 已实现，也不表示 0.5B 生产请求已经接入。
+Issue #5 的 H3 v1.0.0 已得到受限混合结果：K1 直接分页 kernel 在每个 regime 计时前通过独立 CPU FP32 oracle，最大绝对误差 `3.6e-8`。0.5B 的 16-token case 为 neutral，17-token case 有高噪声的 +22.87% 中位改善但区间跨过材料性门槛；所有 medium/long regime 回退 10.41%–13.05%。0.5B/7B-shape 在 context 1024、batch 1 分别回退 13.05% 与 11.59%；对应 batch-1/batch-4 差只有 0.84/1.18 个百分点，不支持优先做 split-K。该预注册规则选择了 K2 GQA KV reuse，后续 K2 以两 query-head warp tile、共享 K/V staging、转置 shared K 和 warp stable-softmax 实现。正式 v2.2 在受限 0.5B/D64/GQA7/context17 生产 envelope 内相对 K1 将 prompt 中位数降低 5.02%、24 层 kernel 总时长降低 50.45%，客户端 P95 未回退并通过替换门槛；这不是中长 context 或 Paged-vs-Direct 的正结论。NCU 不完整，仍禁止 memory/occupancy 与硬件 DRAM-byte 归因。
 
 ## 6. H4：自适应动作策略
 

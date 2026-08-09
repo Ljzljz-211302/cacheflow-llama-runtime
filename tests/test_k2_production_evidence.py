@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -24,6 +27,27 @@ class K2ProductionEvidenceTests(unittest.TestCase):
             ROOT / "config/k2_production_protocol_v2.1.json",
             ROOT / "results/research/h8-k2-production-v2.1.0",
         )
+
+    def test_formal_v2_2_artifact_recomputes(self) -> None:
+        validate_artifact(
+            ROOT / "config/k2_production_protocol_v2.2.json",
+            ROOT / "results/research/h8-k2-production-v2.2.0",
+        )
+
+    def test_rehashed_false_v2_2_promotion_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / "artifact"
+            shutil.copytree(ROOT / "results/research/h8-k2-production-v2.2.0", artifact)
+            summary_path = artifact / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["promotion_passed"] = False
+            summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+            manifest_path = artifact / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["files"]["summary.json"] = hashlib.sha256(summary_path.read_bytes()).hexdigest()
+            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "promotion_passed"):
+                validate_artifact(ROOT / "config/k2_production_protocol_v2.2.json", artifact)
 
     def test_server_prompt_gate_does_not_hide_client_tail_regression(self) -> None:
         protocol = {
