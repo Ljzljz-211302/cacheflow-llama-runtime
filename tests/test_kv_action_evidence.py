@@ -250,6 +250,20 @@ class KvActionEvidenceTests(unittest.TestCase):
         self.assertEqual(report["models"]["D3"]["harmful_decisions"], 1)
         self.assertTrue(report["risk_budgeted_delta"]["acceptance"]["passed"])
 
+    def test_risk_budgeted_delta_uses_its_own_ridge_and_calibration_split(self) -> None:
+        action_rows = piecewise_context_delta_rows()
+        baseline = evaluate_kv_action_models(action_rows, self.protocol)
+        changed = copy.deepcopy(self.protocol)
+        changed["risk_budgeted_delta"]["ridge_lambda"] = 1e9
+        changed["risk_budgeted_delta"]["calibration_traces"] = 1
+        report = evaluate_kv_action_models(action_rows, changed)
+        self.assertNotEqual(
+            report["models"]["D3"]["switches_vs_h0"],
+            baseline["models"]["D3"]["switches_vs_h0"],
+        )
+        self.assertEqual(report["risk_budgeted_delta"]["fit_traces"], 79)
+        self.assertEqual(report["risk_budgeted_delta"]["calibration_traces"], 1)
+
     def test_trace_leakage_is_rejected(self) -> None:
         tampered = copy.deepcopy(rows())
         tampered[-1]["trace_id"] = tampered[0]["trace_id"]

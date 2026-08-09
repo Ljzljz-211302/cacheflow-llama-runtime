@@ -62,9 +62,9 @@ _Avoid_: 强化学习策略（当前实现不是 RL）。
 
 ## Paired-Delta Policy
 
-从同一 Trial Pair 直接学习候选 KV Execution Action 相对 H0 的完整动作成本差，并且仅在单侧上界仍为负时推荐切换的阶段条件化策略。它在通过独立 Evidence Gate 和生产 canary 前只属于离线候选。
+从同一 matched-workload trace 的候选 KV Execution Action 与 H0 观测中学习完整动作成本差，并且仅在风险调整后仍有收益时推荐切换的阶段条件化策略。当前 H4 的各动作由独立固定模式服务进程采集，因此这里的 `paired` 是历史实现名，不构成上文定义的 Trial Pair，也不支持克隆状态因果解释；它在通过同进程 canary 前只属于离线候选。
 
-_Avoid_: 绝对成本模型；在线强化学习；已上线学习策略。
+_Avoid_: 绝对成本模型；在线强化学习；把跨进程 matched workload 称为 Trial Pair；已上线学习策略。
 
 ## Piecewise Paired-Delta Policy
 

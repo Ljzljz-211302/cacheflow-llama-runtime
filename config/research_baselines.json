@@ -189,7 +189,7 @@
       "license": "MIT",
       "commands": [
         "python scripts/run_kv_action_policy_experiment.py",
-        "python -m unittest tests.test_kv_action_evidence"
+        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1"
       ],
       "controlled_mode": "offline median lookup keyed by action/context/batch/page-runs/pressure buckets on chronological train traces, evaluated on held-out paired traces",
       "comparability_limits": [
@@ -230,7 +230,7 @@
       "license": "MIT",
       "commands": [
         "python scripts/run_kv_action_policy_experiment.py",
-        "python -m unittest tests.test_kv_action_evidence"
+        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1"
       ],
       "controlled_mode": "offline signed candidate-minus-H0 Ridge per runtime regime with preregistered mechanism interactions, one-sided calibration, confidence radius, switch margin, and exact H0 fallback",
       "comparability_limits": [
@@ -250,7 +250,7 @@
       "license": "MIT",
       "commands": [
         "python scripts/run_kv_action_policy_experiment.py",
-        "python -m unittest tests.test_kv_action_evidence"
+        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1"
       ],
       "controlled_mode": "offline signed paired-delta Ridge split at the preregistered 512-token boundary, calibrated per regime and context band with a 0.75 ms switch margin and exact H0 fallback",
       "comparability_limits": [
@@ -270,11 +270,12 @@
       "license": "MIT",
       "commands": [
         "python scripts/run_kv_action_policy_experiment.py",
-        "python -m unittest tests.test_kv_action_evidence"
+        "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify.ps1"
       ],
       "controlled_mode": "offline 512-token piecewise paired-delta Ridge with median residual calibration, confidence radius, 0.25 ms margin, 5% harmful-rate budget, total-gain-over-total-harm gate, and exact H0 fallback",
       "comparability_limits": [
         "The v1.6 result is a held-out matched-workload replay on one model and one GPU, not an online production or cross-hardware claim.",
+        "Each action is observed on an independent fixed-mode server process, so action-by-process confounding prevents a formal Trial Pair or action-causal interpretation.",
         "One harmful decision is retained and quantified rather than hidden; passing authorizes only a monitored canary.",
         "The existing production chooser overhead benchmark bounds the deployment seam, but D3 itself remains offline."
       ]

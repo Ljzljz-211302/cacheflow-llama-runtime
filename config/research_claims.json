@@ -175,7 +175,7 @@
         "available action set and safety thresholds"
       ],
       "dependent_metrics": [
-        "paired oracle regret",
+        "matched-workload oracle regret",
         "paired upstream regression",
         "wrong-enable and fallback rates",
         "policy decision overhead",
@@ -208,10 +208,10 @@
         "The v1.1.0 replay is also superseded because it used synthetic canonical model inputs, resampled decisions rather than trace clusters, lacked preregistered balanced collection order, and reported CUDA synchronization from a literal rather than a source-bound audit.",
         "The v1.2.0 replay is superseded because it did not retain raw Prometheus evidence, reused one Recompute observation across two regimes, ignored physical observation order in Ridge replay, and described a lexical synchronization audit too strongly.",
         "The v1.6.0 CUDA matched-workload replay collected 120 new trace-isolated groups with new collection and bootstrap seeds, split chronologically into 60 fit, 20 calibration, and 40 evaluation traces, and hash-bound 600 raw Prometheus/response observations.",
-        "Risk-budgeted D3 made 24 of 80 held-out decisions away from H0. Its cumulative regret was 2.082 ms versus H0's 42.590 ms, a 95.1% reduction; P95 regret was 0 versus 3.169 ms; and the paired trace-cluster mean-regret delta 95% CI was -0.7232 to -0.3069 ms.",
-        "D3 had one harmful decision (1.25%), below the preregistered 5% budget. Its 41.480 ms total measured gain exceeded 0.972 ms total measured harm, so every v1.6 acceptance gate passed.",
+        "Risk-budgeted D3 made 24 of 80 held-out decisions away from H0. Its cumulative regret was 2.082 ms versus H0's 42.590 ms, a 95.1% reduction; P95 regret was 0 versus 3.169 ms; and the matched-workload trace-cluster mean-regret delta 95% CI was -0.7232 to -0.3069 ms. The artifact's paired_trace_cluster field is a legacy machine name, not a formal same-hot-process Trial Pair.",
+        "D3 had one harmful decision: 1.25% of all 80 eligible decisions, the preregistered denominator, and 4.17% of its 24 actual switches. Both observed replay proportions were below 5%; no population-level harmful-rate confidence-bound claim is made. Its 41.480 ms total measured gain exceeded 0.972 ms total measured harm, so every v1.6 acceptance gate passed.",
         "D1 and D2 made no held-out switch. T1 reached 18.061 ms cumulative regret with one harmful decision. The v1.4 and v1.5 negative results remain retained and are not overwritten by v1.6.",
-        "The v1.6 overhead benchmark recorded p99 0.900 us, decision/action ratio p99 0.0874%, and zero heap allocations on the existing bounded production chooser seam. D3 remains offline and requires a separately monitored canary before online enablement."
+        "The four action observations come from independent fixed-mode server processes, so action and process remain confounded and no action-causal claim is made. The v1.6 overhead benchmark recorded p99 0.900 us, decision/action ratio p99 0.0874%, and zero heap allocations on the existing bounded production chooser seam. D3 remains offline and requires a same-process monitored canary before online enablement."
       ],
       "scope_limits": [
         "The unified policy currently executes H0; v1.6 justifies a monitored D3 canary but does not silently enable D3 online.",

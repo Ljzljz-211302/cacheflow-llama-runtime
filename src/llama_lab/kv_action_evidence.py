@@ -610,16 +610,73 @@ def evaluate_kv_action_models(
         for key, values in piecewise_residuals.items()
     }
     risk_config = protocol.get("risk_budgeted_delta")
-    risk_calibration = (
-        {
+    risk_models: dict[tuple[str, str, str], _OnlineRidge] = {}
+    risk_calibration: dict[tuple[str, str, str], float] = {}
+    risk_fit_trace_count = 0
+    risk_calibration_trace_count = 0
+    if isinstance(risk_config, dict):
+        risk_calibration_trace_count = int(risk_config["calibration_traces"])
+        if (
+            risk_calibration_trace_count <= 0
+            or risk_calibration_trace_count >= len(ordered_train_traces)
+        ):
+            raise ValueError("risk-budgeted calibration trace count is invalid")
+        risk_calibration_traces = {
+            trace for trace, _ in ordered_train_traces[-risk_calibration_trace_count:]
+        }
+        risk_fit_snapshots = [
+            snapshot for snapshot in train_snapshots.values()
+            if str(snapshot[0]["trace_id"]) not in risk_calibration_traces
+        ]
+        risk_calibration_snapshots = [
+            snapshot for snapshot in train_snapshots.values()
+            if str(snapshot[0]["trace_id"]) in risk_calibration_traces
+        ]
+        risk_fit_trace_count = len(ordered_train_traces) - risk_calibration_trace_count
+        for snapshot in sorted(
+            risk_fit_snapshots, key=lambda value: int(value[0]["observation_order"])
+        ):
+            by_action = {str(row["action"]): row for row in snapshot}
+            baseline = str(snapshot[0]["baseline_action"])
+            baseline_cost = float(by_action[baseline]["observed_cost_ms"])
+            regime = str(snapshot[0]["regime"])
+            band = _context_band(float(snapshot[0]["context_tokens"]), context_boundaries)
+            features = _paired_delta_features(snapshot[0], interaction_names)
+            for action, row in by_action.items():
+                if action == baseline:
+                    continue
+                key = _piecewise_delta_key(regime, action, band)
+                model = risk_models.setdefault(
+                    key,
+                    _OnlineRidge(
+                        float(risk_config["ridge_lambda"]),
+                        feature_count=len(delta_feature_names),
+                        nonnegative=False,
+                    ),
+                )
+                model.observe(features, float(row["observed_cost_ms"]) - baseline_cost)
+        risk_residuals: dict[tuple[str, str, str], list[float]] = defaultdict(list)
+        for snapshot in risk_calibration_snapshots:
+            by_action = {str(row["action"]): row for row in snapshot}
+            baseline = str(snapshot[0]["baseline_action"])
+            baseline_cost = float(by_action[baseline]["observed_cost_ms"])
+            regime = str(snapshot[0]["regime"])
+            band = _context_band(float(snapshot[0]["context_tokens"]), context_boundaries)
+            features = _paired_delta_features(snapshot[0], interaction_names)
+            for action, row in by_action.items():
+                key = _piecewise_delta_key(regime, action, band)
+                if action == baseline or key not in risk_models:
+                    continue
+                observed_delta = float(row["observed_cost_ms"]) - baseline_cost
+                risk_residuals[key].append(
+                    observed_delta - risk_models[key].predict(features)
+                )
+        risk_calibration = {
             key: max(0.0, _conformal_upper_quantile(
                 values, float(risk_config["one_sided_quantile"])
             ))
-            for key, values in piecewise_residuals.items()
+            for key, values in risk_residuals.items()
         }
-        if isinstance(risk_config, dict)
-        else {}
-    )
     minimum = int(protocol["learned"]["minimum_action_observations"])
     snapshots: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in evaluation:
@@ -766,7 +823,7 @@ def evaluate_kv_action_models(
                 key = _piecewise_delta_key(
                     str(snapshot[0]["regime"]), str(action), context_band
                 )
-                model = piecewise_models.get(key)
+                model = risk_models.get(key)
                 if model is None or model.observations < int(
                     risk_config["minimum_action_observations"]
                 ):
@@ -1018,8 +1075,8 @@ def evaluate_kv_action_models(
         **({"risk_budgeted_delta": {
             "feature_names": list(delta_feature_names),
             "context_boundaries": context_boundaries,
-            "fit_traces": len(ordered_train_traces) - calibration_trace_count,
-            "calibration_traces": calibration_trace_count,
+            "fit_traces": risk_fit_trace_count,
+            "calibration_traces": risk_calibration_trace_count,
             "calibration_quantile": float(risk_config["one_sided_quantile"]),
             "maximum_harmful_rate": float(risk_config["maximum_harmful_rate"]),
             "calibration_offsets_ms": {
