@@ -219,6 +219,37 @@ class KvActionEvidenceTests(unittest.TestCase):
         self.assertEqual({row["chosen"] for row in high}, {"device_swap"})
         self.assertTrue(report["piecewise_delta"]["acceptance"]["passed"])
 
+    def test_risk_budgeted_delta_keeps_net_gain_despite_one_harmful_switch(self) -> None:
+        action_rows = piecewise_context_delta_rows()
+        for row in action_rows:
+            trace_number = int(str(row["trace_id"]).rsplit("-", 1)[1])
+            if row["regime"] != "preempted" or row["action"] != "recompute":
+                continue
+            baseline = next(
+                candidate for candidate in action_rows
+                if candidate["snapshot_id"] == row["snapshot_id"]
+                and candidate["action"] == "device_swap"
+            )
+            if row["split"] == "train" and trace_number == 70:
+                row["observed_cost_ms"] = float(baseline["observed_cost_ms"]) + 6.0
+            elif row["split"] == "evaluation" and trace_number == 0:
+                row["observed_cost_ms"] = float(baseline["observed_cost_ms"]) + 10.0
+            elif row["split"] == "evaluation" and int(row["context_tokens"]) <= 512:
+                row["observed_cost_ms"] = float(baseline["observed_cost_ms"]) - 4.0
+        protocol = copy.deepcopy(self.protocol)
+        protocol["risk_budgeted_delta"] = {
+            **copy.deepcopy(protocol["piecewise_delta"]),
+            "one_sided_quantile": 0.5,
+            "switch_margin_ms": 0.25,
+            "maximum_harmful_rate": 0.05,
+            "require_total_gain_above_total_harm": True,
+        }
+        report = evaluate_kv_action_models(action_rows, protocol)
+        self.assertEqual(report["models"]["D2"]["switches_vs_h0"], 0)
+        self.assertGreater(report["models"]["D3"]["switches_vs_h0"], 0)
+        self.assertEqual(report["models"]["D3"]["harmful_decisions"], 1)
+        self.assertTrue(report["risk_budgeted_delta"]["acceptance"]["passed"])
+
     def test_trace_leakage_is_rejected(self) -> None:
         tampered = copy.deepcopy(rows())
         tampered[-1]["trace_id"] = tampered[0]["trace_id"]
@@ -277,7 +308,12 @@ class KvActionEvidenceTests(unittest.TestCase):
         orders = make_balanced_action_orders(
             actions, 40, self.protocol["confirmatory"]["order_seed"]
         )
-        self.assertEqual(orders, make_balanced_action_orders(actions, 40, 6042029))
+        self.assertEqual(
+            orders,
+            make_balanced_action_orders(
+                actions, 40, self.protocol["confirmatory"]["order_seed"]
+            ),
+        )
         for position in range(len(actions)):
             self.assertEqual(
                 {action: sum(order[position] == action for order in orders) for action in actions},

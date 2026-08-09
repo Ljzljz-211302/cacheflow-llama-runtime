@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "protocol_version": "1.5.0",
-  "artifact_version": "h4-kv-action-v1.5.0",
+  "protocol_version": "1.6.0",
+  "artifact_version": "h4-kv-action-v1.6.0",
   "claim_id": "H4-adaptive-action-policy",
   "cost_boundary": "scheduler snapshot ready through next useful decode runnable",
   "production_actions": ["direct", "device_swap", "host_swap", "recompute"],
@@ -9,7 +9,7 @@
     "remap": "operator exists but no complete-action llama_decode adapter",
     "paged": "H3 K1 regressed 10.41%-13.05% in every medium/long regime and has no production adapter"
   },
-  "models": ["H0", "A1", "T1", "L1", "D1", "D2"],
+  "models": ["H0", "A1", "T1", "L1", "D1", "D2", "D3"],
   "split": {
     "unit": "trace_id",
     "group_fields": ["session_id", "prefix_family"],
@@ -76,6 +76,23 @@
       "harmful_rate_must_not_exceed_h0": true
     }
   },
+  "risk_budgeted_delta": {
+    "ridge_lambda": 1.0,
+    "confidence_beta": 1.0,
+    "switch_margin_ms": 0.25,
+    "minimum_action_observations": 4,
+    "calibration_traces": 20,
+    "one_sided_quantile": 0.5,
+    "context_boundaries": [512],
+    "calibration_by_context_band": true,
+    "maximum_harmful_rate": 0.05,
+    "require_total_gain_above_total_harm": true,
+    "acceptance": {
+      "minimum_switches_vs_h0": 1,
+      "mean_regret_delta_ci95_upper_must_be_negative": true,
+      "p95_regret_must_not_exceed_h0": true
+    }
+  },
   "harm": {
     "relative_to_h0_percent": 3.0
   },
@@ -89,10 +106,10 @@
   "confirmatory": {
     "regimes": ["resident", "preempted"],
     "order_randomization": "seeded balanced Latin blocks",
-    "order_seed": 6042029,
+    "order_seed": 6042031,
     "minimum_pairs_per_regime": 40,
     "bootstrap_samples": 10000,
-    "bootstrap_seed": 6042028,
+    "bootstrap_seed": 6042030,
     "bootstrap_unit": "trace_id",
     "max_action_feature_delta": [0.0, 4.0, 0.0, 4.0, 1.0, 4.0, 1.0, 4.0, 4.0],
     "negative_results_retained": true

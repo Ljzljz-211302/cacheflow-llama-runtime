@@ -27,3 +27,7 @@ D2 的学习目标仍是候选动作相对安全基线 H0 的完整动作成本�
 v1.4 仅作为开发证据：用锁定后的 D2 回放时，它产生 9 次切换，累计 regret 为 24.697 ms，H0 为 58.142 ms；P95 regret 为 2.013 ms，H0 为 3.969 ms；harmful decision 为 0；配对 trace-cluster mean-regret delta 的 95% bootstrap 区间为 [-0.7011, -0.1745] ms。这说明 D2 值得进入新数据验证，不构成确认性结论。
 
 v1.5 必须重新采集 trace，并同时满足：至少一次留出切换；配对 mean-regret delta 的 95% 区间上界小于 0；P95 regret 不高于 H0；harmful rate 不高于 H0。即使全部通过，也只授权独立的生产 canary，不会自动把离线 D2 上线。
+
+## v1.6 风险预算扩展
+
+v1.5 证明了 D2 的“harmful rate 不高于 H0”与 95% 单侧残差门禁会在观测噪声下拒绝全部动作：H0 和任何非基线策略不同，H0 相对自身不可能被标记 harmful，因此该条件实际要求候选零次负优化。D3 保留 512-token 分段、Ridge 半径和 H0 回退，但用 calibration residual 的中位数修正系统偏差，并显式预注册 5% harmful-rate budget。它仍须同时满足 paired CI 上界小于 0、P95 不高于 H0、累计正收益大于累计负收益。该设计优化的是有风险约束的期望完整动作成本，不声称保证每个请求都加速。

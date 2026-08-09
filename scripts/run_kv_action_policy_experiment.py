@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect paired real-service action costs and evaluate H0/A1/T1/L1/D1/D2."""
+"""Collect paired real-service action costs and evaluate H0/A1/T1/L1/D1/D2/D3."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from llama_lab.kv_action_evidence import (
 from llama_lab.server_bench import wait_until_ready
 
 
-ARTIFACT = ROOT / "results/research/h4-kv-action-v1.5.0"
+ARTIFACT = ROOT / "results/research/h4-kv-action-v1.6.0"
 PROTOCOL_PATH = ROOT / "config/kv_action_policy_protocol.json"
 SERVER = ROOT / "build/patched-cuda-ninja3/bin/llama-server.exe"
 MODEL = ROOT / "models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
@@ -442,6 +442,7 @@ def main() -> None:
     h0 = analysis["models"]["H0"]
     d1 = analysis["models"]["D1"]
     d2 = analysis["models"]["D2"]
+    d3 = analysis["models"]["D3"]
     if t1 == h0:
         table_conclusion = "T1 also matched H0 on this held-out run and established no advantage."
     elif t1["harmful_rate"] > h0["harmful_rate"]:
@@ -473,6 +474,19 @@ def main() -> None:
         piecewise_conclusion = (
             f"D2 made {d2['switches_vs_h0']} held-out switches but failed the retained "
             f"paired-replay gates: {', '.join(failed)}. H0 therefore remains selected."
+        )
+    d3_acceptance = analysis["risk_budgeted_delta"]["acceptance"]
+    if d3_acceptance["passed"]:
+        risk_conclusion = (
+            f"D3 made {d3['switches_vs_h0']} held-out switches and passed its "
+            f"pre-registered 5% harmful-rate budget: total gain {d3['total_gain_ms']:.3f} ms, "
+            f"total harm {d3['total_harm_ms']:.3f} ms. This authorizes only a monitored canary."
+        )
+    else:
+        failed = [name for name, passed in d3_acceptance.items() if name != "passed" and not passed]
+        risk_conclusion = (
+            f"D3 made {d3['switches_vs_h0']} held-out switches but failed: "
+            f"{', '.join(failed)}. H0 therefore remains selected."
         )
     ablation_lines = [
         f"| {name} | {value['median_regret_ms']:.3f} | {value['p95_regret_ms']:.3f} | "
@@ -507,6 +521,12 @@ def main() -> None:
         "D2 preserves D1's signed-delta and fail-closed logic but fits and calibrates separate "
         "models on the pre-registered `context_tokens <= 512` and `> 512` bands. Its stricter "
         "0.75 ms margin was locked before this confirmatory collection.",
+        "",
+        risk_conclusion,
+        "",
+        "D3 treats isolated slow switches as an explicit risk budget instead of requiring the "
+        "tautological H0 harmful rate of zero. It still requires a negative paired CI, non-worse "
+        "P95, at most 5% harmful decisions, and total measured gain above total harm.",
         "",
         "| D1 ablation | Median regret (ms) | P95 regret (ms) | Cumulative regret (ms) | Switches |",
         "|---|---:|---:|---:|---:|",

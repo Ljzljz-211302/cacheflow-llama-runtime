@@ -50,11 +50,10 @@ def load_kv_action_protocol(path: Path) -> dict[str, Any]:
     if protocol.get("schema_version") != 1:
         raise ValueError("KV action protocol schema_version must be 1")
     protocol_version = protocol.get("protocol_version")
-    expected_models = (
-        ["H0", "A1", "T1", "L1", "D1", "D2"]
-        if protocol_version == "1.5.0"
-        else ["H0", "A1", "T1", "L1", "D1"]
-    )
+    expected_models = {
+        "1.5.0": ["H0", "A1", "T1", "L1", "D1", "D2"],
+        "1.6.0": ["H0", "A1", "T1", "L1", "D1", "D2", "D3"],
+    }.get(protocol_version, ["H0", "A1", "T1", "L1", "D1"])
     if protocol.get("models") != expected_models:
         raise ValueError("KV action protocol model set differs from its version")
     paired_delta = protocol.get("paired_delta", {})
@@ -89,7 +88,7 @@ def load_kv_action_protocol(path: Path) -> dict[str, Any]:
         "harmful_rate_must_not_exceed_h0": True,
     }:
         raise ValueError("KV action protocol has invalid paired-delta acceptance gates")
-    if protocol_version == "1.5.0":
+    if protocol_version in {"1.5.0", "1.6.0"}:
         piecewise = protocol.get("piecewise_delta", {})
         boundaries = piecewise.get("context_boundaries")
         if (
@@ -101,6 +100,16 @@ def load_kv_action_protocol(path: Path) -> dict[str, Any]:
             raise ValueError("KV action protocol has invalid piecewise context boundaries")
         if piecewise.get("calibration_by_context_band") is not True:
             raise ValueError("KV action protocol must calibrate D2 by context band")
+    if protocol_version == "1.6.0":
+        risk = protocol.get("risk_budgeted_delta", {})
+        if risk.get("context_boundaries") != piecewise.get("context_boundaries"):
+            raise ValueError("KV action D3 context boundaries must match D2")
+        if risk.get("one_sided_quantile") != 0.5:
+            raise ValueError("KV action D3 must use median residual calibration")
+        if not math.isclose(float(risk.get("maximum_harmful_rate", -1.0)), 0.05):
+            raise ValueError("KV action D3 harmful risk budget must be five percent")
+        if risk.get("require_total_gain_above_total_harm") is not True:
+            raise ValueError("KV action D3 must require total gain above total harm")
     if protocol.get("split", {}).get("unit") != "trace_id":
         raise ValueError("KV action protocol split unit must be trace_id")
     if not protocol.get("split", {}).get("row_randomization_prohibited"):
@@ -600,6 +609,17 @@ def evaluate_kv_action_models(
         ))
         for key, values in piecewise_residuals.items()
     }
+    risk_config = protocol.get("risk_budgeted_delta")
+    risk_calibration = (
+        {
+            key: max(0.0, _conformal_upper_quantile(
+                values, float(risk_config["one_sided_quantile"])
+            ))
+            for key, values in piecewise_residuals.items()
+        }
+        if isinstance(risk_config, dict)
+        else {}
+    )
     minimum = int(protocol["learned"]["minimum_action_observations"])
     snapshots: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in evaluation:
@@ -736,6 +756,54 @@ def evaluate_kv_action_models(
                 piecewise_detail["reason"] = "negative_upper_bound"
         if "D2" in results:
             choices["D2"] = piecewise_choice
+        risk_detail: dict[str, Any] = {}
+        if "D3" in results and isinstance(risk_config, dict):
+            risk_choice = baseline
+            risk_candidates: list[tuple[float, str, float, float, float]] = []
+            for action in by_action:
+                if action == baseline:
+                    continue
+                key = _piecewise_delta_key(
+                    str(snapshot[0]["regime"]), str(action), context_band
+                )
+                model = piecewise_models.get(key)
+                if model is None or model.observations < int(
+                    risk_config["minimum_action_observations"]
+                ):
+                    continue
+                prediction = model.predict(features)
+                radius = model.radius(features, float(risk_config["confidence_beta"]))
+                calibration = risk_calibration.get(key, math.inf)
+                upper_delta = prediction + radius + calibration
+                risk_candidates.append(
+                    (upper_delta, str(action), prediction, radius, calibration)
+                )
+            risk_detail = {
+                "candidate": baseline,
+                "context_band": context_band,
+                "predicted_delta_ms": 0.0,
+                "ridge_radius_ms": 0.0,
+                "calibration_offset_ms": 0.0,
+                "upper_delta_ms": 0.0,
+                "switch_margin_ms": float(risk_config["switch_margin_ms"]),
+                "reason": "insufficient_observations",
+            }
+            if risk_candidates:
+                best_upper_delta, candidate, prediction, radius, calibration = min(
+                    risk_candidates
+                )
+                risk_detail.update({
+                    "candidate": candidate,
+                    "predicted_delta_ms": prediction,
+                    "ridge_radius_ms": radius,
+                    "calibration_offset_ms": calibration,
+                    "upper_delta_ms": best_upper_delta,
+                    "reason": "nonnegative_risk_adjusted_delta",
+                })
+                if best_upper_delta + float(risk_config["switch_margin_ms"]) < 0.0:
+                    risk_choice = candidate
+                    risk_detail["reason"] = "negative_risk_adjusted_delta"
+            choices["D3"] = risk_choice
         oracle_cost = float(oracle["observed_cost_ms"])
         baseline_cost = float(by_action[baseline]["observed_cost_ms"])
         for model, action in choices.items():
@@ -754,6 +822,8 @@ def evaluate_kv_action_models(
                 result_row.update(delta_detail)
             elif model == "D2":
                 result_row.update(piecewise_detail)
+            elif model == "D3":
+                result_row.update(risk_detail)
             results[model].append(result_row)
     summary: dict[str, Any] = {}
     h0_by_snapshot = {
@@ -800,6 +870,21 @@ def evaluate_kv_action_models(
             ],
             "choices": {action: sum(row["chosen"] == action for row in decisions) for action in ACTIONS},
         }
+    if "D3" in summary:
+        h0_cost_by_snapshot = {
+            str(row["snapshot_id"]): float(row["cost_ms"]) for row in results["H0"]
+        }
+        for model, decisions in results.items():
+            signed_improvements = [
+                h0_cost_by_snapshot[str(row["snapshot_id"])] - float(row["cost_ms"])
+                for row in decisions
+            ]
+            summary[model]["total_gain_ms"] = sum(
+                max(0.0, value) for value in signed_improvements
+            )
+            summary[model]["total_harm_ms"] = sum(
+                max(0.0, -value) for value in signed_improvements
+            )
     delta_acceptance_config = delta_config["acceptance"]
     delta_summary = summary["D1"]
     h0_summary = summary["H0"]
@@ -844,6 +929,34 @@ def evaluate_kv_action_models(
             ),
         }
         piecewise_acceptance["passed"] = all(piecewise_acceptance.values())
+    risk_acceptance: dict[str, bool] = {}
+    if "D3" in summary and isinstance(risk_config, dict):
+        risk_summary = summary["D3"]
+        risk_acceptance_config = risk_config["acceptance"]
+        risk_acceptance = {
+            "minimum_switches_vs_h0": (
+                int(risk_summary["switches_vs_h0"])
+                >= int(risk_acceptance_config["minimum_switches_vs_h0"])
+            ),
+            "mean_regret_delta_ci95_upper_negative": (
+                float(risk_summary[
+                    "paired_trace_cluster_mean_regret_delta_vs_h0_ci95_ms"
+                ][1]) < 0.0
+            ),
+            "p95_regret_not_above_h0": (
+                float(risk_summary["p95_regret_ms"])
+                <= float(h0_summary["p95_regret_ms"])
+            ),
+            "harmful_rate_within_budget": (
+                float(risk_summary["harmful_rate"])
+                <= float(risk_config["maximum_harmful_rate"])
+            ),
+            "total_gain_above_total_harm": (
+                float(risk_summary["total_gain_ms"])
+                > float(risk_summary["total_harm_ms"])
+            ),
+        }
+        risk_acceptance["passed"] = all(risk_acceptance.values())
     max_feature_delta = [0.0] * 9
     for row in rows:
         for index, (canonical, actual) in enumerate(zip(
@@ -902,6 +1015,19 @@ def evaluate_kv_action_models(
             },
             "acceptance": piecewise_acceptance,
         }} if "D2" in results else {}),
+        **({"risk_budgeted_delta": {
+            "feature_names": list(delta_feature_names),
+            "context_boundaries": context_boundaries,
+            "fit_traces": len(ordered_train_traces) - calibration_trace_count,
+            "calibration_traces": calibration_trace_count,
+            "calibration_quantile": float(risk_config["one_sided_quantile"]),
+            "maximum_harmful_rate": float(risk_config["maximum_harmful_rate"]),
+            "calibration_offsets_ms": {
+                f"{regime}:{band}:{action}": value
+                for (regime, band, action), value in sorted(risk_calibration.items())
+            },
+            "acceptance": risk_acceptance,
+        }} if "D3" in results and isinstance(risk_config, dict) else {}),
         "ablations": ablations,
     }
 
