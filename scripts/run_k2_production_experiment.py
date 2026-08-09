@@ -110,13 +110,16 @@ def collect_single_process_rows(
     raw.mkdir(parents=True, exist_ok=False)
     log_path = raw / "server.log"
     control_file = ROOT / "results/raw/k2-kernel-control.txt"
+    slot_save_path = ROOT / "results/raw/k2-slot-state"
     control_file.parent.mkdir(parents=True, exist_ok=True)
+    slot_save_path.mkdir(parents=True, exist_ok=True)
     control_file.write_bytes(b"K1")
     command = [
         str(server.resolve()), "-m", str(model.resolve()),
         "--host", "127.0.0.1", "--port", str(port),
         "-c", "512", "-np", "1", "-t", "8", "-ngl", "99",
         "--flash-attn", "on", "--no-warmup", "--metrics", "--slots",
+        "--slot-save-path", str(slot_save_path.resolve()),
         "--kv-block-runtime", "--kv-block-size", "16", "--kv-paged-decode",
         "--kv-action-policy", "analytical", "--kv-action-override", "paged", "-lv", "4",
     ]
