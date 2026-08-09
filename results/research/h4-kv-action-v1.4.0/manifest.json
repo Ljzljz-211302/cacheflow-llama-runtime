@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "artifact_version": "h4-kv-action-v1.4.0",
+  "protocol_sha256": "d1c06730d477ab2a9f01483bd69716c458e9963f9545fc0de6a46e8b598d5646",
+  "model_path": "models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+  "model_sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+  "outer_commit": "60f29a55d65d675f0fe0453b0a618b9f225b8763",
+  "upstream_revision": "acd79d603cb2e1c84c0886137b80f1ad649b6857",
+  "patch_path": "patches/0001-cache-aware-slot-scheduler.patch",
+  "patch_sha256": "1fa75315edfc22ca33673f3962ce3ec520bb369706d37b853365592df52f6ca3",
+  "runs": {
+    "direct": {
+      "port": 19840,
+      "kv_action_policy": "fixed",
+      "cache_idle_slots": false,
+      "endpoint_slots": true
+    },
+    "device_swap": {
+      "port": 19841,
+      "kv_action_policy": "fixed",
+      "cache_idle_slots": true,
+      "endpoint_slots": true
+    },
+    "host_swap": {
+      "port": 19842,
+      "kv_action_policy": "fixed",
+      "cache_idle_slots": true,
+      "kv_swap_path": "memory",
+      "kv_swap_budget_mib": 256,
+      "endpoint_slots": true
+    },
+    "recompute": {
+      "port": 19843,
+      "kv_action_policy": "fixed",
+      "cache_idle_slots": false,
+      "endpoint_slots": true,
+      "cache_prompt": false,
+      "observations_per_trace": 2
+    }
+  },
+  "files": {
+    "overhead.jsonl": "77b686b418375e93714539ba5f45c502ce7b662056efd0841e91b3582bf6cad0",
+    "paired-actions.jsonl": "72d4e302c4aabb5009bfb451d0db8833885283435feb98e2f5a14b4fdc8791d9",
+    "raw/server-device_swap.log": "da51db9e7c407e5dfcfb20dca6dd7fd5fe1f8cd7bbab42412864d43c5df0ff30",
+    "raw/server-direct.log": "1676b522495f6bfcb3c6a1b6c95a7d3eb75f611a44b72da2fc9ce78804bd757b",
+    "raw/server-host_swap.log": "dde5403ff61e513c1e9feff3570d731cf6796eff5c925035c53e740f2ec40352",
+    "raw/server-recompute.log": "365437db19fc670ef63277dfbd1a4f5d83e63a64be646d77dea0c9e61eb300f4",
+    "report.json": "8fd76706b15a7888c7991009d9b0510ac0b34c95e3d23087d1a30399ab44bfda",
+    "report.md": "cf18bff57ba1b4b55b1f599f879ef9a103b81e8556475a48d55bc31ec782f430",
+    "runtime-evidence.jsonl": "08ba2291789f474fb9bde8a2afaad2e00421f238a23c93aa27370992eefce625",
+    "sync-audit.json": "5cc4da5232717625a450f17840542af2aecc5f837d77c1dfefd580ad4f7caba4"
+  }
+}

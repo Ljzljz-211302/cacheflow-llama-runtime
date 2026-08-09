@@ -187,7 +187,7 @@
         "changing action availability",
         "backend and context-bucket distribution"
       ],
-      "baselines": ["kv-action-h0", "kv-action-a1", "kv-action-t1", "kv-action-l1"],
+      "baselines": ["kv-action-h0", "kv-action-a1", "kv-action-t1", "kv-action-l1", "kv-action-d1"],
       "mechanism": "No single action minimizes cost across copy legality, bytes, fragmentation, memory pressure, and decode work; an uncertainty-aware policy should choose only when predicted benefit exceeds risk and overhead.",
       "falsification": [
         "The policy exceeds preregistered paired-regret or upstream-regression gates.",
@@ -200,18 +200,18 @@
         "docs/experiment-limitations.md",
         "docs/research/primary-source-foundations.md",
         "docs/research/unified-action-cost-model.md",
-        "results/research/h4-kv-action-v1.3.0/manifest.json",
-        "results/research/h4-kv-action-v1.3.0/report.json"
+        "results/research/h4-kv-action-v1.4.0/manifest.json",
+        "results/research/h4-kv-action-v1.4.0/report.json"
       ],
       "observed_results": [
         "The v1.0.0 replay is superseded because it used client HTTP round-trip latency instead of the registered internal complete-action boundary and evaluated a different Ridge contract; it remains under results/research/superseded for audit only.",
         "The v1.1.0 replay is also superseded because it used synthetic canonical model inputs, resampled decisions rather than trace clusters, lacked preregistered balanced collection order, and reported CUDA synchronization from a literal rather than a source-bound audit.",
         "The v1.2.0 replay is superseded because it did not retain raw Prometheus evidence, reused one Recompute observation across two regimes, ignored physical observation order in Ridge replay, and described a lexical synchronization audit too strongly.",
-        "The v1.3.0 CUDA matched-workload replay collected 40 trace-isolated groups, split chronologically into 20 training and 20 evaluation traces, and hash-bound 200 raw Prometheus/response observations. Recompute is independently observed per regime, Ridge replay follows physical observation order, and bootstrap resamples complete trace clusters.",
-        "H0, A1, and the offline replay of the server's exact nine-feature per-action Ridge equations each recorded median/P95/cumulative regret of 0/1.953/15.543 ms with zero harmful decisions. L1 made no confidence-bound switch.",
-        "Offline T1 recorded median/P95/cumulative regret of 0/1.516/5.506 ms with zero harmful decisions; its paired trace-cluster mean-regret delta versus H0 had a 10,000-resample 95% CI of -0.5285 to -0.0511 ms.",
-        "The action servers' stateful feature vectors differ from the shared real H0 anchor by the explicitly reported, protocol-gated per-feature maxima. Therefore T1 is described only as lower-regret in this matched-workload replay, not as a cloned-state causal effect or production-online win.",
-        "The five-regime, five-million-choice benchmark recorded worst p99 1.000 us, decision/action ratio p99 0.0644%, and zero heap allocations. A hash-bound lexical audit found no direct CUDA synchronization symbol or backend include in the policy module; it does not prove runtime indirect synchronization is absent. The untrimmed 1997.800 us Windows wall maximum is report-only."
+        "The v1.4.0 CUDA matched-workload replay collected 120 trace-isolated groups, split chronologically into 60 fit, 20 one-sided calibration, and 40 evaluation traces, and hash-bound 600 raw Prometheus/response observations. Recompute is independently observed per regime, and bootstrap resamples complete trace clusters.",
+        "H0, A1, L1, and the regime-conditioned paired-delta D1 each recorded median/P95/cumulative regret of 0/3.969/58.142 ms with zero harmful decisions. D1 made no switch and failed the minimum-switch and negative-CI gates.",
+        "Offline T1 recorded median/P95/cumulative regret of 0/3.258/34.938 ms; its paired trace-cluster mean-regret delta versus H0 had a 10,000-resample 95% CI of -0.4687 to -0.1341 ms, but one of 80 decisions was harmful and therefore T1 failed promotion.",
+        "The retained negative result indicates that a global linear paired-delta model does not express the observed low/high-context Recompute boundary. This is a development hypothesis for a separately preregistered run, not a post-hoc v1.4 success claim.",
+        "The v1.4 overhead benchmark recorded p99 0.500 us, decision/action ratio p99 0.0882%, and zero heap allocations. A hash-bound lexical audit found no direct CUDA synchronization symbol or backend include in the policy module; it does not prove runtime indirect synchronization is absent. The untrimmed 832.900 us Windows wall maximum is report-only."
       ],
       "scope_limits": [
         "The unified policy currently executes H0 and runs per-action Ridge in shadow; the held-out run did not justify active L1 selection.",

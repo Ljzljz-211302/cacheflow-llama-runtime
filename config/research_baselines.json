@@ -143,7 +143,7 @@
       "comparison_class": "quantitative",
       "runnable": true,
       "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
-      "source_revision": "manifest:results/research/h4-kv-action-v1.3.0/manifest.json",
+      "source_revision": "manifest:results/research/h4-kv-action-v1.4.0/manifest.json",
       "license": "MIT",
       "commands": [
         "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_cuda_kv.ps1",
@@ -164,7 +164,7 @@
       "comparison_class": "quantitative",
       "runnable": true,
       "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
-      "source_revision": "manifest:results/research/h4-kv-action-v1.3.0/manifest.json",
+      "source_revision": "manifest:results/research/h4-kv-action-v1.4.0/manifest.json",
       "license": "MIT",
       "commands": [
         "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_cuda_kv.ps1",
@@ -185,7 +185,7 @@
       "comparison_class": "quantitative",
       "runnable": true,
       "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
-      "source_revision": "manifest:results/research/h4-kv-action-v1.3.0/manifest.json",
+      "source_revision": "manifest:results/research/h4-kv-action-v1.4.0/manifest.json",
       "license": "MIT",
       "commands": [
         "python scripts/run_kv_action_policy_experiment.py",
@@ -205,7 +205,7 @@
       "comparison_class": "quantitative",
       "runnable": true,
       "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
-      "source_revision": "manifest:results/research/h4-kv-action-v1.3.0/manifest.json",
+      "source_revision": "manifest:results/research/h4-kv-action-v1.4.0/manifest.json",
       "license": "MIT",
       "commands": [
         "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_cuda_kv.ps1",
@@ -217,6 +217,26 @@
         "The formal result is a safety/fallback result: L1 did not switch away from H0 on the held-out traces.",
         "Shadow-mode recommendations are observable but do not alter the executed production action.",
         "No claim is made that the current training sample establishes a learned-policy speedup."
+      ]
+    },
+    {
+      "id": "kv-action-d1",
+      "name": "D1 regime-conditioned paired-delta Ridge",
+      "kind": "local",
+      "comparison_class": "quantitative",
+      "runnable": true,
+      "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
+      "source_revision": "manifest:results/research/h4-kv-action-v1.4.0/manifest.json",
+      "license": "MIT",
+      "commands": [
+        "python scripts/run_kv_action_policy_experiment.py",
+        "python -m unittest tests.test_kv_action_evidence"
+      ],
+      "controlled_mode": "offline signed candidate-minus-H0 Ridge per runtime regime with preregistered mechanism interactions, one-sided calibration, confidence radius, switch margin, and exact H0 fallback",
+      "comparability_limits": [
+        "D1 made zero held-out switches in v1.4.0 and therefore does not establish a learned-policy speedup.",
+        "The negative result is retained because it identifies global-linear underfitting without weakening the safety gate.",
+        "Any piecewise successor requires a new protocol and fresh evaluation traces."
       ]
     },
     {
