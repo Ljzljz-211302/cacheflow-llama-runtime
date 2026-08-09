@@ -57,6 +57,7 @@ def run_mode(
     prompt: str = CROSS_PAGE_PROMPT,
     n_probs: int = 0,
     launcher_manages_lifetime: bool = False,
+    environment_overrides: dict[str, str] | None = None,
 ) -> tuple[dict[str, Any], str, Path]:
     log_path = ROOT / f"results/raw/production-{action}-{label}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -71,6 +72,8 @@ def run_mode(
         "-lv", "4",
     ]
     environment = cuda_environment()
+    if environment_overrides:
+        environment.update(environment_overrides)
     payload = {
         "prompt": prompt,
         "n_predict": 1,
