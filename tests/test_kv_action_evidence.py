@@ -301,6 +301,15 @@ class KvActionEvidenceTests(unittest.TestCase):
         )
         self.assertTrue(report["overhead"]["passed"])
 
+    def test_v15_negative_artifact_recomputes_from_hashed_trials(self) -> None:
+        artifact = Path("results/research/h4-kv-action-v1.5.0")
+        if not (artifact / "manifest.json").exists():
+            self.skipTest("formal H4 v1.5 artifact has not been generated")
+        report = validate_kv_action_artifact(
+            artifact, Path("config/kv_action_policy_protocol.json")
+        )
+        self.assertFalse(report["analysis"]["piecewise_delta"]["acceptance"]["passed"])
+
     def _copy_formal_artifact(self, destination: Path) -> Path:
         source = Path("results/research/h4-kv-action-v1.4.0")
         if not (source / "manifest.json").exists():

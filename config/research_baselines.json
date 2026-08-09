@@ -143,7 +143,7 @@
       "comparison_class": "quantitative",
       "runnable": true,
       "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
-      "source_revision": "manifest:results/research/h4-kv-action-v1.4.0/manifest.json",
+      "source_revision": "manifest:results/research/h4-kv-action-v1.5.0/manifest.json",
       "license": "MIT",
       "commands": [
         "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_cuda_kv.ps1",
@@ -164,7 +164,7 @@
       "comparison_class": "quantitative",
       "runnable": true,
       "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
-      "source_revision": "manifest:results/research/h4-kv-action-v1.4.0/manifest.json",
+      "source_revision": "manifest:results/research/h4-kv-action-v1.5.0/manifest.json",
       "license": "MIT",
       "commands": [
         "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_cuda_kv.ps1",
@@ -185,7 +185,7 @@
       "comparison_class": "quantitative",
       "runnable": true,
       "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
-      "source_revision": "manifest:results/research/h4-kv-action-v1.4.0/manifest.json",
+      "source_revision": "manifest:results/research/h4-kv-action-v1.5.0/manifest.json",
       "license": "MIT",
       "commands": [
         "python scripts/run_kv_action_policy_experiment.py",
@@ -205,7 +205,7 @@
       "comparison_class": "quantitative",
       "runnable": true,
       "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
-      "source_revision": "manifest:results/research/h4-kv-action-v1.4.0/manifest.json",
+      "source_revision": "manifest:results/research/h4-kv-action-v1.5.0/manifest.json",
       "license": "MIT",
       "commands": [
         "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_cuda_kv.ps1",
@@ -226,7 +226,7 @@
       "comparison_class": "quantitative",
       "runnable": true,
       "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
-      "source_revision": "manifest:results/research/h4-kv-action-v1.4.0/manifest.json",
+      "source_revision": "manifest:results/research/h4-kv-action-v1.5.0/manifest.json",
       "license": "MIT",
       "commands": [
         "python scripts/run_kv_action_policy_experiment.py",
@@ -234,9 +234,29 @@
       ],
       "controlled_mode": "offline signed candidate-minus-H0 Ridge per runtime regime with preregistered mechanism interactions, one-sided calibration, confidence radius, switch margin, and exact H0 fallback",
       "comparability_limits": [
-        "D1 made zero held-out switches in v1.4.0 and therefore does not establish a learned-policy speedup.",
+        "D1 made zero held-out switches in v1.5.0 and therefore does not establish a learned-policy speedup.",
         "The negative result is retained because it identifies global-linear underfitting without weakening the safety gate.",
         "Any piecewise successor requires a new protocol and fresh evaluation traces."
+      ]
+    },
+    {
+      "id": "kv-action-d2",
+      "name": "D2 context-piecewise paired-delta Ridge",
+      "kind": "local",
+      "comparison_class": "quantitative",
+      "runnable": true,
+      "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
+      "source_revision": "manifest:results/research/h4-kv-action-v1.5.0/manifest.json",
+      "license": "MIT",
+      "commands": [
+        "python scripts/run_kv_action_policy_experiment.py",
+        "python -m unittest tests.test_kv_action_evidence"
+      ],
+      "controlled_mode": "offline signed paired-delta Ridge split at the preregistered 512-token boundary, calibrated per regime and context band with a 0.75 ms switch margin and exact H0 fallback",
+      "comparability_limits": [
+        "D2 made zero held-out switches in v1.5.0 because the one-sided calibration bound rejected every candidate.",
+        "The v1.4 development replay is retained only as model-design evidence and not as a confirmatory speedup.",
+        "D2 is not enabled in the production selector."
       ]
     },
     {
