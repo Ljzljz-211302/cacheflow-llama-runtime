@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "protocol_version": "2.1.0",
+  "preregistered_at_utc": "2026-08-09T12:29:40Z",
+  "claim": "K2 replaces K1 inside the same steady-state production Paged action",
+  "random_seed": 20260809,
+  "paired_trials": 30,
+  "order": "alternate K1-K2 and K2-K1 by pair",
+  "device": {
+    "name": "NVIDIA GeForce RTX 4050 Laptop GPU",
+    "compute_capability": "8.9"
+  },
+  "request": {
+    "prompt": " one one one one one one one one one one one one one one one one one",
+    "predicted_tokens": 1,
+    "cache_prompt": true,
+    "warm_requests_before_measurement": 5
+  },
+  "controlled_boundary": {
+    "same_model": "Qwen2.5-0.5B Q4_K_M",
+    "same_action": "paged",
+    "same_graph_and_layout": true,
+    "steady_state_definition": "one full-prompt warm request followed by four cached warm requests before the measured cached request",
+    "same_page_size": 16,
+    "same_context_tokens": 17,
+    "same_gqa": "14 query heads / 2 KV heads / D64",
+    "only_intervention": "LLAMA_CACHEFLOW_PAGED_KERNEL selects incumbent K1 or candidate K2 at process start",
+    "k1_kernel": "cacheflow_paged_decode_fattn_k1",
+    "k2_kernel": "cacheflow_paged_decode_fattn_k2_t2"
+  },
+  "measurements": {
+    "primary": "paired client_elapsed_ms for the measured cached production request",
+    "secondary": [
+      "server prompt_ms",
+      "complete action observation cost",
+      "PID-isolated NSYS kernel identity, launches, and duration"
+    ],
+    "profiler_timing_is_not_primary": true,
+    "no_outcome_based_deletion": true
+  },
+  "acceptance": {
+    "outputs_must_match": true,
+    "each_trial_requires_one_paged_graph_entry": true,
+    "fallbacks_must_be_zero": true,
+    "p95_maximum_regression_percent": 5.0,
+    "paired_median_must_not_be_slower": true
+  },
+  "claim_rules": {
+    "promotion_is_k2_over_k1_not_paged_over_direct": true,
+    "all_prior_paged_vs_direct_failures_remain_valid": true,
+    "result_is_limited_to_the_registered_short_context_envelope": true,
+    "nsys_duration_is_mechanism_only": true
+  }
+}

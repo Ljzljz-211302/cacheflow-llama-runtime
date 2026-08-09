@@ -103,6 +103,7 @@ def profile_variant(
         launcher=launcher, launcher_manages_lifetime=True,
         prompt=str(protocol["request"]["prompt"]),
         environment_overrides={"LLAMA_CACHEFLOW_PAGED_KERNEL": selector},
+        warm_requests=int(protocol["request"].get("warm_requests_before_measurement", 1)),
     )
     report = profile_dir / f"{variant}.nsys-rep"
     sqlite = profile_dir / f"{variant}.sqlite"
@@ -167,14 +168,15 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
         raise AssertionError("protocol hash mismatch")
     if not summary["worktree_clean_before_run"]:
         raise AssertionError("formal artifact did not start from a clean worktree")
+    expected_entries = int(protocol["request"].get("warm_requests_before_measurement", 1))
     for row in rows:
         log = output / row["log"]
         if row["log_sha256"] != sha256(log):
             raise AssertionError("raw service log hash mismatch")
-        if row["paged_calls"] != 1 or row["paged_fallbacks"] != 0:
-            raise AssertionError("trial did not execute exactly one Paged graph entry")
-        if row["action_observations"] != 1 or row["action_decisions"] != 1:
-            raise AssertionError("trial lacks one complete production action observation")
+        if row["paged_calls"] != expected_entries or row["paged_fallbacks"] != 0:
+            raise AssertionError("trial did not execute the preregistered Paged warm/measured entries")
+        if row["action_observations"] != expected_entries or row["action_decisions"] != expected_entries:
+            raise AssertionError("trial lacks the preregistered complete production observations")
     mechanisms = json.loads((output / "mechanisms.json").read_text(encoding="utf-8"))
     for variant, (_, pattern) in VARIANTS.items():
         reparsed = parse_nsys_sqlite(
@@ -223,6 +225,7 @@ def main() -> None:
                 "paged", f"k2-pair-{pair:02d}-{variant}",
                 prompt=str(protocol["request"]["prompt"]),
                 environment_overrides={"LLAMA_CACHEFLOW_PAGED_KERNEL": selector},
+                warm_requests=int(protocol["request"].get("warm_requests_before_measurement", 1)),
             )
             artifact_log = raw / f"{variant}-pair-{pair:02d}-{order_in_pair}.log"
             shutil.copy2(log, artifact_log)

@@ -58,6 +58,7 @@ def run_mode(
     n_probs: int = 0,
     launcher_manages_lifetime: bool = False,
     environment_overrides: dict[str, str] | None = None,
+    warm_requests: int = 1,
 ) -> tuple[dict[str, Any], str, Path]:
     log_path = ROOT / f"results/raw/production-{action}-{label}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,7 +95,8 @@ def run_mode(
         )
         try:
             wait_ready(base_url, process, log_path, attempts=120)
-            request_json(f"{base_url}/completion", payload)
+            for _ in range(warm_requests):
+                request_json(f"{base_url}/completion", payload)
             started = time.perf_counter_ns()
             _, result = request_json(f"{base_url}/completion", payload)
             result["_client_elapsed_ms"] = (time.perf_counter_ns() - started) / 1.e6
