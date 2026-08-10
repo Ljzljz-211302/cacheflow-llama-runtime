@@ -60,6 +60,7 @@ def run_mode(
     environment_overrides: dict[str, str] | None = None,
     warm_requests: int = 1,
     n_predict: int = 1,
+    measured_requests: int = 1,
 ) -> tuple[dict[str, Any], str, Path]:
     log_path = ROOT / f"results/raw/production-{action}-{label}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -98,9 +99,12 @@ def run_mode(
             wait_ready(base_url, process, log_path, attempts=120)
             for _ in range(warm_requests):
                 request_json(f"{base_url}/completion", payload)
-            started = time.perf_counter_ns()
-            _, result = request_json(f"{base_url}/completion", payload)
-            result["_client_elapsed_ms"] = (time.perf_counter_ns() - started) / 1.e6
+            elapsed = []
+            for _ in range(measured_requests):
+                started = time.perf_counter_ns()
+                _, result = request_json(f"{base_url}/completion", payload)
+                elapsed.append((time.perf_counter_ns() - started) / 1.e6)
+            result["_client_elapsed_ms"] = sum(elapsed) / len(elapsed)
             metrics = get_text(f"{base_url}/metrics")
         finally:
             if launcher_manages_lifetime:

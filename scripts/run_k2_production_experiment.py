@@ -69,24 +69,49 @@ def parse_structured_rows(protocol: dict[str, Any], output: Path) -> list[dict[s
     rows: list[dict[str, Any]] = []
     for arm, (pair, order_in_pair, variant) in enumerate(randomized_arm_plan(protocol), 1):
         directory = output / f"raw/arm-{arm:03d}-{variant}"
-        response = json.loads((directory / "response.json").read_text(encoding="utf-8"))
+        if protocol.get("raw_schema") == "structured-arm-v2":
+            responses = json.loads((directory / "responses.json").read_text(encoding="utf-8"))
+        else:
+            responses = [json.loads(
+                (directory / "response.json").read_text(encoding="utf-8"))]
         timing = json.loads((directory / "client-timing.json").read_text(encoding="utf-8"))
         before = (directory / "metrics-before.prom").read_text(encoding="utf-8")
         after = (directory / "metrics-after.prom").read_text(encoding="utf-8")
-        if timing != {
-            "pair": pair,
-            "order_in_pair": order_in_pair,
-            "variant": variant,
-            "client_elapsed_ns": timing.get("client_elapsed_ns"),
-        } or not isinstance(timing["client_elapsed_ns"], int) or timing["client_elapsed_ns"] <= 0:
+        elapsed_values = timing.get("client_elapsed_ns")
+        if isinstance(elapsed_values, int):
+            elapsed_values = [elapsed_values]
+        expected_measurements = int(protocol["request"].get("measured_requests_per_arm", 1))
+        if set(timing) != {"pair", "order_in_pair", "variant", "client_elapsed_ns"} or \
+                timing["pair"] != pair or timing["order_in_pair"] != order_in_pair or \
+                timing["variant"] != variant or len(elapsed_values) != expected_measurements or \
+                any(not isinstance(value, int) or value <= 0 for value in elapsed_values):
             raise AssertionError("raw client timing does not match the seeded arm plan")
+        if len(responses) != expected_measurements:
+            raise AssertionError("raw response count does not match measured requests")
+        expected_model = str(protocol["controlled_boundary"]["same_model"]).split()[0].lower()
+        for response in responses:
+            if response.get("prompt") != protocol["request"]["prompt"] or \
+                    int(response.get("tokens_predicted", -1)) != int(
+                        protocol["request"]["predicted_tokens"]) or \
+                    int(response.get("timings", {}).get("cache_n", -1)) + int(
+                        response.get("timings", {}).get("prompt_n", -1)) != int(
+                            protocol["controlled_boundary"]["same_context_tokens"]) or \
+                    expected_model not in str(response.get("model", "")).lower():
+                raise AssertionError("raw response does not match the registered workload")
+        response = responses[0]
+        if any(item["content"] != response["content"] for item in responses):
+            raise AssertionError("measured requests within one arm produced different output")
+        elapsed_ms = [value / 1.e6 for value in elapsed_values]
+        prompt_ms = [float(item["timings"]["prompt_ms"]) for item in responses]
         rows.append({
             "pair": pair,
             "order_in_pair": order_in_pair,
             "variant": variant,
             "content": response["content"],
-            "client_elapsed_ms": timing["client_elapsed_ns"] / 1.e6,
-            "prompt_ms": float(response["timings"]["prompt_ms"]),
+            "client_elapsed_ms": summarize(elapsed_ms)["median"],
+            "prompt_ms": summarize(prompt_ms)["median"],
+            "request_client_elapsed_ms": elapsed_ms,
+            "request_prompt_ms": prompt_ms,
             "action_decisions": metric_delta(
                 before, after, 'llamacpp:kv_action_decisions_total{action="paged"}'),
             "action_reason_decisions": (
@@ -149,21 +174,32 @@ def collect_single_process_rows(
                 before = get_text(f"{base_url}/metrics")
                 for _ in range(int(protocol["request"]["warm_requests_before_measurement"])):
                     request_json(f"{base_url}/completion", payload)
-                started = time.perf_counter_ns()
-                status, response = request_json(f"{base_url}/completion", payload)
-                elapsed = time.perf_counter_ns() - started
+                responses = []
+                elapsed_values = []
+                for _ in range(int(protocol["request"].get("measured_requests_per_arm", 1))):
+                    started = time.perf_counter_ns()
+                    status, response = request_json(f"{base_url}/completion", payload)
+                    elapsed_values.append(time.perf_counter_ns() - started)
+                    responses.append(response)
+                    if status != 200 or "error" in response or not response.get("content"):
+                        raise AssertionError(f"{variant} controlled request failed: {response}")
                 after = get_text(f"{base_url}/metrics")
-                if status != 200 or "error" in response or not response.get("content"):
-                    raise AssertionError(f"{variant} controlled request failed: {response}")
                 directory = raw / f"arm-{arm:03d}-{variant}"
                 directory.mkdir()
-                (directory / "response.json").write_text(
-                    json.dumps(response, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                if protocol.get("raw_schema") == "structured-arm-v2":
+                    (directory / "responses.json").write_text(
+                        json.dumps(responses, indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8")
+                else:
+                    (directory / "response.json").write_text(
+                        json.dumps(response, indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8")
                 (directory / "client-timing.json").write_text(json.dumps({
                     "pair": pair,
                     "order_in_pair": order_in_pair,
                     "variant": variant,
-                    "client_elapsed_ns": elapsed,
+                    "client_elapsed_ns": elapsed_values[0] if len(elapsed_values) == 1
+                    else elapsed_values,
                 }, indent=2) + "\n", encoding="utf-8")
                 (directory / "metrics-before.prom").write_text(before, encoding="utf-8")
                 (directory / "metrics-after.prom").write_text(after, encoding="utf-8")
@@ -180,6 +216,28 @@ def percentile(values: list[float], probability: float) -> float:
     upper = min(lower + 1, len(ordered) - 1)
     fraction = position - lower
     return ordered[lower] * (1.0 - fraction) + ordered[upper] * fraction
+
+
+def bootstrap_regression_intervals(
+    k1: list[float], k2: list[float], seed: int, resamples: int = 10000,
+) -> dict[str, list[float]]:
+    generator = random.Random(seed)
+    median_values: list[float] = []
+    p95_values: list[float] = []
+    for _ in range(resamples):
+        indices = [generator.randrange(len(k1)) for _ in k1]
+        baseline = [k1[index] for index in indices]
+        candidate = [k2[index] for index in indices]
+        median_values.append(
+            (summarize(candidate)["median"] / summarize(baseline)["median"] - 1.0) * 100.0)
+        p95_values.append(
+            (summarize(candidate)["p95"] / summarize(baseline)["p95"] - 1.0) * 100.0)
+    return {
+        "client_median_regression_bootstrap_95_percent": [
+            percentile(median_values, 0.025), percentile(median_values, 0.975)],
+        "client_p95_regression_bootstrap_95_percent": [
+            percentile(p95_values, 0.025), percentile(p95_values, 0.975)],
+    }
 
 
 def expected_summary(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -256,6 +314,18 @@ def expected_summary(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> di
         result["paired_median_acceptance_passed"] = paired_median_passed
     if "client_median_maximum_regression_percent" in protocol["acceptance"]:
         result["client_median_regression_percent"] = median_regression
+    if "maximum_regression_upper_95_percent" in protocol["acceptance"]:
+        intervals = bootstrap_regression_intervals(
+            k1_client, k2_client, int(protocol["random_seed"]) + 991)
+        upper_limit = float(protocol["acceptance"]["maximum_regression_upper_95_percent"])
+        result.update(intervals)
+        result["maximum_regression_upper_95_percent"] = upper_limit
+        result["latency_uncertainty_acceptance_passed"] = (
+            intervals["client_median_regression_bootstrap_95_percent"][1] <= upper_limit and
+            intervals["client_p95_regression_bootstrap_95_percent"][1] <= upper_limit
+        )
+        result["promotion_passed"] = (
+            result["promotion_passed"] and result["latency_uncertainty_acceptance_passed"])
     return result
 
 
@@ -304,6 +374,7 @@ def profile_variant(
         environment_overrides={"LLAMA_CACHEFLOW_PAGED_KERNEL": selector},
         warm_requests=int(protocol["request"].get("warm_requests_before_measurement", 1)),
         n_predict=int(protocol["request"]["predicted_tokens"]),
+        measured_requests=int(protocol["request"].get("measured_requests_per_arm", 1)),
     )
     report = profile_dir / f"{variant}.nsys-rep"
     sqlite = profile_dir / f"{variant}.sqlite"
@@ -341,6 +412,13 @@ def render_report(summary: dict[str, Any], mechanisms: dict[str, Any]) -> str:
     effect = summary["paired_k2_minus_k1_client_ms"]
     prompt = summary["paired_k2_minus_k1_prompt_ms"]
     noninferiority = "minimum_kernel_duration_reduction_percent" in summary
+    uncertainty_line = (
+        f"- Bootstrap 95% upper regression bounds (median/P95): "
+        f"{summary['client_median_regression_bootstrap_95_percent'][1]:.2f}% / "
+        f"{summary['client_p95_regression_bootstrap_95_percent'][1]:.2f}%."
+        if "maximum_regression_upper_95_percent" in summary
+        else "- No uncertainty acceptance gate was registered."
+    )
     return "\n".join([
         "# K2 相对生产 K1 的正式晋级实验",
         "",
@@ -352,6 +430,7 @@ def render_report(summary: dict[str, Any], mechanisms: dict[str, Any]) -> str:
         f"K2 {summary['k2_client_elapsed_ms']['p95']:.3f} ms，变化 "
         f"{summary['p95_regression_percent']:.2f}%。",
         f"- 服务内部 prompt 配对中位差：{prompt['median']:.3f} ms。",
+        uncertainty_line,
         f"- NSYS：K1 {mechanisms['k1']['kernel_launches']} 次 / "
         f"{mechanisms['k1']['kernel_duration_ms']:.3f} ms；K2 "
         f"{mechanisms['k2']['kernel_launches']} 次 / "
@@ -377,6 +456,11 @@ def render_chart(
     k2_p95 = float(summary["k2_client_elapsed_ms"]["p95"])
     k1_kernel = float(mechanisms["k1"]["kernel_duration_ms"])
     k2_kernel = float(mechanisms["k2"]["kernel_duration_ms"])
+    scope = str(protocol["controlled_boundary"].get(
+        "same_context_tokens", protocol["controlled_boundary"].get(
+            "context_range_tokens", "registered")))
+    uncertainty_gate = " + bootstrap upper 95% ≤ 5%" \
+        if "maximum_regression_upper_95_percent" in summary else ""
     return "\n".join([
         '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="500" viewBox="0 0 960 500">',
         '  <rect width="960" height="500" fill="#ffffff"/>',
@@ -402,8 +486,8 @@ def render_chart(
         f'    <text x="460" y="354">K2 {k2_kernel:.3f} ({mechanisms["k2"]["kernel_launches"]} launches, -{summary["kernel_duration_reduction_percent"]:.2f}%)</text>',
         '  </g>',
         '  <line x1="48" y1="400" x2="912" y2="400" stroke="#cbd5e1"/>',
-        '  <text x="48" y="430" font-family="Arial, sans-serif" font-size="14" fill="#334155">Gate: output equality + zero fallback + median/P95 regression ≤ 5% + kernel reduction ≥ 20%</text>',
-        f'  <text x="48" y="458" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#166534">{"PASS" if summary["promotion_passed"] else "FAIL"} — K2 replaces K1 only inside the registered context 17–24 Paged envelope.</text>',
+        f'  <text x="48" y="430" font-family="Arial, sans-serif" font-size="14" fill="#334155">Gate: output equality + zero fallback + median/P95 regression ≤ 5%{uncertainty_gate} + kernel reduction ≥ 20%</text>',
+        f'  <text x="48" y="458" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#166534">{"PASS" if summary["promotion_passed"] else "FAIL"} — K2 replaces K1 only inside the registered context {scope} Paged envelope.</text>',
         '</svg>',
         '',
     ])
@@ -413,7 +497,7 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
     protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
     rows = json.loads((output / "trials.json").read_text(encoding="utf-8"))
-    if protocol.get("raw_schema") == "structured-arm-v1":
+    if protocol.get("raw_schema") in {"structured-arm-v1", "structured-arm-v2"}:
         reconstructed = parse_structured_rows(protocol, output)
         if rows != reconstructed:
             raise AssertionError("trials are not exactly reconstructed from structured raw arms")
@@ -426,6 +510,11 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
             raise AssertionError(f"summary field is not derived from trials: {key}")
     if summary["protocol_sha256"] != sha256(protocol_path):
         raise AssertionError("protocol hash mismatch")
+    preregistered = datetime.fromisoformat(
+        protocol["preregistered_at_utc"].replace("Z", "+00:00"))
+    generated = datetime.fromisoformat(summary["generated_at_utc"].replace("Z", "+00:00"))
+    if generated < preregistered:
+        raise AssertionError("artifact predates protocol preregistration")
     if not summary["worktree_clean_before_run"]:
         raise AssertionError("formal artifact did not start from a clean worktree")
     expected_entries = int(protocol["acceptance"].get(
@@ -433,7 +522,7 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
         protocol["request"].get("warm_requests_before_measurement", 1),
     ))
     for row in rows:
-        if protocol.get("raw_schema") != "structured-arm-v1":
+        if protocol.get("raw_schema") not in {"structured-arm-v1", "structured-arm-v2"}:
             log = output / row["log"]
             if row["log_sha256"] != sha256(log):
                 raise AssertionError("raw service log hash mismatch")
@@ -467,7 +556,7 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
             latency_expected and mechanism_expected["mechanism_acceptance_passed"]
         ):
             raise AssertionError("final promotion does not combine latency and mechanism gates")
-    if protocol.get("raw_schema") == "structured-arm-v1" and \
+    if protocol.get("raw_schema") in {"structured-arm-v1", "structured-arm-v2"} and \
             (output / "report.md").read_text(encoding="utf-8") != render_report(summary, mechanisms):
         raise AssertionError("report is not rendered from the validated summary and mechanisms")
     chart = output / "k2-production-comparison.svg"
