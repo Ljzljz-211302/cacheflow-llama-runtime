@@ -317,8 +317,11 @@ def profile_variant(
     if exported.returncode:
         raise RuntimeError(exported.stderr)
     mechanism = parse_nsys_sqlite(sqlite, kernel_patterns=(kernel_pattern,))
-    if mechanism["kernel_launches"] < 24:
-        raise AssertionError(f"{variant} lacks a complete 24-layer kernel sample: {mechanism}")
+    expected_launches = int(protocol["acceptance"].get(
+        "expected_profiled_kernel_launches", 24))
+    if mechanism["kernel_launches"] != expected_launches:
+        raise AssertionError(
+            f"{variant} expected {expected_launches} profiled kernel launches: {mechanism}")
     mechanism.update({
         "variant": variant,
         "selector": selector,
@@ -364,7 +367,9 @@ def render_report(summary: dict[str, Any], mechanisms: dict[str, Any]) -> str:
     ])
 
 
-def render_chart(summary: dict[str, Any], mechanisms: dict[str, Any]) -> str:
+def render_chart(
+    protocol: dict[str, Any], summary: dict[str, Any], mechanisms: dict[str, Any],
+) -> str:
     k1_median = float(summary["k1_client_elapsed_ms"]["median"])
     k2_median = float(summary["k2_client_elapsed_ms"]["median"])
     k1_p95 = float(summary["k1_client_elapsed_ms"]["p95"])
@@ -374,8 +379,8 @@ def render_chart(summary: dict[str, Any], mechanisms: dict[str, Any]) -> str:
     return "\n".join([
         '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="500" viewBox="0 0 960 500">',
         '  <rect width="960" height="500" fill="#ffffff"/>',
-        '  <text x="48" y="48" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#172554">K2 production replacement — preregistered v2.7</text>',
-        '  <text x="48" y="76" font-family="Arial, sans-serif" font-size="14" fill="#475569">Qwen2.5-0.5B · RTX 4050 · same-process randomized pairs · n=30</text>',
+        f'  <text x="48" y="48" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#172554">K2 production replacement — preregistered v{protocol["protocol_version"]}</text>',
+        f'  <text x="48" y="76" font-family="Arial, sans-serif" font-size="14" fill="#475569">Qwen2.5-0.5B · RTX 4050 · same-process randomized pairs · n={summary["paired_trials"]}</text>',
         '  <g font-family="Arial, sans-serif" font-size="15" fill="#0f172a">',
         '    <text x="48" y="134">Client median (ms)</text>',
         f'    <rect x="220" y="112" width="{round(k1_median * 10)}" height="24" rx="4" fill="#94a3b8"/>',
@@ -397,7 +402,7 @@ def render_chart(summary: dict[str, Any], mechanisms: dict[str, Any]) -> str:
         '  </g>',
         '  <line x1="48" y1="400" x2="912" y2="400" stroke="#cbd5e1"/>',
         '  <text x="48" y="430" font-family="Arial, sans-serif" font-size="14" fill="#334155">Gate: output equality + zero fallback + median/P95 regression ≤ 5% + kernel reduction ≥ 20%</text>',
-        '  <text x="48" y="458" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#166534">PASS — K2 replaces K1 only inside the registered context 17–24 Paged envelope.</text>',
+        f'  <text x="48" y="458" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#166534">{"PASS" if summary["promotion_passed"] else "FAIL"} — K2 replaces K1 only inside the registered context 17–24 Paged envelope.</text>',
         '</svg>',
         '',
     ])
@@ -431,7 +436,10 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
             log = output / row["log"]
             if row["log_sha256"] != sha256(log):
                 raise AssertionError("raw service log hash mismatch")
-        if row["paged_calls"] < expected_entries or row["paged_fallbacks"] != 0:
+        exact_entries = protocol["acceptance"].get("expected_paged_graph_entries_per_arm")
+        entries_match = row["paged_calls"] == exact_entries if exact_entries is not None \
+            else row["paged_calls"] >= expected_entries
+        if not entries_match or row["paged_fallbacks"] != 0:
             raise AssertionError("trial did not execute the preregistered Paged warm/measured entries")
         if row["action_observations"] != row["paged_calls"] or \
                 row["action_decisions"] != row["paged_calls"]:
@@ -462,13 +470,16 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
             (output / "report.md").read_text(encoding="utf-8") != render_report(summary, mechanisms):
         raise AssertionError("report is not rendered from the validated summary and mechanisms")
     chart = output / "k2-production-comparison.svg"
-    if chart.exists() and chart.read_text(encoding="utf-8") != render_chart(summary, mechanisms):
+    if chart.exists() and chart.read_text(encoding="utf-8") != render_chart(
+            protocol, summary, mechanisms):
         raise AssertionError("chart is not rendered from the validated summary and mechanisms")
     if "artifact_binding" in protocol:
         binding = protocol["artifact_binding"]
         for key in ("server_sha256", "model_sha256", "vendor_revision", "build_command"):
             if summary.get(key) != binding[key]:
                 raise AssertionError(f"formal artifact binding mismatch: {key}")
+        if "runtime_sha256" in binding and summary.get("runtime_sha256") != binding["runtime_sha256"]:
+            raise AssertionError("formal artifact runtime binary binding mismatch")
         if summary.get("device") != protocol["device"] or not summary.get("vendor_clean_before_run"):
             raise AssertionError("formal artifact device/vendor provenance mismatch")
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
@@ -514,6 +525,11 @@ def main() -> None:
             "vendor_revision": vendor_revision,
             "build_command": binding["build_command"],
         }
+        if "runtime_sha256" in binding:
+            actual_binding["runtime_sha256"] = {
+                relative: sha256(ROOT / relative)
+                for relative in binding["runtime_sha256"]
+            }
         if actual_binding != binding:
             raise RuntimeError(f"binary/model/vendor binding differs from preregistration: {actual_binding}")
     if args.output.exists():
@@ -583,9 +599,9 @@ def main() -> None:
     (args.output / "mechanisms.json").write_text(json.dumps(mechanisms, indent=2) + "\n", encoding="utf-8")
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     (args.output / "report.md").write_text(render_report(summary, mechanisms), encoding="utf-8")
-    if protocol["protocol_version"] == "2.7.0":
+    if protocol.get("emit_chart", False):
         (args.output / "k2-production-comparison.svg").write_text(
-            render_chart(summary, mechanisms), encoding="utf-8")
+            render_chart(protocol, summary, mechanisms), encoding="utf-8")
     files = {
         str(path.relative_to(args.output).as_posix()): sha256(path)
         for path in args.output.rglob("*") if path.is_file() and path.name != "manifest.json"

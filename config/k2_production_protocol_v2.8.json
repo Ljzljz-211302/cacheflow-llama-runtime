@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "protocol_version": "2.8.0",
+  "preregistered_at_utc": "2026-08-10T04:39:22Z",
+  "claim": "K2 replaces K1 for every decode step inside the registered steady-state production Paged request",
+  "supersedes": {
+    "protocol": "2.7.0",
+    "reason": "v2.7 is retained as invalid because the production host capability gate admitted only context 17, so seven of eight generated tokens did not receive the K2 intervention; v2.8 extends the CPU-oracle-validated two-page gate to context 32 and requires all eight context-17-through-24 steps in both unprofiled and profiled evidence"
+  },
+  "emit_chart": true,
+  "execution_scope": "single_server",
+  "raw_schema": "structured-arm-v1",
+  "random_seed": 20260812,
+  "paired_trials": 30,
+  "order": "seeded random K1-K2 or K2-K1 order independently within each pair",
+  "device": {
+    "name": "NVIDIA GeForce RTX 4050 Laptop GPU",
+    "compute_capability": "8.9",
+    "driver_version": "561.19"
+  },
+  "artifact_binding": {
+    "server_sha256": "1506d0327586b17a101f49cfe99514425d049ccbdc102af79336aeddeaad6977",
+    "model_sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+    "vendor_revision": "29da4f017561ed96f28a024b6787ad9805629c39",
+    "build_command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_cuda_kv.ps1",
+    "runtime_sha256": {
+      "build/patched-cuda-ninja3/bin/ggml-base.dll": "2b35ce43c9bd1892a7c552df3e782c90124c203081c706b71219e7a8e33aa7c1",
+      "build/patched-cuda-ninja3/bin/ggml-cpu.dll": "38dfe9876b8c9532bf3a463e3cc47c27327bc319a24c0d8f67946fc5b28387b5",
+      "build/patched-cuda-ninja3/bin/ggml-cuda.dll": "1012d8b58db0a0ec4fce854aa645b31af3005356bc9120f3e17154e369d9d5b6",
+      "build/patched-cuda-ninja3/bin/ggml.dll": "5c3f3414be6768113b65dc5b092dde1c94f739a4afc93c5d720359942afdc8d3",
+      "build/patched-cuda-ninja3/bin/llama-common.dll": "852b471f26f0ceb2d37ee4a03eb1e97574ee2a238828f0702b0395bd64972b2b",
+      "build/patched-cuda-ninja3/bin/llama-server-impl.dll": "773496138ed45276c196864e5845c63566de6534d176c96c23309c8c3c4590e4",
+      "build/patched-cuda-ninja3/bin/llama.dll": "6370ebe12c01041bd41ea337b7cf0b8da5324bb86609d2c3ab893905e5f09ff2",
+      "build/patched-cuda-ninja3/bin/mtmd.dll": "1bd9829a24800ede96973b4874343dcc15aefe09af97926e0b292a1d904e6d13"
+    }
+  },
+  "request": {
+    "prompt": " one one one one one one one one one one one one one one one one one",
+    "predicted_tokens": 8,
+    "cache_prompt": true,
+    "warm_requests_before_measurement": 5
+  },
+  "controlled_boundary": {
+    "same_process": true,
+    "slot_reset_before_each_arm": true,
+    "same_model": "Qwen2.5-0.5B Q4_K_M",
+    "same_action": "paged",
+    "same_graph_and_layout": true,
+    "steady_state_definition": "erase the single slot, run one full-prompt eight-token request and four cached eight-token warm requests, then measure one cached eight-token request",
+    "same_page_size": 16,
+    "context_range_tokens": "17 through 24 inclusive",
+    "same_gqa": "14 query heads / 2 KV heads / D64",
+    "only_intervention": "an opt-in control file read by the Paged CUDA dispatcher selects incumbent K1 or candidate K2 before each arm inside one long-lived server",
+    "k1_kernel": "cacheflow_paged_decode_fattn_k1",
+    "k2_kernel": "cacheflow_paged_decode_fattn_k2_t2"
+  },
+  "measurements": {
+    "primary": "unprofiled client elapsed median and P95 reconstructed from each raw monotonic timing record",
+    "mechanism_gate": "PID-isolated NSYS aggregate duration across exactly 192 selected-kernel launches in each arm: eight decode contexts times 24 model layers",
+    "secondary": [
+      "paired server prompt_ms reconstructed from each raw JSON response",
+      "paired client effect and bootstrap interval",
+      "Prometheus request-level Paged graph-entry deltas reconstructed from before/after snapshots",
+      "kernel identity and launch count"
+    ],
+    "profiler_timing_is_not_end_to_end": true,
+    "no_outcome_based_deletion": true
+  },
+  "acceptance": {
+    "outputs_must_match": true,
+    "expected_paged_graph_entries_per_arm": 47,
+    "expected_profiled_kernel_launches": 192,
+    "fallbacks_must_be_zero": true,
+    "client_median_maximum_regression_percent": 5.0,
+    "p95_maximum_regression_percent": 5.0,
+    "minimum_kernel_duration_reduction_percent": 20.0,
+    "require_equal_profiled_kernel_launches": true
+  },
+  "claim_rules": {
+    "promotion_is_k2_over_k1_not_paged_over_direct": true,
+    "promotion_means_production_replacement_not_universal_end_to_end_acceleration": true,
+    "all_prior_paged_vs_direct_failures_remain_valid": true,
+    "result_is_limited_to_the_registered_context_17_to_24_envelope": true,
+    "nsys_duration_is_mechanism_only": true
+  }
+}
