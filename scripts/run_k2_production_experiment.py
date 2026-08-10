@@ -128,7 +128,7 @@ def collect_single_process_rows(
     })
     payload = {
         "prompt": str(protocol["request"]["prompt"]),
-        "n_predict": 1,
+        "n_predict": int(protocol["request"]["predicted_tokens"]),
         "temperature": 0,
         "seed": 20260808,
         "cache_prompt": True,
@@ -264,14 +264,23 @@ def mechanism_acceptance(
 ) -> dict[str, Any]:
     k1 = float(mechanisms["k1"]["kernel_duration_ms"])
     k2 = float(mechanisms["k2"]["kernel_duration_ms"])
+    launch_parity = (
+        int(mechanisms["k1"]["kernel_launches"]) ==
+        int(mechanisms["k2"]["kernel_launches"]) and
+        int(mechanisms["k1"]["kernel_launches"]) > 0
+    )
     reduction = (1.0 - k2 / k1) * 100.0
     minimum = float(protocol["acceptance"].get(
         "minimum_kernel_duration_reduction_percent", float("-inf")))
-    return {
+    result = {
         "kernel_duration_reduction_percent": reduction,
         "minimum_kernel_duration_reduction_percent": minimum,
         "mechanism_acceptance_passed": reduction >= minimum,
     }
+    if protocol["acceptance"].get("require_equal_profiled_kernel_launches", False):
+        result["kernel_launch_count_parity"] = launch_parity
+        result["mechanism_acceptance_passed"] = launch_parity and reduction >= minimum
+    return result
 
 
 def profile_variant(
@@ -293,6 +302,7 @@ def profile_variant(
         prompt=str(protocol["request"]["prompt"]),
         environment_overrides={"LLAMA_CACHEFLOW_PAGED_KERNEL": selector},
         warm_requests=int(protocol["request"].get("warm_requests_before_measurement", 1)),
+        n_predict=int(protocol["request"]["predicted_tokens"]),
     )
     report = profile_dir / f"{variant}.nsys-rep"
     sqlite = profile_dir / f"{variant}.sqlite"
@@ -307,8 +317,8 @@ def profile_variant(
     if exported.returncode:
         raise RuntimeError(exported.stderr)
     mechanism = parse_nsys_sqlite(sqlite, kernel_patterns=(kernel_pattern,))
-    if mechanism["kernel_launches"] != 24:
-        raise AssertionError(f"{variant} expected 24 layer launches: {mechanism}")
+    if mechanism["kernel_launches"] < 24:
+        raise AssertionError(f"{variant} lacks a complete 24-layer kernel sample: {mechanism}")
     mechanism.update({
         "variant": variant,
         "selector": selector,
@@ -373,15 +383,19 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
         raise AssertionError("protocol hash mismatch")
     if not summary["worktree_clean_before_run"]:
         raise AssertionError("formal artifact did not start from a clean worktree")
-    expected_entries = int(protocol["request"].get("warm_requests_before_measurement", 1))
+    expected_entries = int(protocol["acceptance"].get(
+        "minimum_paged_graph_entries_per_arm",
+        protocol["request"].get("warm_requests_before_measurement", 1),
+    ))
     for row in rows:
         if protocol.get("raw_schema") != "structured-arm-v1":
             log = output / row["log"]
             if row["log_sha256"] != sha256(log):
                 raise AssertionError("raw service log hash mismatch")
-        if row["paged_calls"] != expected_entries or row["paged_fallbacks"] != 0:
+        if row["paged_calls"] < expected_entries or row["paged_fallbacks"] != 0:
             raise AssertionError("trial did not execute the preregistered Paged warm/measured entries")
-        if row["action_observations"] != expected_entries or row["action_decisions"] != expected_entries:
+        if row["action_observations"] != row["paged_calls"] or \
+                row["action_decisions"] != row["paged_calls"]:
             raise AssertionError("trial lacks the preregistered complete production observations")
     mechanisms = json.loads((output / "mechanisms.json").read_text(encoding="utf-8"))
     for variant, (selector, pattern) in VARIANTS.items():

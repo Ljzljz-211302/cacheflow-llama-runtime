@@ -59,6 +59,7 @@ def run_mode(
     launcher_manages_lifetime: bool = False,
     environment_overrides: dict[str, str] | None = None,
     warm_requests: int = 1,
+    n_predict: int = 1,
 ) -> tuple[dict[str, Any], str, Path]:
     log_path = ROOT / f"results/raw/production-{action}-{label}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,7 +78,7 @@ def run_mode(
         environment.update(environment_overrides)
     payload = {
         "prompt": prompt,
-        "n_predict": 1,
+        "n_predict": n_predict,
         "temperature": 0,
         "seed": 20260808,
         "cache_prompt": True,

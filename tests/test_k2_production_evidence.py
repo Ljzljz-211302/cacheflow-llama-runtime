@@ -109,8 +109,8 @@ class K2ProductionEvidenceTests(unittest.TestCase):
         ]
         latency = expected_summary(protocol, rows)
         mechanism = mechanism_acceptance(protocol, {
-            "k1": {"kernel_duration_ms": 1.0},
-            "k2": {"kernel_duration_ms": 0.85},
+            "k1": {"kernel_duration_ms": 1.0, "kernel_launches": 24},
+            "k2": {"kernel_duration_ms": 0.85, "kernel_launches": 24},
         })
         self.assertTrue(latency["promotion_passed"])
         self.assertFalse(mechanism["mechanism_acceptance_passed"])
