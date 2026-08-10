@@ -192,7 +192,7 @@ memory 和归约工作。只有 K1 的 NCU（若可用）或受控 byte/latency 
 
 logit 计算把一个 token 分给一个 lane；lane 串行遍历 D64 做点积，随后用 `__shfl_down_sync` 求 warp max 与 sum，得到数值稳定的 softmax 权重。最后每个 lane 从其他 token lane 广播权重并累加 V。相比 K1 的逐 token CTA barrier 与 14 个 query-head CTA，K2-T2 同时减少重复 KV 装载、CTA 数和 block-wide synchronization。这里的“复用”由代码干预与 K1/K2 trace 支持；由于 NCU counter 不可用，不能进一步声称硬件 DRAM bytes、occupancy 或 memory-bound 原因已被直接测量。
 
-正式 v2.10 在 Qwen2.5-0.5B `14Q/2KV/D64`、page16、context17 的重复 cached 请求中完成 30 组同进程随机配对：每 arm 保留 16 条原始请求计时，每 variant 共 480 条；输出一致、累计 600 次请求级 Paged graph entry/variant、0 fallback。请求级 median 为 6.900/6.938 ms（K2 回退 0.55%，配对簇 bootstrap 回退 95% 上界 2.86%），P95 为 30.102/30.559 ms（回退 1.52%），相同 480 次目标 kernel 总时长由 8.174 降至 4.051 ms（-50.44%）。该门槛只允许 K2 替换同一 Paged 路径的 K1；它不证明 Paged 已优于 Direct，也不允许把 context17 性能结论外推到 host 已验证但未纳入该试验的 context18--32，更不外推到 K3 所针对的长 context。
+正式 v2.10 在 Qwen2.5-0.5B `14Q/2KV/D64`、page16、context17 的重复 cached 请求中完成 30 组同进程随机配对：每 arm 保留 16 条原始请求计时，每 variant 共 480 个测量响应且逐项输出一致；累计 600 次请求级 Paged graph entry/variant、0 fallback。请求级 median 为 6.900/6.938 ms（K2 回退 0.55%，配对簇 bootstrap 回退 95% 上界 2.86%），P95 为 30.102/30.559 ms（回退 1.52%），相同 480 次目标 kernel 总时长由 8.174 降至 4.051 ms（-50.44%）。该门槛只允许 K2 替换同一 Paged 路径的 K1；它不证明 Paged 已优于 Direct，也不允许把 context17 性能结论外推到 host 已验证但未纳入该试验的 context18--32，更不外推到 K3 所针对的长 context。
 
 ### K3：split-KV + merge state
 
