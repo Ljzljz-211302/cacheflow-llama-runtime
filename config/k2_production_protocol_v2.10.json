@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "protocol_version": "2.10.0",
+  "preregistered_at_utc": "2026-08-10T05:03:16Z",
+  "claim": "K2 replaces K1 for repeated context-17 Paged actions in a steady-state production request stream",
+  "supersedes": {
+    "protocol": "2.9.0",
+    "reason": "v2.9 is retained as failed because P95 across thirty arm medians measures slow arms rather than user-request tail latency; v2.10 changes no workload or threshold and preregisters request-level median/P95 over all 480 raw requests with pair-cluster bootstrap, using the median upper bound as the inferential gate and P95 as an explicitly operational point-estimate guardrail"
+  },
+  "emit_chart": true,
+  "execution_scope": "single_server",
+  "raw_schema": "structured-arm-v2",
+  "random_seed": 20260814,
+  "paired_trials": 30,
+  "order": "seeded random K1-K2 or K2-K1 order independently within each pair",
+  "device": {
+    "name": "NVIDIA GeForce RTX 4050 Laptop GPU",
+    "compute_capability": "8.9",
+    "driver_version": "561.19"
+  },
+  "artifact_binding": {
+    "server_sha256": "1506d0327586b17a101f49cfe99514425d049ccbdc102af79336aeddeaad6977",
+    "model_sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+    "vendor_revision": "29da4f017561ed96f28a024b6787ad9805629c39",
+    "build_command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_cuda_kv.ps1",
+    "runtime_sha256": {
+      "build/patched-cuda-ninja3/bin/ggml-base.dll": "2b35ce43c9bd1892a7c552df3e782c90124c203081c706b71219e7a8e33aa7c1",
+      "build/patched-cuda-ninja3/bin/ggml-cpu.dll": "38dfe9876b8c9532bf3a463e3cc47c27327bc319a24c0d8f67946fc5b28387b5",
+      "build/patched-cuda-ninja3/bin/ggml-cuda.dll": "1012d8b58db0a0ec4fce854aa645b31af3005356bc9120f3e17154e369d9d5b6",
+      "build/patched-cuda-ninja3/bin/ggml.dll": "5c3f3414be6768113b65dc5b092dde1c94f739a4afc93c5d720359942afdc8d3",
+      "build/patched-cuda-ninja3/bin/llama-common.dll": "852b471f26f0ceb2d37ee4a03eb1e97574ee2a238828f0702b0395bd64972b2b",
+      "build/patched-cuda-ninja3/bin/llama-server-impl.dll": "773496138ed45276c196864e5845c63566de6534d176c96c23309c8c3c4590e4",
+      "build/patched-cuda-ninja3/bin/llama.dll": "6370ebe12c01041bd41ea337b7cf0b8da5324bb86609d2c3ab893905e5f09ff2",
+      "build/patched-cuda-ninja3/bin/mtmd.dll": "1bd9829a24800ede96973b4874343dcc15aefe09af97926e0b292a1d904e6d13"
+    }
+  },
+  "request": {
+    "prompt": " one one one one one one one one one one one one one one one one one",
+    "predicted_tokens": 1,
+    "cache_prompt": true,
+    "warm_requests_before_measurement": 5,
+    "measured_requests_per_arm": 16,
+    "aggregate_request_level_latency": true
+  },
+  "controlled_boundary": {
+    "same_process": true,
+    "slot_reset_before_each_arm": true,
+    "same_model": "Qwen2.5-0.5B Q4_K_M",
+    "same_action": "paged",
+    "same_graph_and_layout": true,
+    "steady_state_definition": "erase the single slot, run one full-prompt request and four cached warm requests, then record sixteen cached one-token requests; request-level latency retains all sixteen values rather than collapsing the arm before tail estimation",
+    "same_page_size": 16,
+    "same_context_tokens": 17,
+    "same_gqa": "14 query heads / 2 KV heads / D64",
+    "only_intervention": "an opt-in control file read by the Paged CUDA dispatcher selects incumbent K1 or candidate K2 before each arm inside one long-lived server",
+    "k1_kernel": "cacheflow_paged_decode_fattn_k1",
+    "k2_kernel": "cacheflow_paged_decode_fattn_k2_t2"
+  },
+  "measurements": {
+    "primary": "request-level median and P95 over 480 raw monotonic timings per variant, preserving pair clusters during bootstrap",
+    "inferential_gate": "pair-cluster bootstrap 95% upper bound for request-level median regression",
+    "operational_guardrail": "request-level P95 point estimate; its bootstrap interval is reported but is not claimed as population non-inferiority",
+    "mechanism_gate": "PID-isolated NSYS aggregate duration across exactly 480 selected-kernel launches in each arm: twenty cached Paged actions times 24 model layers",
+    "secondary": [
+      "paired arm-median client effect and bootstrap interval",
+      "paired server prompt median reconstructed from sixteen raw JSON responses per arm",
+      "Prometheus request-level Paged graph-entry deltas reconstructed from before/after snapshots",
+      "kernel identity and launch count"
+    ],
+    "profiler_timing_is_not_end_to_end": true,
+    "no_outcome_based_deletion": true
+  },
+  "acceptance": {
+    "outputs_must_match": true,
+    "expected_paged_graph_entries_per_arm": 20,
+    "expected_profiled_kernel_launches": 480,
+    "fallbacks_must_be_zero": true,
+    "client_median_maximum_regression_percent": 5.0,
+    "p95_maximum_regression_percent": 5.0,
+    "client_median_maximum_upper_95_regression_percent": 5.0,
+    "minimum_kernel_duration_reduction_percent": 20.0,
+    "require_equal_profiled_kernel_launches": true
+  },
+  "claim_rules": {
+    "promotion_is_k2_over_k1_not_paged_over_direct": true,
+    "promotion_means_bounded_operational_replacement_not_population_wide_tail_noninferiority": true,
+    "all_prior_paged_vs_direct_failures_remain_valid": true,
+    "result_is_limited_to_the_registered_context_17_envelope": true,
+    "nsys_duration_is_mechanism_only": true
+  }
+}

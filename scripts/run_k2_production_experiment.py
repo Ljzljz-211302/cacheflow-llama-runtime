@@ -240,6 +240,35 @@ def bootstrap_regression_intervals(
     }
 
 
+def bootstrap_cluster_regression_intervals(
+    by_pair: dict[int, dict[str, dict[str, Any]]], seed: int, resamples: int = 10000,
+) -> dict[str, list[float]]:
+    generator = random.Random(seed)
+    pairs = sorted(by_pair)
+    median_values: list[float] = []
+    p95_values: list[float] = []
+    for _ in range(resamples):
+        sampled = [generator.choice(pairs) for _ in pairs]
+        baseline = [
+            value for pair in sampled
+            for value in by_pair[pair]["k1"]["request_client_elapsed_ms"]
+        ]
+        candidate = [
+            value for pair in sampled
+            for value in by_pair[pair]["k2"]["request_client_elapsed_ms"]
+        ]
+        median_values.append(
+            (summarize(candidate)["median"] / summarize(baseline)["median"] - 1.0) * 100.0)
+        p95_values.append(
+            (summarize(candidate)["p95"] / summarize(baseline)["p95"] - 1.0) * 100.0)
+    return {
+        "client_median_regression_bootstrap_95_percent": [
+            percentile(median_values, 0.025), percentile(median_values, 0.975)],
+        "client_p95_regression_bootstrap_95_percent": [
+            percentile(p95_values, 0.025), percentile(p95_values, 0.975)],
+    }
+
+
 def expected_summary(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
     pairs = int(protocol["paired_trials"])
     if protocol.get("execution_scope") == "single_server":
@@ -266,11 +295,26 @@ def expected_summary(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> di
     if any(pair_rows["k1"]["content"] != pair_rows["k2"]["content"]
            for pair_rows in by_pair.values()):
         raise AssertionError("K1/K2 differential output mismatch")
-    k1_client = [by_pair[p]["k1"]["client_elapsed_ms"] for p in sorted(by_pair)]
-    k2_client = [by_pair[p]["k2"]["client_elapsed_ms"] for p in sorted(by_pair)]
+    aggregate_request_latency = protocol.get("request", {}).get(
+        "aggregate_request_level_latency", False)
+    if aggregate_request_latency:
+        k1_client = [
+            value for p in sorted(by_pair)
+            for value in by_pair[p]["k1"]["request_client_elapsed_ms"]
+        ]
+        k2_client = [
+            value for p in sorted(by_pair)
+            for value in by_pair[p]["k2"]["request_client_elapsed_ms"]
+        ]
+    else:
+        k1_client = [by_pair[p]["k1"]["client_elapsed_ms"] for p in sorted(by_pair)]
+        k2_client = [by_pair[p]["k2"]["client_elapsed_ms"] for p in sorted(by_pair)]
     k1_prompt = [by_pair[p]["k1"]["prompt_ms"] for p in sorted(by_pair)]
     k2_prompt = [by_pair[p]["k2"]["prompt_ms"] for p in sorted(by_pair)]
-    client_effects = [k2 - k1 for k1, k2 in zip(k1_client, k2_client)]
+    client_effects = [
+        by_pair[p]["k2"]["client_elapsed_ms"] - by_pair[p]["k1"]["client_elapsed_ms"]
+        for p in sorted(by_pair)
+    ]
     prompt_effects = [k2 - k1 for k1, k2 in zip(k1_prompt, k2_prompt)]
     k1_summary = summarize(k1_client)
     k2_summary = summarize(k2_client)
@@ -314,16 +358,33 @@ def expected_summary(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> di
         result["paired_median_acceptance_passed"] = paired_median_passed
     if "client_median_maximum_regression_percent" in protocol["acceptance"]:
         result["client_median_regression_percent"] = median_regression
-    if "maximum_regression_upper_95_percent" in protocol["acceptance"]:
-        intervals = bootstrap_regression_intervals(
-            k1_client, k2_client, int(protocol["random_seed"]) + 991)
-        upper_limit = float(protocol["acceptance"]["maximum_regression_upper_95_percent"])
+    if "maximum_regression_upper_95_percent" in protocol["acceptance"] or \
+            "client_median_maximum_upper_95_regression_percent" in protocol["acceptance"]:
+        intervals = (
+            bootstrap_cluster_regression_intervals(
+                by_pair, int(protocol["random_seed"]) + 991)
+            if aggregate_request_latency
+            else bootstrap_regression_intervals(
+                k1_client, k2_client, int(protocol["random_seed"]) + 991)
+        )
+        upper_limit = float(protocol["acceptance"].get(
+            "maximum_regression_upper_95_percent",
+            protocol["acceptance"].get(
+                "client_median_maximum_upper_95_regression_percent")))
         result.update(intervals)
         result["maximum_regression_upper_95_percent"] = upper_limit
-        result["latency_uncertainty_acceptance_passed"] = (
-            intervals["client_median_regression_bootstrap_95_percent"][1] <= upper_limit and
-            intervals["client_p95_regression_bootstrap_95_percent"][1] <= upper_limit
-        )
+        if aggregate_request_latency:
+            result["uncertainty_gate_metrics"] = (
+                ["median", "p95"]
+                if "maximum_regression_upper_95_percent" in protocol["acceptance"]
+                else ["median"]
+            )
+        result["latency_uncertainty_acceptance_passed"] = \
+            intervals["client_median_regression_bootstrap_95_percent"][1] <= upper_limit
+        if "maximum_regression_upper_95_percent" in protocol["acceptance"]:
+            result["latency_uncertainty_acceptance_passed"] = (
+                result["latency_uncertainty_acceptance_passed"] and
+                intervals["client_p95_regression_bootstrap_95_percent"][1] <= upper_limit)
         result["promotion_passed"] = (
             result["promotion_passed"] and result["latency_uncertainty_acceptance_passed"])
     return result
@@ -412,13 +473,16 @@ def render_report(summary: dict[str, Any], mechanisms: dict[str, Any]) -> str:
     effect = summary["paired_k2_minus_k1_client_ms"]
     prompt = summary["paired_k2_minus_k1_prompt_ms"]
     noninferiority = "minimum_kernel_duration_reduction_percent" in summary
-    uncertainty_line = (
-        f"- Bootstrap 95% upper regression bounds (median/P95): "
-        f"{summary['client_median_regression_bootstrap_95_percent'][1]:.2f}% / "
-        f"{summary['client_p95_regression_bootstrap_95_percent'][1]:.2f}%."
-        if "maximum_regression_upper_95_percent" in summary
-        else "- No uncertainty acceptance gate was registered."
-    )
+    uncertainty_line = "- No uncertainty acceptance gate was registered."
+    if "maximum_regression_upper_95_percent" in summary:
+        uncertainty_line = (
+            f"- Bootstrap 95% upper regression bounds (median/P95): "
+            f"{summary['client_median_regression_bootstrap_95_percent'][1]:.2f}% / "
+            f"{summary['client_p95_regression_bootstrap_95_percent'][1]:.2f}%."
+        )
+        if "uncertainty_gate_metrics" in summary:
+            uncertainty_line = uncertainty_line[:-1] + (
+                f"; gate metrics: {','.join(summary['uncertainty_gate_metrics'])}.")
     return "\n".join([
         "# K2 相对生产 K1 的正式晋级实验",
         "",
@@ -459,8 +523,12 @@ def render_chart(
     scope = str(protocol["controlled_boundary"].get(
         "same_context_tokens", protocol["controlled_boundary"].get(
             "context_range_tokens", "registered")))
-    uncertainty_gate = " + bootstrap upper 95% ≤ 5%" \
-        if "maximum_regression_upper_95_percent" in summary else ""
+    uncertainty_gate = ""
+    if "maximum_regression_upper_95_percent" in summary:
+        uncertainty_gate = " + bootstrap upper 95% ≤ 5%"
+        if "uncertainty_gate_metrics" in summary:
+            uncertainty_gate = (
+                f" + {'/'.join(summary['uncertainty_gate_metrics'])} bootstrap upper 95% ≤ 5%")
     return "\n".join([
         '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="500" viewBox="0 0 960 500">',
         '  <rect width="960" height="500" fill="#ffffff"/>',
