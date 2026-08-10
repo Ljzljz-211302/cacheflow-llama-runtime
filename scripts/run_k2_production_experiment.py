@@ -294,6 +294,7 @@ def profile_variant(
     raw_prefix = ROOT / f"results/raw/k2-production-{variant}-nsys"
     launcher = [
         str(nsys), "profile", "--trace=cuda,nvtx", "--sample=none", "--cpuctxsw=none",
+        "--cuda-graph-trace=node",
         "--duration=6", "--kill=true", "--force-overwrite=true", f"--output={raw_prefix}",
     ]
     result, _, log = run_mode(
