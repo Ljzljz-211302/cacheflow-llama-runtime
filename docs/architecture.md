@@ -1213,7 +1213,7 @@ Issue #4 在这条服务因果链下新增 H2 算子机制切片。`bench-kv-blo
 | Transactional host Swap | 是 | 是 | memory/file store 恢复后进入 decode |
 | Recompute | 是 | 是 | 重新 prefill 后进入 decode |
 | Remap | 是（真实跨 stream prefix adoption） | 是 | donor 已确定且 block runtime 可执行真实 CUDA 映射 |
-| Paged | 是（opt-in 受限 envelope） | 是 | Qwen2.5-0.5B、FP16 KV、D64、page 16、batch/query token 1、context ≤ 17、全层 CUDA |
+| Paged | 是（opt-in 受限 envelope） | 是 | Qwen2.5-0.5B、FP16 KV、D64、page 16、batch/query token 1、context ≤ 32、全层 CUDA；正式性能晋级仅覆盖 context17 |
 
 Remap 只有在真实 donor prefix 大于目标 slot 的 resident prefix 时才声明 capability；Paged 默认关闭，必须显式使用 `--kv-paged-decode`，任何 shape、dtype、page、mask、offload 或 context 不满足均在 KV mutation 前 fail closed。H3 的中长 context 负结果仍保留，所以生产 Paged 不扩展到中长 context，也不默认启用。
 
@@ -1234,7 +1234,7 @@ Remap 只有在真实 donor prefix 大于目标 slot 的 resident prefix 时才�
 
 生产路径不是调用 H3 benchmark。`llama_kv_cache::build_paged_decode_layout` 从真实 cell metadata 和当前 `prepare()` destination 构造 block table；重算缓存尾 token 时，pending destination 必须覆盖相同 logical position 的旧 cell。该布局通过 `GGML_OP_FLASH_ATTN_EXT` 的额外输入进入每一层 attention，CUDA K2 直接使用真实 K/V tensor stride 和物理 cell base，不生成 contiguous K/V 临时副本，输出继续进入原有 `wo`、logits 与 sampler。K2 仅在 D64/GQA7 envelope 默认 dispatch；`LLAMA_CACHEFLOW_PAGED_KERNEL=K1` 只作为进程级可复现实验 seam。Paged 分支的 CUDA buffer size 必须至少包含普通输出 tensor bytes，即使额外 scratch 为零；`test-backend-ops` 用 F32 Q/FP16 KV 与 CPU Flash Attention 交叉验证，独立 CUDA oracle继续覆盖生产 F16 Q。
 
-`llama_context` 在 `mctx->apply()` 前完成 envelope 与布局检查。只有 Qwen2.5-0.5B `24L/14Q/2KV/D64`、page 16、FP16 K/V、非转置 V、单 sequence/单 query token、context ≤ 17、causal Flash Attention、无 ALiBi/softcap/sink、完整 GPU offload 才设置 Paged graph topology；其余请求保持 Direct/Recompute。graph reuse key 包含 Paged topology，避免复用错误图。
+`llama_context` 在 `mctx->apply()` 前完成 envelope 与布局检查。只有 Qwen2.5-0.5B `24L/14Q/2KV/D64`、page 16、FP16 K/V、非转置 V、单 sequence/单 query token、context ≤ 32、causal Flash Attention、无 ALiBi/softcap/sink、完整 GPU offload 才设置 Paged graph topology；其余请求保持 Direct/Recompute。生产 GGML 算子已在 context 1/15/16/17/18/31/32/33 与 CPU oracle 对照，其中 33 验证超出 K2 capability 后的完整 K1 路径；v2.10 性能结论仍只覆盖 context17。graph reuse key 包含 Paged topology，避免复用错误图。
 
 真实服务动作边界从 policy snapshot 开始，到下一次有用 decode 返回。成功、fallback 和 failure 分开计数；测试注入可在真实 `llama_decode` 已成功后模拟异步 CUDA 错误被晚发现，服务必须返回错误、按失败动作记录 penalty、清理整个受影响 sequence，并让下一请求完整重算。压力链路另由 capacity planner 在共享 KV 超容量前选择 idle victim，记录 pressure/eviction/reclaimed/failure 指标，不把主动回收冒充 Paged 成功。
 
