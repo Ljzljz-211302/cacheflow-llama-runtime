@@ -583,7 +583,7 @@ def main() -> None:
     (args.output / "mechanisms.json").write_text(json.dumps(mechanisms, indent=2) + "\n", encoding="utf-8")
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     (args.output / "report.md").write_text(render_report(summary, mechanisms), encoding="utf-8")
-    if "minimum_kernel_duration_reduction_percent" in protocol["acceptance"]:
+    if protocol["protocol_version"] == "2.7.0":
         (args.output / "k2-production-comparison.svg").write_text(
             render_chart(summary, mechanisms), encoding="utf-8")
     files = {
