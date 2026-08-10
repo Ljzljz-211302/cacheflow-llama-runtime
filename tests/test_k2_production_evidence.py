@@ -12,7 +12,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from run_k2_production_experiment import expected_summary, validate_artifact  # noqa: E402
+from run_k2_production_experiment import (  # noqa: E402
+    expected_summary,
+    mechanism_acceptance,
+    validate_artifact,
+)
 
 
 class K2ProductionEvidenceTests(unittest.TestCase):
@@ -84,6 +88,33 @@ class K2ProductionEvidenceTests(unittest.TestCase):
         summary = expected_summary(protocol, rows)
         self.assertTrue(summary["paired_median_acceptance_passed"])
         self.assertFalse(summary["promotion_passed"])
+
+    def test_v2_5_requires_latency_noninferiority_and_mechanism_gain(self) -> None:
+        protocol = {
+            "paired_trials": 1,
+            "random_seed": 3,
+            "acceptance": {
+                "client_median_maximum_regression_percent": 5.0,
+                "p95_maximum_regression_percent": 5.0,
+                "minimum_kernel_duration_reduction_percent": 20.0,
+            },
+        }
+        rows = [
+            {"pair": 1, "order_in_pair": 1, "variant": "k1", "content": ",",
+             "client_elapsed_ms": 10.0, "prompt_ms": 4.0, "paged_calls": 1,
+             "paged_fallbacks": 0},
+            {"pair": 1, "order_in_pair": 2, "variant": "k2", "content": ",",
+             "client_elapsed_ms": 10.4, "prompt_ms": 4.1, "paged_calls": 1,
+             "paged_fallbacks": 0},
+        ]
+        latency = expected_summary(protocol, rows)
+        mechanism = mechanism_acceptance(protocol, {
+            "k1": {"kernel_duration_ms": 1.0},
+            "k2": {"kernel_duration_ms": 0.85},
+        })
+        self.assertTrue(latency["promotion_passed"])
+        self.assertFalse(mechanism["mechanism_acceptance_passed"])
+        self.assertFalse(latency["promotion_passed"] and mechanism["mechanism_acceptance_passed"])
 
 
 if __name__ == "__main__":

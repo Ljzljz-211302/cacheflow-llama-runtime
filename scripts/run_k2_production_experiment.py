@@ -217,6 +217,7 @@ def expected_summary(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> di
     k1_summary = summarize(k1_client)
     k2_summary = summarize(k2_client)
     p95_regression = (k2_summary["p95"] / k1_summary["p95"] - 1.0) * 100.0
+    median_regression = (k2_summary["median"] / k1_summary["median"] - 1.0) * 100.0
     limit = float(protocol["acceptance"]["p95_maximum_regression_percent"])
     client_median_not_slower = summarize(client_effects)["median"] <= 0.0
     prompt_median_not_slower = summarize(prompt_effects)["median"] <= 0.0
@@ -228,6 +229,9 @@ def expected_summary(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> di
         paired_median_passed = prompt_median_not_slower
     else:
         raise ValueError(f"unsupported paired_median_metric: {acceptance_metric}")
+    if "client_median_maximum_regression_percent" in protocol["acceptance"]:
+        median_limit = float(protocol["acceptance"]["client_median_maximum_regression_percent"])
+        paired_median_passed = median_regression <= median_limit
     result = {
         "paired_trials": pairs,
         "k1_client_elapsed_ms": k1_summary,
@@ -250,7 +254,24 @@ def expected_summary(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> di
     if "paired_median_metric" in protocol["acceptance"]:
         result["paired_median_acceptance_metric"] = acceptance_metric
         result["paired_median_acceptance_passed"] = paired_median_passed
+    if "client_median_maximum_regression_percent" in protocol["acceptance"]:
+        result["client_median_regression_percent"] = median_regression
     return result
+
+
+def mechanism_acceptance(
+    protocol: dict[str, Any], mechanisms: dict[str, Any],
+) -> dict[str, Any]:
+    k1 = float(mechanisms["k1"]["kernel_duration_ms"])
+    k2 = float(mechanisms["k2"]["kernel_duration_ms"])
+    reduction = (1.0 - k2 / k1) * 100.0
+    minimum = float(protocol["acceptance"].get(
+        "minimum_kernel_duration_reduction_percent", float("-inf")))
+    return {
+        "kernel_duration_reduction_percent": reduction,
+        "minimum_kernel_duration_reduction_percent": minimum,
+        "mechanism_acceptance_passed": reduction >= minimum,
+    }
 
 
 def profile_variant(
@@ -305,8 +326,7 @@ def profile_variant(
 def render_report(summary: dict[str, Any], mechanisms: dict[str, Any]) -> str:
     effect = summary["paired_k2_minus_k1_client_ms"]
     prompt = summary["paired_k2_minus_k1_prompt_ms"]
-    gate_metric = summary.get("paired_median_acceptance_metric", "client_elapsed_ms")
-    gate_label = "服务内部 prompt" if gate_metric == "server_prompt_ms" else "客户端"
+    noninferiority = "minimum_kernel_duration_reduction_percent" in summary
     return "\n".join([
         "# K2 相对生产 K1 的正式晋级实验",
         "",
@@ -322,9 +342,12 @@ def render_report(summary: dict[str, Any], mechanisms: dict[str, Any]) -> str:
         f"{mechanisms['k1']['kernel_duration_ms']:.3f} ms；K2 "
         f"{mechanisms['k2']['kernel_launches']} 次 / "
         f"{mechanisms['k2']['kernel_duration_ms']:.3f} ms（仅机制证据）。",
-        f"- 生产晋级：{'通过' if summary['promotion_passed'] else '未通过'}。门槛为 "
-        f"客户端 P95 回退不超过 {summary['promotion_limit_percent']:.1f}% 且"
-        f"{gate_label}配对中位数不慢。",
+        (f"- 生产晋级：{'通过' if summary['promotion_passed'] else '未通过'}。门槛为客户端 median/P95 "
+         f"回退均不超过 {summary['promotion_limit_percent']:.1f}%，且 kernel 总时长至少降低 "
+         f"{summary['minimum_kernel_duration_reduction_percent']:.1f}%。") if noninferiority else
+        (f"- 生产晋级：{'通过' if summary['promotion_passed'] else '未通过'}。门槛为客户端 P95 "
+         f"回退不超过 {summary['promotion_limit_percent']:.1f}% 且"
+         f"{'服务内部 prompt' if summary.get('paired_median_acceptance_metric') == 'server_prompt_ms' else '客户端'}配对中位数不慢。"),
         "",
         "该结论只回答 K2 能否替代同一 Paged 路径中的 K1；不把它改写成 Paged 已优于 Direct。",
         "",
@@ -341,6 +364,9 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
             raise AssertionError("trials are not exactly reconstructed from structured raw arms")
     expected = expected_summary(protocol, rows)
     for key, value in expected.items():
+        if key == "promotion_passed" and \
+                "minimum_kernel_duration_reduction_percent" in protocol["acceptance"]:
+            continue
         if summary.get(key) != value:
             raise AssertionError(f"summary field is not derived from trials: {key}")
     if summary["protocol_sha256"] != sha256(protocol_path):
@@ -369,6 +395,16 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
                 mechanisms[variant]["selector"] != selector or \
                 mechanisms[variant]["kernel_pattern"] != pattern:
             raise AssertionError(f"{variant} mechanism metadata mismatch")
+    if "minimum_kernel_duration_reduction_percent" in protocol["acceptance"]:
+        mechanism_expected = mechanism_acceptance(protocol, mechanisms)
+        for key, value in mechanism_expected.items():
+            if summary.get(key) != value:
+                raise AssertionError(f"mechanism acceptance is not derived: {key}")
+        latency_expected = expected["promotion_passed"]
+        if summary["promotion_passed"] != (
+            latency_expected and mechanism_expected["mechanism_acceptance_passed"]
+        ):
+            raise AssertionError("final promotion does not combine latency and mechanism gates")
     if protocol.get("raw_schema") == "structured-arm-v1" and \
             (output / "report.md").read_text(encoding="utf-8") != render_report(summary, mechanisms):
         raise AssertionError("report is not rendered from the validated summary and mechanisms")
@@ -469,6 +505,11 @@ def main() -> None:
             args.port_base + int(protocol["paired_trials"]) * 2 + index, variant,
         ) for index, variant in enumerate(VARIANTS)
     }
+    if "minimum_kernel_duration_reduction_percent" in protocol["acceptance"]:
+        mechanism_result = mechanism_acceptance(protocol, mechanisms)
+        derived["promotion_passed"] = (
+            derived["promotion_passed"] and mechanism_result["mechanism_acceptance_passed"])
+        derived.update(mechanism_result)
     summary = {
         "schema_version": 1,
         "protocol_version": protocol["protocol_version"],

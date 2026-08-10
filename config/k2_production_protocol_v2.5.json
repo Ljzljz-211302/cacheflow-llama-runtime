@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "protocol_version": "2.5.0",
+  "preregistered_at_utc": "2026-08-10T04:08:38Z",
+  "claim": "K2 replaces K1 inside the same steady-state production Paged action and serving process",
+  "supersedes": {
+    "protocol": "2.4.0",
+    "reason": "v2.4 preserved an exact zero-regression prompt-median gate whose 0.005 ms result was below the useful decision scale; v2.5 preregisters bounded end-to-end non-inferiority plus a profiler-isolated mechanism-improvement gate without reclassifying the retained v2.4 outcome"
+  },
+  "execution_scope": "single_server",
+  "raw_schema": "structured-arm-v1",
+  "random_seed": 20260810,
+  "paired_trials": 30,
+  "order": "seeded random K1-K2 or K2-K1 order independently within each pair",
+  "device": {
+    "name": "NVIDIA GeForce RTX 4050 Laptop GPU",
+    "compute_capability": "8.9",
+    "driver_version": "561.19"
+  },
+  "artifact_binding": {
+    "server_sha256": "1506d0327586b17a101f49cfe99514425d049ccbdc102af79336aeddeaad6977",
+    "model_sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+    "vendor_revision": "593198f038321a4df9006c164fe26dd005f09b89",
+    "build_command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_cuda_kv.ps1"
+  },
+  "request": {
+    "prompt": " one one one one one one one one one one one one one one one one one",
+    "predicted_tokens": 1,
+    "cache_prompt": true,
+    "warm_requests_before_measurement": 5
+  },
+  "controlled_boundary": {
+    "same_process": true,
+    "slot_reset_before_each_arm": true,
+    "same_model": "Qwen2.5-0.5B Q4_K_M",
+    "same_action": "paged",
+    "same_graph_and_layout": true,
+    "steady_state_definition": "erase the single slot, run one full-prompt warm request and four cached warm requests, then measure one cached request",
+    "same_page_size": 16,
+    "same_context_tokens": 17,
+    "same_gqa": "14 query heads / 2 KV heads / D64",
+    "only_intervention": "an opt-in control file read by the Paged CUDA dispatcher selects incumbent K1 or candidate K2 before each arm inside one long-lived server",
+    "k1_kernel": "cacheflow_paged_decode_fattn_k1",
+    "k2_kernel": "cacheflow_paged_decode_fattn_k2_t2"
+  },
+  "measurements": {
+    "primary": "unprofiled client elapsed median and P95 reconstructed from each raw monotonic timing record",
+    "mechanism_gate": "PID-isolated NSYS aggregate duration of the selected production kernel",
+    "secondary": [
+      "paired server prompt_ms reconstructed from each raw JSON response",
+      "paired client effect and bootstrap interval",
+      "Prometheus deltas reconstructed from before/after snapshots",
+      "kernel identity and launch count"
+    ],
+    "profiler_timing_is_not_end_to_end": true,
+    "no_outcome_based_deletion": true
+  },
+  "acceptance": {
+    "outputs_must_match": true,
+    "each_arm_requires_five_paged_graph_entries": true,
+    "fallbacks_must_be_zero": true,
+    "client_median_maximum_regression_percent": 5.0,
+    "p95_maximum_regression_percent": 5.0,
+    "minimum_kernel_duration_reduction_percent": 20.0
+  },
+  "claim_rules": {
+    "promotion_is_k2_over_k1_not_paged_over_direct": true,
+    "promotion_means_production_replacement_not_end_to_end_acceleration": true,
+    "all_prior_paged_vs_direct_failures_remain_valid": true,
+    "result_is_limited_to_the_registered_short_context_envelope": true,
+    "nsys_duration_is_mechanism_only": true
+  }
+}
