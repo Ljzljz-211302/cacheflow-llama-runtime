@@ -20,6 +20,14 @@ from run_k2_production_experiment import (  # noqa: E402
 
 
 class K2ProductionEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def _refresh_manifest_hash(artifact: Path, relative_path: str) -> None:
+        target = artifact / relative_path
+        manifest_path = artifact / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["files"][relative_path] = hashlib.sha256(target.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
     def test_retained_v2_0_artifact_recomputes(self) -> None:
         validate_artifact(
             ROOT / "config/k2_production_protocol_v2.0.json",
@@ -115,6 +123,51 @@ class K2ProductionEvidenceTests(unittest.TestCase):
         self.assertTrue(latency["promotion_passed"])
         self.assertFalse(mechanism["mechanism_acceptance_passed"])
         self.assertFalse(latency["promotion_passed"] and mechanism["mechanism_acceptance_passed"])
+
+    def test_formal_v2_10_artifact_recomputes(self) -> None:
+        validate_artifact(
+            ROOT / "config/k2_production_protocol_v2.10.json",
+            ROOT / "results/research/h8-k2-production-v2.10.0",
+        )
+
+    def test_rehashed_v2_10_raw_response_tamper_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / "artifact"
+            shutil.copytree(ROOT / "results/research/h8-k2-production-v2.10.0", artifact)
+            response_path = artifact / "raw/arm-001-k1/responses.json"
+            responses = json.loads(response_path.read_text(encoding="utf-8"))
+            responses[0]["timings"]["prompt_n"] += 1
+            response_path.write_text(json.dumps(responses, indent=2) + "\n", encoding="utf-8")
+            self._refresh_manifest_hash(
+                artifact, "raw/arm-001-k1/responses.json"
+            )
+            with self.assertRaisesRegex(AssertionError, "context|prompt_n|workload"):
+                validate_artifact(ROOT / "config/k2_production_protocol_v2.10.json", artifact)
+
+    def test_rehashed_v2_10_chart_tamper_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / "artifact"
+            shutil.copytree(ROOT / "results/research/h8-k2-production-v2.10.0", artifact)
+            chart_path = artifact / "k2-production-comparison.svg"
+            chart_path.write_text(
+                chart_path.read_text(encoding="utf-8").replace("PASS", "FAIL", 1),
+                encoding="utf-8",
+            )
+            self._refresh_manifest_hash(artifact, "k2-production-comparison.svg")
+            with self.assertRaisesRegex(AssertionError, "chart"):
+                validate_artifact(ROOT / "config/k2_production_protocol_v2.10.json", artifact)
+
+    def test_rehashed_v2_10_pre_registration_tamper_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / "artifact"
+            shutil.copytree(ROOT / "results/research/h8-k2-production-v2.10.0", artifact)
+            summary_path = artifact / "summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["generated_at_utc"] = "2026-08-10T05:00:00+00:00"
+            summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+            self._refresh_manifest_hash(artifact, "summary.json")
+            with self.assertRaisesRegex(AssertionError, "predates"):
+                validate_artifact(ROOT / "config/k2_production_protocol_v2.10.json", artifact)
 
 
 if __name__ == "__main__":

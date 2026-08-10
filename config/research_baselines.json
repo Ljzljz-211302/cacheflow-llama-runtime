@@ -123,16 +123,16 @@
       "comparison_class": "quantitative",
       "runnable": true,
       "source": "https://github.com/Ljzljz-211302/cacheflow-llama-runtime",
-      "source_revision": "vendor/llama.cpp@593198f038321a4df9006c164fe26dd005f09b89",
+      "source_revision": "vendor/llama.cpp@29da4f017561ed96f28a024b6787ad9805629c39",
       "license": "MIT",
       "commands": [
         "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_cuda_kv.ps1",
-        "python scripts/run_k2_production_experiment.py --protocol config/k2_production_protocol_v2.7.json --output results/research/h8-k2-production-v2.7.0"
+        "python scripts/run_k2_production_experiment.py --protocol config/k2_production_protocol_v2.10.json --output results/research/h8-k2-production-v2.10.0"
       ],
       "controlled_mode": "K1 selected through the opt-in control seam inside the same long-lived Qwen2.5-0.5B production Paged process, graph, layout, request, and warm-up boundary as K2",
       "comparability_limits": [
         "This baseline compares K2 against K1 inside Paged; it is not a Direct or upstream comparator.",
-        "Quantitative evidence is limited to D64, GQA ratio 7, page 16, batch 1, decode contexts 17 through 24, and complete CUDA offload on one RTX 4050 Laptop GPU.",
+        "Quantitative promotion evidence is limited to D64, GQA ratio 7, page 16, batch 1, repeated cached decode at context 17, and complete CUDA offload on one RTX 4050 Laptop GPU; CPU-oracle capability tests through context 33 are correctness evidence, not performance scope.",
         "The process-scoped selector exists for controlled A/B and does not expand the production capability envelope."
       ]
     },

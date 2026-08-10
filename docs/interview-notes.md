@@ -205,11 +205,11 @@ K2-T2 的 T2 表示一个 CTA 同时处理两个 query heads。CTA 内有两个 
 
 计算时，一个 lane 负责一个 token 的 Q·K 点积；warp shuffle 允许 lane 之间不经过 shared memory 直接交换寄存器值，用它求最大 logit 和指数和，完成 stable softmax。然后各 lane 广播 token 权重并累加 V。这个设计没有把 7 个 head 全塞进一个 CTA，因为那会令每层只剩 2 个 CTA，在 batch 1 时并行度不足；T2 保留每层 8 个 CTA，是 KV 复用、同步成本和可调度并行度的折中。
 
-证据链要分三层回答。第一层是正确性：生产算子还用 CPU Flash Attention 在 context 1/15/16/17/33 五个边界与随机输入上交叉验证；正式 K1/K2 输出逐字一致，累计 300 次请求级真实 Paged 图且 0 fallback。第二层是无 profiler 服务指标：同一长驻进程内随机执行 30 组配对，八 token decode 的客户端 median 44.879→41.417 ms（-7.72%），P95 57.253→55.897 ms（-2.37%），配对效应 median 为 -1.028 ms。第三层是机制：PID 隔离 NSYS 中两臂各 24 次目标 kernel，总时长 0.438→0.228 ms（-47.90%）。NSYS 证明执行的是哪个 kernel 以及其时间；因为 NCU hardware counter 不可用，不能声称已直接测得 DRAM byte、occupancy 或 bank-conflict counter。
+证据链要分三层回答。第一层是正确性：生产算子用 CPU Flash Attention 在 context 1/15/16/17/33 五个边界与随机输入上交叉验证；正式 K1/K2 输出逐字一致，每 variant 累计 600 次请求级真实 Paged 图且 0 fallback。第二层是无 profiler 服务指标：同一长驻进程内随机执行 30 组配对，每 arm 保留 16 条原始请求计时，所以每 variant 有 480 个用户请求样本；请求级 median 为 6.900/6.938 ms（K2 回退 0.55%，配对簇 bootstrap 回退 95% 上界 2.86%），P95 为 30.102/30.559 ms（回退 1.52%）。第三层是机制：PID 隔离 NSYS 中两臂各 480 次目标 kernel，总时长 8.174→4.051 ms（-50.44%）。NSYS 证明执行的是哪个 kernel 以及其时间；因为 NCU hardware counter 不可用，不能声称已直接测得 DRAM byte、occupancy 或 bank-conflict counter。
 
-实验迭代体现的是如何把“kernel 快”变成可审计的生产替换。早期跨进程 v2.2 不能排除进程状态差异，因而不作为最终证据；同进程单 token v2.5 虽然 kernel 降低 47.0%，客户端 median 却回退 20.8%，说明固定 HTTP/调度开销淹没了微秒级干预。随后在不放宽门槛的前提下，把用户负载改为仍处于 context 17--24 envelope 的八 token decode，让一次请求内重复的 kernel 工作可观测。v2.6 因误解 `paged_calls` 的请求级语义而判无效；最终 v2.7 事先固定 5% median/P95 non-inferiority 和 20% kernel-reduction 门槛，再独立复现通过。所有失败和无效 artifact 均保留。
+实验迭代体现的是如何把“kernel 快”变成可审计的生产替换。早期跨进程 v2.2 不能排除进程状态差异，因而不作为最终证据；同进程 v2.5 虽然 kernel 降低 47.0%，客户端 median 却回退 20.8%，说明单次微秒级干预容易被 HTTP/调度噪声淹没。v2.7 又暴露了 host gate 只让 context 17 真正进入 K2，不能把八 token 请求归因给八次 K2；修正 gate 后，CUDA graph 的 node trace 进一步证明一次 cached 请求只有一次 Paged 动作，而不是每个生成 token 一次。最终 v2.10 不放宽 5%/20% 门槛，而是在同一 context-17 用户场景中每 arm 重复 16 次真实 cached 请求，直接以 480 条原始请求/variant 估计请求级 median/P95，并按 pair cluster 做 bootstrap。所有有效失败、无效与中止 artifact 均保留，v2.4 因预注册时间晚于结果只算无效证据，不能算预注册失败。
 
-最后必须区分两个问题：K2 已证明在同一受限 Paged 路径内可替换 K1；Paged 相对 Direct 的 v1.1 P95 仍回退 6.78%，所以 Paged 整体仍是 opt-in。前者是算子内部替换成功，后者是动作选择边界，二者不矛盾。还要区分“通过替换门槛”和“证明总体必然加速”：v2.7 的 median/P95 均改善，但 bootstrap 区间跨零，因此简历写实测改善，结论写 bounded production replacement，不写普适加速定理。
+最后必须区分两个问题：K2 已证明在同一受限 Paged 路径内可替换 K1；Paged 相对 Direct 的 v1.1 P95 仍回退 6.78%，所以 Paged 整体仍是 opt-in。前者是算子内部替换成功，后者是动作选择边界，二者不矛盾。还要区分“kernel 加速”和“端到端加速”：v2.10 的 kernel 总时长下降 50.44%，请求级 median/P95 点估计分别小幅回退 0.55%/1.52%，但 median 回退 95% 上界 2.86% 仍低于预注册 5% 门槛。因此简历写“kernel 降低 50.44%，端到端保持在 1.52% 内并通过 bounded replacement”，不写“端到端提升 50.44%”或普适加速定理；P95 bootstrap 区间只作描述，也不冒充总体尾延迟非劣证明。
 
 ### Benefit Gating 怎么讲？
 

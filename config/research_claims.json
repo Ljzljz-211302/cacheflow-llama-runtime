@@ -321,7 +321,7 @@
     {
       "id": "H7-production-paged-k2-replacement",
       "question": "Can a GQA-reusing K2 kernel replace the correct but slower K1 inside the restricted production Paged path?",
-      "hypothesis": "For the registered Qwen2.5-0.5B D64/GQA7/context-17-to-24 eight-token steady-state envelope, K2 preserves output, keeps unprofiled client median and P95 regression within 5%, and reduces equal-launch-count target-kernel duration by at least 20% relative to K1.",
+      "hypothesis": "For repeated cached requests at the registered Qwen2.5-0.5B D64/GQA7/page16/context-17 envelope, K2 preserves output, keeps the pair-cluster-bootstrap upper 95% bound for request-median regression and the operational request-P95 point regression within 5%, and reduces equal-launch-count target-kernel duration by at least 20% relative to K1.",
       "status": "existing-evidence",
       "independent_variables": [
         "same-process K1 versus K2 kernel selector",
@@ -329,7 +329,7 @@
       ],
       "dependent_metrics": [
         "exact response content, production graph entries, and fallbacks",
-        "unprofiled client median/P95 and paired server prompt time",
+        "unprofiled request-level median/P95 over 480 raw timings per variant, pair-cluster bootstrap uncertainty, and paired server prompt time",
         "PID-isolated NSYS target-kernel identity, launches, and duration"
       ],
       "confounders": [
@@ -338,29 +338,29 @@
         "fresh serving process and GPU clock state"
       ],
       "baselines": ["production-paged-k1"],
-      "mechanism": "K2-T2 maps two query heads to two warps in one CTA, stages their shared GQA K/V once per tile so each KV head needs four loads instead of K1's seven, transposes shared K to avoid the token-read bank-conflict pattern, and uses warp reductions for stable softmax; the formal promotion is restricted to D64/GQA7/context 17 through 24.",
+      "mechanism": "K2-T2 maps two query heads to two warps in one CTA, stages their shared GQA K/V once per tile so each KV head needs four loads instead of K1's seven, transposes shared K to avoid the token-read bank-conflict pattern, and uses warp reductions for stable softmax; the formal performance promotion is restricted to repeated cached requests at D64/GQA7/page16/context 17.",
       "falsification": [
         "Any K1/K2 output differs or either arm falls back.",
-        "Unprofiled K2 client median or P95 regresses by more than 5%.",
+        "The upper 95% pair-cluster-bootstrap bound for request-median regression or the operational request-P95 point regression exceeds 5%.",
         "PID-isolated NSYS target-kernel launch counts differ or K2 aggregate duration does not improve by at least 20%."
       ],
       "evidence_sources": [
-        "config/k2_production_protocol_v2.7.json",
-        "results/research/h8-k2-production-v2.7.0/manifest.json",
-        "results/research/h8-k2-production-v2.7.0/summary.json",
-        "results/research/h8-k2-production-v2.7.0/trials.json",
-        "results/research/h8-k2-production-v2.7.0/mechanisms.json",
-        "results/research/h8-k2-production-v2.7.0/k2-production-comparison.svg"
+        "config/k2_production_protocol_v2.10.json",
+        "results/research/h8-k2-production-v2.10.0/manifest.json",
+        "results/research/h8-k2-production-v2.10.0/summary.json",
+        "results/research/h8-k2-production-v2.10.0/trials.json",
+        "results/research/h8-k2-production-v2.10.0/mechanisms.json",
+        "results/research/h8-k2-production-v2.10.0/k2-production-comparison.svg"
       ],
       "observed_results": [
-        "Thirty steady-state pairs produced exact matching content, 300 production Paged graph entries, and zero fallbacks.",
-        "K1/K2 unprofiled client medians were 44.8794/41.4166 ms, a 7.72% K2 reduction; P95 values were 57.2525/55.8971 ms, a 2.37% reduction.",
-        "The paired K2-minus-K1 client median was -1.028 ms with a bootstrap 95% interval of [-5.095, 1.618] ms; promotion is bounded non-inferiority plus mechanism improvement, not a population-wide speedup claim.",
-        "PID-isolated NSYS recorded equal 24 target-kernel launches; aggregate duration was 0.438049 ms for K1 and 0.228225 ms for K2, a 47.90% reduction.",
-        "Failed v2.0/v2.1/v2.4/v2.5 and invalid v2.3/v2.6 artifacts remain retained. The v2.7 promotion is K2 over K1 only and does not reverse the failed Paged-over-Direct result."
+        "Thirty steady-state pairs retained sixteen measured requests per arm: 480 raw request timings and 600 production Paged graph entries per variant, exact matching content, and zero fallbacks.",
+        "K1/K2 request-level medians were 6.90045/6.93840 ms, a 0.55% K2 regression; P95 values were 30.102315/30.558595 ms, a 1.52% regression.",
+        "The pair-cluster-bootstrap 95% interval for request-median regression was [-1.661%, 2.856%], so its upper bound passed the preregistered 5% inferential gate; the P95 bootstrap interval is descriptive and is not claimed as population tail non-inferiority.",
+        "PID-isolated NSYS recorded equal 480 target-kernel launches; aggregate duration was 8.173752 ms for K1 and 4.051267 ms for K2, a 50.44% reduction.",
+        "Valid failures v2.0/v2.1/v2.5/v2.9 and invalid or aborted v2.3/v2.4/v2.6/v2.7/v2.8 artifacts remain retained; v2.4 is invalid because its preregistration timestamp postdated its result. The v2.10 promotion is K2 over K1 only and does not reverse the failed Paged-over-Direct result."
       ],
       "scope_limits": [
-        "Qwen2.5-0.5B, F32 Q, FP16 KV, D64, GQA ratio 7, page 16, batch 1, decode contexts 17 through 24, complete CUDA offload",
+        "Qwen2.5-0.5B, F32 Q, FP16 KV, D64, GQA ratio 7, page 16, batch 1, repeated cached decode at context 17, complete CUDA offload",
         "One RTX 4050 Laptop GPU on Windows",
         "No long-context, prefill, larger-model, Paged-over-Direct, or universal throughput claim",
         "No hardware DRAM-byte, occupancy, bank-conflict-counter, or memory-bound claim because NCU counters remain unavailable"

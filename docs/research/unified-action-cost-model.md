@@ -14,7 +14,7 @@ Issue #6 不应实现成“给五个动作各拍一个权重，然后取最小�
 
 推荐同时比较三个模型：透明的确定性启发式 `H0`、按环境与 regime 分桶的查表模型 `T1`、每动作独立的正则化线性模型 `L1`。分析式模型 `A1` 作为所有模型共享的结构先验和冷启动估计。最终进入真实调度路径的优先候选是 `L1 + H0 fallback`，而不是树模型或神经网络：它能够复用本仓库已有的在线 ridge、置信半径、漂移和 cooldown 机制，且可用固定大小数组实现有界、无分配的热路径。
 
-H3 实验已经证明受限 Paged K1 在中长 context 上比相同数学路径的 contiguous CUDA comparator 慢约 10.41%--13.05%。后续 K2 只在 Qwen2.5-0.5B、D64/GQA7、context 17--24 的生产 Paged 内部通过了 K1 替换门槛；它没有提供中长 context 或 Paged 相对 Direct 的正证据。因此 Issue #6 中的 Paged 仍是 **evidence-gated experimental action**，不能因分析式模型预测“省去了 remap bytes”而自动进入用户请求路径。
+H3 实验已经证明受限 Paged K1 在中长 context 上比相同数学路径的 contiguous CUDA comparator 慢约 10.41%--13.05%。后续 K2 只在 Qwen2.5-0.5B、D64/GQA7、page16/context17 的重复 cached 请求中通过了 Paged 内部 K1 替换门槛；它没有提供中长 context 或 Paged 相对 Direct 的正证据。因此 Issue #6 中的 Paged 仍是 **evidence-gated experimental action**，不能因分析式模型预测“省去了 remap bytes”而自动进入用户请求路径。
 
 ## 2. 动作语义必须先固定
 
