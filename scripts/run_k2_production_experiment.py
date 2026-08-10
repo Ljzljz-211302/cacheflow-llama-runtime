@@ -364,6 +364,45 @@ def render_report(summary: dict[str, Any], mechanisms: dict[str, Any]) -> str:
     ])
 
 
+def render_chart(summary: dict[str, Any], mechanisms: dict[str, Any]) -> str:
+    k1_median = float(summary["k1_client_elapsed_ms"]["median"])
+    k2_median = float(summary["k2_client_elapsed_ms"]["median"])
+    k1_p95 = float(summary["k1_client_elapsed_ms"]["p95"])
+    k2_p95 = float(summary["k2_client_elapsed_ms"]["p95"])
+    k1_kernel = float(mechanisms["k1"]["kernel_duration_ms"])
+    k2_kernel = float(mechanisms["k2"]["kernel_duration_ms"])
+    return "\n".join([
+        '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="500" viewBox="0 0 960 500">',
+        '  <rect width="960" height="500" fill="#ffffff"/>',
+        '  <text x="48" y="48" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#172554">K2 production replacement — preregistered v2.7</text>',
+        '  <text x="48" y="76" font-family="Arial, sans-serif" font-size="14" fill="#475569">Qwen2.5-0.5B · RTX 4050 · same-process randomized pairs · n=30</text>',
+        '  <g font-family="Arial, sans-serif" font-size="15" fill="#0f172a">',
+        '    <text x="48" y="134">Client median (ms)</text>',
+        f'    <rect x="220" y="112" width="{round(k1_median * 10)}" height="24" rx="4" fill="#94a3b8"/>',
+        f'    <rect x="220" y="144" width="{round(k2_median * 10)}" height="24" rx="4" fill="#2563eb"/>',
+        f'    <text x="681" y="130">K1 {k1_median:.3f}</text>',
+        f'    <text x="646" y="162">K2 {k2_median:.3f}  ({summary["client_median_regression_percent"]:.2f}%)</text>',
+        '',
+        '    <text x="48" y="230">Client P95 (ms)</text>',
+        f'    <rect x="220" y="208" width="{round(k1_p95 * 10)}" height="24" rx="4" fill="#94a3b8"/>',
+        f'    <rect x="220" y="240" width="{round(k2_p95 * 10)}" height="24" rx="4" fill="#2563eb"/>',
+        f'    <text x="805" y="226">K1 {k1_p95:.3f}</text>',
+        f'    <text x="791" y="258">K2 {k2_p95:.3f}  ({summary["p95_regression_percent"]:.2f}%)</text>',
+        '',
+        '    <text x="48" y="326">Kernel total (ms)</text>',
+        f'    <rect x="220" y="304" width="{round(k1_kernel * 1000)}" height="24" rx="4" fill="#94a3b8"/>',
+        f'    <rect x="220" y="336" width="{round(k2_kernel * 1000)}" height="24" rx="4" fill="#16a34a"/>',
+        f'    <text x="670" y="322">K1 {k1_kernel:.3f} ({mechanisms["k1"]["kernel_launches"]} launches)</text>',
+        f'    <text x="460" y="354">K2 {k2_kernel:.3f} ({mechanisms["k2"]["kernel_launches"]} launches, -{summary["kernel_duration_reduction_percent"]:.2f}%)</text>',
+        '  </g>',
+        '  <line x1="48" y1="400" x2="912" y2="400" stroke="#cbd5e1"/>',
+        '  <text x="48" y="430" font-family="Arial, sans-serif" font-size="14" fill="#334155">Gate: output equality + zero fallback + median/P95 regression ≤ 5% + kernel reduction ≥ 20%</text>',
+        '  <text x="48" y="458" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#166534">PASS — K2 replaces K1 only inside the registered context 17–24 Paged envelope.</text>',
+        '</svg>',
+        '',
+    ])
+
+
 def validate_artifact(protocol_path: Path, output: Path) -> None:
     protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
@@ -422,6 +461,9 @@ def validate_artifact(protocol_path: Path, output: Path) -> None:
     if protocol.get("raw_schema") == "structured-arm-v1" and \
             (output / "report.md").read_text(encoding="utf-8") != render_report(summary, mechanisms):
         raise AssertionError("report is not rendered from the validated summary and mechanisms")
+    chart = output / "k2-production-comparison.svg"
+    if chart.exists() and chart.read_text(encoding="utf-8") != render_chart(summary, mechanisms):
+        raise AssertionError("chart is not rendered from the validated summary and mechanisms")
     if "artifact_binding" in protocol:
         binding = protocol["artifact_binding"]
         for key in ("server_sha256", "model_sha256", "vendor_revision", "build_command"):
@@ -541,6 +583,9 @@ def main() -> None:
     (args.output / "mechanisms.json").write_text(json.dumps(mechanisms, indent=2) + "\n", encoding="utf-8")
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     (args.output / "report.md").write_text(render_report(summary, mechanisms), encoding="utf-8")
+    if "minimum_kernel_duration_reduction_percent" in protocol["acceptance"]:
+        (args.output / "k2-production-comparison.svg").write_text(
+            render_chart(summary, mechanisms), encoding="utf-8")
     files = {
         str(path.relative_to(args.output).as_posix()): sha256(path)
         for path in args.output.rglob("*") if path.is_file() and path.name != "manifest.json"

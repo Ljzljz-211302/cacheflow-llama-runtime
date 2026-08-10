@@ -61,6 +61,23 @@ class K2ProductionEvidenceTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "structured raw arms"):
                 validate_artifact(ROOT / "config/k2_production_protocol_v2.7.json", artifact)
 
+    def test_rehashed_chart_claim_tamper_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / "artifact"
+            shutil.copytree(ROOT / "results/research/h8-k2-production-v2.7.0", artifact)
+            chart_path = artifact / "k2-production-comparison.svg"
+            chart_path.write_text(
+                chart_path.read_text(encoding="utf-8").replace("-47.90%", "-97.90%"),
+                encoding="utf-8",
+            )
+            manifest_path = artifact / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["files"]["k2-production-comparison.svg"] = hashlib.sha256(
+                chart_path.read_bytes()).hexdigest()
+            manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "chart"):
+                validate_artifact(ROOT / "config/k2_production_protocol_v2.7.json", artifact)
+
     def test_rehashed_false_v2_2_promotion_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             artifact = Path(temporary) / "artifact"
