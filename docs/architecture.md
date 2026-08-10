@@ -1190,7 +1190,7 @@ Issue #4 在这条服务因果链下新增 H2 算子机制切片。`bench-kv-blo
 
 ## 25. 受限 Paged Decode Attention 原型
 
-`llama-paged-decode-cuda.cuh` 定义单层、单 token decode 的实验 seam。Host `plan_create` 固定并上传页表与 context length；paged launch 直接按 `[physical_page, page_token, kv_head, head_dim]` 读取 FP16 K/V，不先生成连续 KV；contiguous launch 只提供相同数学路径的 CUDA 对照。K1 kernel 为每个 `(sequence, query_head)` 一个 CTA，用 FP32 online softmax 直接产生 FP32 attention output。K2 在 D64/GQA7/短 context envelope 内把两个 query head 合并为一个 CTA：两个 warp 共享一次 K/V 装载，K 用 `[dim][token]` 转置 shared-memory 布局，softmax 的 max/sum 通过 warp shuffle 归约；其余 shape 仍走 K1 或更上层 fail-closed 路径。
+`llama-paged-decode-cuda.cuh` 定义单层、单 token decode 的实验 seam。Host `plan_create` 固定并上传页表与 context length；paged launch 直接按 `[physical_page, page_token, kv_head, head_dim]` 读取 FP16 K/V，不先生成连续 KV；contiguous launch 只提供相同数学路径的 CUDA 对照。K1 kernel 为每个 `(sequence, query_head)` 一个 CTA，用 FP32 online softmax 直接产生 FP32 attention output。K2 在 D64/GQA7/短 context envelope 内把两个 query head 合并为一个 CTA：两个 warp 在该 CTA 内共享一次 K/V 装载，因此每个 KV head 的装载次数由 K1 的 7 次降为 4 个 query-head tile；K 用 `[dim][token]` 转置 shared-memory 布局，softmax 的 max/sum 通过 warp shuffle 归约。context 33 及以上由 kernel 内完整 K1 数学路径写出结果，未支持 shape 则由更上层 fail-closed 路径处理。
 
 原型只接受 page size 16、D64/D128 和整除 GQA；当前模型忠实 shape 是 Qwen2.5-0.5B 的 `14/2/64`，`28/4/128` 仅是 Qwen2.5-7B 的 kernel geometry，不代表本机已经完成 7B 服务。无效 shape、空 context、已使用的越界物理页和空指针全部 fail closed；生产 fallback 与 dtype adapter 不属于该 seam。
 
@@ -1242,7 +1242,7 @@ Remap 只有在真实 donor prefix 大于目标 slot 的 resident prefix 时才�
 
 正式 `h7-production-paged-v1.1.0` 工件在干净外层提交 `9182882`、vendor 提交 `130bd22` 上完成 10 组 17-token 跨页 AB/BA：Direct/Paged 输出全部一致，Paged graph entry 10、fallback 0，机制 replay 的 24 个 K1 launch 与 24 层模型一致。Paged client P95 29.210 ms 相对 Direct 27.354 ms 回退 6.78%；配对差中位数 +2.705 ms，bootstrap 95% 区间 [-1.185, +12.019] ms。故策略 capability 可以描述“可执行”，但 promotion 状态必须为 false；H0/L1 都不得把 Paged 当成默认性能动作。v1.0 因请求没有跨过物理 page boundary 而仅保留为 superseded 审计记录。该边界仅适用于 Qwen2.5-0.5B、batch 1、17-token context。
 
-K2 的正式 `h8-k2-production-v2.2.0` 工件从干净外层提交 `2c2f7f9`、vendor 提交 `b6ce0f2` 运行 30 组稳态 K1/K2 进程隔离配对。每 arm 在计时前执行 1 次完整 prompt 与 4 次 cached warm request，随后测量 cached request；累计 300 次 Paged graph entry、输出逐字一致、fallback 0。K2 相对 K1 的服务内部 prompt 中位数下降 5.02%，客户端中位数下降 15.83%，客户端 P95 下降 1.08%；NSYS 的 24 层 kernel 总时长下降 50.45%。因此 K2 通过“服务内部配对中位数不慢 + 客户端 P95 回退≤5%”的预注册替换门槛。v2.0/v2.1 的冷态或客户端中位数门槛失败记录保留；v2.2 只晋级 Paged 内部的 K2，不改变 Paged-vs-Direct 的 opt-in 结论。
+K2 的正式 `h8-k2-production-v2.7.0` 工件从干净外层提交 `4940853`、vendor 提交 `593198f` 运行 30 组同进程随机 K1/K2 配对。每 arm 先清空 slot，执行 1 次完整 prompt 与 4 次 cached warm request，再测量一次 cached 八 token decode；累计 300 次请求级 Paged graph entry、输出逐字一致、fallback 0。K2 相对 K1 的客户端 median 由 44.879 ms 降至 41.417 ms（-7.72%），P95 由 57.253 ms 降至 55.897 ms（-2.37%）；NSYS 中相同 24 次目标 kernel 总时长由 0.438 ms 降至 0.228 ms（-47.90%）。因此 K2 通过“客户端 median/P95 回退均≤5% + kernel 总时长降低≥20%”的预注册替换门槛。单 token v2.5 的 median 失败和 v2.6 的指标语义错误均留档；v2.7 只晋级 context 17--24 的 Paged 内部 K2，不改变 Paged-vs-Direct 的 opt-in 结论。
 
 ### 26.5 正式证据与边界
 

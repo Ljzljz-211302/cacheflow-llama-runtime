@@ -17,7 +17,7 @@
 2. 峰值 KV 与可驻留请求数是否改善；
 3. TTFT、TPOT/TBT、请求尾延迟和吞吐是否改善。
 
-当前已实现的是 Direct/Scalar Remap/Vector Remap，不是 Paged Decode Attention。章程中标记为 `prospective` 的内容不得写入简历结果，直至对应 falsification gate 和实验协议通过。
+当前已实现 Direct/Scalar Remap/Vector Remap 与受限 Paged Decode K1/K2；只有通过对应 falsification gate 和预注册协议的范围可以写入简历，仍标记为 `prospective` 的通用 Paged、长上下文或跨设备结论不得宣传为既有能力。
 
 ## 2. 研究问题总览
 
@@ -74,7 +74,7 @@ Issue #4 现有 4 个预注册 regime、160 条无 profiler paired observations 
 
 Paged 路径省去 materialization，却增加 page-table lookup、不规则访存、mask、softmax 和归约。它可能只改善容量、不改善 batch-1 latency；这仍是有效结果，但必须明确属于哪一层收益。若所有预注册场景既没有延迟 non-inferiority 也没有容量收益，则否定当前受限实现，而不是更换 workload 追正结果。
 
-Issue #5 的 H3 v1.0.0 已得到受限混合结果：K1 直接分页 kernel 在每个 regime 计时前通过独立 CPU FP32 oracle，最大绝对误差 `3.6e-8`。0.5B 的 16-token case 为 neutral，17-token case 有高噪声的 +22.87% 中位改善但区间跨过材料性门槛；所有 medium/long regime 回退 10.41%–13.05%。0.5B/7B-shape 在 context 1024、batch 1 分别回退 13.05% 与 11.59%；对应 batch-1/batch-4 差只有 0.84/1.18 个百分点，不支持优先做 split-K。该预注册规则选择了 K2 GQA KV reuse，后续 K2 以两 query-head warp tile、共享 K/V staging、转置 shared K 和 warp stable-softmax 实现。正式 v2.2 在受限 0.5B/D64/GQA7/context17 生产 envelope 内相对 K1 将 prompt 中位数降低 5.02%、24 层 kernel 总时长降低 50.45%，客户端 P95 未回退并通过替换门槛；这不是中长 context 或 Paged-vs-Direct 的正结论。NCU 不完整，仍禁止 memory/occupancy 与硬件 DRAM-byte 归因。
+Issue #5 的 H3 v1.0.0 已得到受限混合结果：K1 直接分页 kernel 在每个 regime 计时前通过独立 CPU FP32 oracle，最大绝对误差 `3.6e-8`。0.5B 的 16-token case 为 neutral，17-token case 有高噪声的 +22.87% 中位改善但区间跨过材料性门槛；所有 medium/long regime 回退 10.41%–13.05%。0.5B/7B-shape 在 context 1024、batch 1 分别回退 13.05% 与 11.59%；对应 batch-1/batch-4 差只有 0.84/1.18 个百分点，不支持优先做 split-K。该预注册规则选择了 K2 GQA KV reuse，后续 K2 以两 query-head warp tile、每 KV head 7→4 次 K/V tile 装载、转置 shared K 和 warp stable-softmax 实现。正式 v2.7 在受限 0.5B/D64/GQA7/context 17--24 生产 envelope 内，相对 K1 将八 token 客户端 median/P95 降低 7.72%/2.37%，相同 24 次目标 kernel 总时长降低 47.90%，并通过 bounded replacement 门槛；这不是中长 context 或 Paged-vs-Direct 的正结论。NCU 不完整，仍禁止 memory/occupancy 与硬件 DRAM-byte 归因。
 
 ## 6. H4：自适应动作策略
 

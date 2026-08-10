@@ -188,11 +188,11 @@ memory 和归约工作。只有 K1 的 NCU（若可用）或受控 byte/latency 
 
 #### 已落地的 K2-T2
 
-最终生产实现没有直接采用“一个 CTA 吞下全部 7 个 query heads”的草图，因为 batch 1 时每层只剩 2 个 CTA，并行度过低。K2-T2 选择折中：每个 CTA 含两个 warp、各负责一个 query head；GQA7 每个 KV head 切成 4 个 tile，最后一个 tile 只有一个活跃 warp。每个 CTA 先把当前 KV head 的 17-token K/V 从 global memory 装入 shared memory 一次，两个 query heads 复用这份数据。K 写成 `[dimension][token]`，使同一 warp 的 32 个 lane 读取不同 token 时落入不同 bank；V 保持 `[token][dimension]`，便于每个 lane累加两个 output dimension。
+最终生产实现没有直接采用“一个 CTA 吞下全部 7 个 query heads”的草图，因为 batch 1 时每层只剩 2 个 CTA，并行度过低。K2-T2 选择折中：每个 CTA 含两个 warp、各负责一个 query head；GQA7 每个 KV head 切成 4 个 tile，最后一个 tile 只有一个活跃 warp。每个 CTA 先把当前 KV head 的 K/V 从 global memory 装入 shared memory 一次，两个 query heads 复用这份数据；因此每 KV head 的装载由 K1 的 7 次降为 4 次，而不是降为 1 次。K 写成 `[dimension][token]`，使同一 warp 的 lane 读取不同 token 时落入不同 bank；V 保持 `[token][dimension]`，便于每个 lane 累加两个 output dimension。
 
 logit 计算把一个 token 分给一个 lane；lane 串行遍历 D64 做点积，随后用 `__shfl_down_sync` 求 warp max 与 sum，得到数值稳定的 softmax 权重。最后每个 lane 从其他 token lane 广播权重并累加 V。相比 K1 的逐 token CTA barrier 与 14 个 query-head CTA，K2-T2 同时减少重复 KV 装载、CTA 数和 block-wide synchronization。这里的“复用”由代码干预与 K1/K2 trace 支持；由于 NCU counter 不可用，不能进一步声称硬件 DRAM bytes、occupancy 或 memory-bound 原因已被直接测量。
 
-正式 v2.2 在 Qwen2.5-0.5B `14Q/2KV/D64`、page16、context17 的稳态生产请求中完成 30 组配对：输出一致、累计 300 次 Paged graph entry、0 fallback；prompt 中位数由 4.3785 降至 4.1585 ms，客户端 P95 由 30.1442 降至 29.8194 ms，24 层 kernel 总时长由 0.414371 降至 0.205313 ms。该门槛只允许 K2 替换同一 Paged 路径的 K1；它不证明 Paged 已优于 Direct，也不允许把短 context specialization 外推到 K3 所针对的长 context。
+正式 v2.7 在 Qwen2.5-0.5B `14Q/2KV/D64`、page16、context 17--24 的稳态八 token 请求中完成 30 组同进程随机配对：输出一致、累计 300 次请求级 Paged graph entry、0 fallback；客户端 median 由 44.879 降至 41.417 ms，P95 由 57.253 降至 55.897 ms，相同 24 次目标 kernel 总时长由 0.438 降至 0.228 ms。该门槛只允许 K2 替换同一 Paged 路径的 K1；它不证明 Paged 已优于 Direct，也不允许把短 context specialization 外推到 K3 所针对的长 context。
 
 ### K3：split-KV + merge state
 

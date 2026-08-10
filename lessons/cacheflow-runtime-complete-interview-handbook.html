@@ -287,6 +287,11 @@ final output = o / l</div>
 <p>第一阶段用 9 个 regime、360 条 observation 验证数学正确性和不同上下文形状。第二阶段把 K1 接进真实 Qwen2.5-0.5B production graph：10 组 17-token 跨页 Direct/Paged AB/BA，输出逐字一致，Paged graph entry 10 次、fallback 0；独立 NSYS replay 记录 24 个 layer launch，与 24 层模型一致。</p>
 <p>生产结果触发了关键工程机制：Paged P95 为 29.210 ms，Direct 为 27.354 ms，超过预注册 +5% promotion limit，因此策略保持默认 Direct、Paged 保留 opt-in。面试中的正面表达是：<strong>我不仅实现了算子和生产接入，还实现了数据驱动的 promotion gate，证明“能运行”与“应默认上线”是两个验收阶段。</strong></p>
 
+<h3>6.5 K2：从正确 K1 到可替换的生产算子</h3>
+<p><strong>K2-T2</strong> 中的 T2 表示一个 CUDA thread block（CTA）包含两个 warp，每个 warp 负责一个 query head。Qwen2.5-0.5B 有 14 个 query heads、2 个 KV heads，即每 7 个 query heads 共用一个 KV head。K1 为每个 query head 单独装载 K/V，所以每 KV head 要装载 7 次；K2 每个 CTA 让两个 query heads 复用一次 shared-memory staging，因而分成 4 个 tile、装载 4 次。K 采用按维度转置的 shared-memory 布局，softmax 的 max 与 sum 使用 warp shuffle 归约；这减少的是代码层可确认的重复装载和同步，不能在缺少 NCU counter 时写成“已测得 DRAM bytes 或 bank conflict 降低”。</p>
+<p>正式 v2.7 在同一长驻服务进程内按固定随机种子运行 30 组 K1/K2 配对。每 arm 清空 slot，完成 1 次完整 prompt、4 次 cached warm request，再测量一次 context 17--24 的八 token decode。两臂输出逐字一致，累计 300 次请求级 Paged graph entry 且 0 fallback；客户端 median 从 44.879 ms 降至 41.417 ms（-7.72%），P95 从 57.253 ms 降至 55.897 ms（-2.37%）；PID 隔离 NSYS 中相同 24 次目标 kernel 总时长从 0.438 ms 降至 0.228 ms（-47.90%）。它通过的是“median/P95 回退不超过 5%且 kernel 至少降低 20%”的 K2-over-K1 替换门槛，不代表 Paged-over-Direct 已通过。</p>
+<p>如果面试官追问实验迭代：单 token v2.5 的 kernel 虽下降 47.0%，客户端 median 仍回退 20.8%，因为固定 HTTP/调度噪声远大于微秒级算子差异；于是保持门槛不变，改用仍在短上下文能力范围内的八 token 用户负载，让重复 decode 工作在一次请求中可观测。v2.6 又因把请求级 <code>paged_calls</code> 错当 token 级指标而判无效；修正指标语义后预注册 v2.7 并独立复现。失败和无效实验都留档，避免结果导向删数。</p>
+
 <h2 id="policy">7. 从固定规则到统一动作成本模型</h2>
 <div class="module-card"><div class="module-title">M5 · Action / Benefit Policy：在线决策平面</div>
 <dl><dt>它接收什么？</dt><dd>backend、上下文长度、并发、布局、字节数、复用距离、KV 压力、历史动作耗时及 capability/resource 状态。</dd>

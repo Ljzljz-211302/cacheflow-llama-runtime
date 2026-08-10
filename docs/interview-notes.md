@@ -201,15 +201,15 @@ CUDA mixed workload 缺少 backend-aware policy guard；Hybrid/Recurrent 只有 
 
 K1 的做法是“一个 query head 一个 CTA”。CTA（CUDA thread block）是一组能共享 shared memory 并进行 block 内同步的线程。K1 正确且结构直观，但同一 KV head 会被 7 个 CTA 重复读取；而且它逐 token 做点积、block-wide reduction、online softmax 更新，短短 17 token 也要反复同步。online softmax 是无需保存全部 logits 的流式算法：维护截至当前 token 的最大值、指数和与加权输出；最大值变化时按指数比例重缩放旧状态，因此仍保持数值稳定。
 
-K2-T2 的 T2 表示一个 CTA 同时处理两个 query heads。CTA 内有两个 warp；warp 是 NVIDIA GPU 按 32 个线程锁步调度的基本执行组，每个 warp 独立负责一个 Q head。CTA 把这两个 head 共用的 K/V 从 global memory 装到低延迟 shared memory 一次。K 采用 `[dimension][token]` 转置布局：当一个 warp 的 lane 0～16 同时读取不同 token 的同一 dimension 时，地址映射到不同 shared-memory bank，避免 bank conflict（多个线程争用同一存储 bank 而被串行化）。V 保持 token-major，方便每个 lane 累加两个输出维度。
+K2-T2 的 T2 表示一个 CTA 同时处理两个 query heads。CTA 内有两个 warp；warp 是 NVIDIA GPU 按 32 个线程锁步调度的基本执行组，每个 warp 独立负责一个 Q head。CTA 把这两个 head 共用的 K/V 从 global memory 装到低延迟 shared memory 一次。Qwen 的一个 KV head 对应 7 个 Q heads，因此 K1 要装载 7 次，K2-T2 分成 4 个 tile 后装载 4 次；这里不能说成“整个 KV head 只装一次”。K 采用 `[dimension][token]` 转置布局：当一个 warp 的 lane 0～16 同时读取不同 token 的同一 dimension 时，地址映射到不同 shared-memory bank，避免 bank conflict（多个线程争用同一存储 bank 而被串行化）。V 保持 token-major，方便每个 lane 累加两个输出维度。
 
 计算时，一个 lane 负责一个 token 的 Q·K 点积；warp shuffle 允许 lane 之间不经过 shared memory 直接交换寄存器值，用它求最大 logit 和指数和，完成 stable softmax。然后各 lane 广播 token 权重并累加 V。这个设计没有把 7 个 head 全塞进一个 CTA，因为那会令每层只剩 2 个 CTA，在 batch 1 时并行度不足；T2 保留每层 8 个 CTA，是 KV 复用、同步成本和可调度并行度的折中。
 
-证据链要分三层回答。第一层是正确性：K1/K2 确定性输出逐字一致，真实生产图累计执行 300 次且 0 fallback。第二层是服务指标：30 组预注册稳态配对中，prompt 中位数 4.3785→4.1585 ms（-5.02%），客户端中位数 6.8473→5.7631 ms（-15.83%），客户端 P95 30.1442→29.8194 ms（-1.08%）。第三层是机制：PID 隔离 NSYS 中 24 层目标 kernel 总时长 0.414371→0.205313 ms（-50.45%）。NSYS 证明执行的是哪个 kernel 以及其时间；因为 NCU hardware counter 不可用，不能声称已直接测得 DRAM byte、occupancy 或 bank-conflict counter。
+证据链要分三层回答。第一层是正确性：生产算子还用 CPU Flash Attention 在 context 1/15/16/17/33 五个边界与随机输入上交叉验证；正式 K1/K2 输出逐字一致，累计 300 次请求级真实 Paged 图且 0 fallback。第二层是无 profiler 服务指标：同一长驻进程内随机执行 30 组配对，八 token decode 的客户端 median 44.879→41.417 ms（-7.72%），P95 57.253→55.897 ms（-2.37%），配对效应 median 为 -1.028 ms。第三层是机制：PID 隔离 NSYS 中两臂各 24 次目标 kernel，总时长 0.438→0.228 ms（-47.90%）。NSYS 证明执行的是哪个 kernel 以及其时间；因为 NCU hardware counter 不可用，不能声称已直接测得 DRAM byte、occupancy 或 bank-conflict counter。
 
-为什么 v2.0/v2.1 失败而 v2.2 通过？v2.0 冷态请求与 v2.1 的客户端配对中位数受到 Windows 调度和本机 HTTP 的 15～30 ms 尖峰影响，量级远大于 0.2 ms kernel 干预。旧结果没有删除。v2.2 在看新结果前预注册：用服务进程内部 `prompt_ms` 判断算子主效应，同时保留未加 profiler 的客户端 P95 回退≤5%作为生产保护线。它既能归因，又不能用内部小指标掩盖端到端尾延迟恶化。
+实验迭代体现的是如何把“kernel 快”变成可审计的生产替换。早期跨进程 v2.2 不能排除进程状态差异，因而不作为最终证据；同进程单 token v2.5 虽然 kernel 降低 47.0%，客户端 median 却回退 20.8%，说明固定 HTTP/调度开销淹没了微秒级干预。随后在不放宽门槛的前提下，把用户负载改为仍处于 context 17--24 envelope 的八 token decode，让一次请求内重复的 kernel 工作可观测。v2.6 因误解 `paged_calls` 的请求级语义而判无效；最终 v2.7 事先固定 5% median/P95 non-inferiority 和 20% kernel-reduction 门槛，再独立复现通过。所有失败和无效 artifact 均保留。
 
-最后必须区分两个问题：K2 已证明在同一受限 Paged 路径内优于 K1；Paged 相对 Direct 的 v1.1 P95 仍回退 6.78%，所以 Paged 整体仍是 opt-in。前者是算子替换成功，后者是动作选择边界，二者不矛盾。
+最后必须区分两个问题：K2 已证明在同一受限 Paged 路径内可替换 K1；Paged 相对 Direct 的 v1.1 P95 仍回退 6.78%，所以 Paged 整体仍是 opt-in。前者是算子内部替换成功，后者是动作选择边界，二者不矛盾。还要区分“通过替换门槛”和“证明总体必然加速”：v2.7 的 median/P95 均改善，但 bootstrap 区间跨零，因此简历写实测改善，结论写 bounded production replacement，不写普适加速定理。
 
 ### Benefit Gating 怎么讲？
 
