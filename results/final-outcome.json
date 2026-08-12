@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "outcome_name": "CacheFlow Runtime final bounded outcome",
+  "disposition": {
+    "application_project_complete": true,
+    "independent_research_project_complete": true,
+    "peer_reviewed_publication": false,
+    "default_production_paged_enabled": false,
+    "summary": "A reproducible single-machine application and bounded research artifact; not a peer-reviewed paper and not a universal Paged-over-Direct speedup claim."
+  },
+  "upstream_boundary": {
+    "pinned_revision": "acd79d603cb2e1c84c0886137b80f1ad649b6857",
+    "same_toolchain": "MSVC 19.37.32822 x64 for both baseline and variant",
+    "upstream_mode_exact_output_cases": 5,
+    "all_recorded_cases_match": true
+  },
+  "application_result": {
+    "passed": true,
+    "ui_rendered": true,
+    "browser_sse_contract": true,
+    "interactive_browser_qa_passed": true,
+    "restart_preserved_messages": 4,
+    "native_cancel_propagated": true,
+    "backpressure_rejected": true,
+    "concurrent_users": 2,
+    "knowledge_documents": 5,
+    "knowledge_chunks": 128,
+    "infra_metrics": {
+      "scheduler_iterations": 857.0,
+      "prefill_chunks": 19.0,
+      "cached_prompt_tokens": 456.0,
+      "cuda_kv_kernel_launches": 6.0,
+      "cuda_kv_remap_vectorized_bytes": 5603330.0,
+      "cuda_benefit_decisions": 2.0,
+      "checkpoint_saves": 2.0
+    },
+    "scope": "single-machine or trusted-LAN deployment; no external adoption claim"
+  },
+  "research_results": {
+    "vectorized_remap": {
+      "protocol_compliant": true,
+      "acceptance_passed": true,
+      "pairs_per_case": [
+        20,
+        20,
+        20,
+        20
+      ],
+      "median_improvement_percent_by_blocks": {
+        "1": 54.545454545454554,
+        "4": 46.32404958169292,
+        "16": 5.0800802021640905,
+        "32": 2.322048995893615
+      },
+      "boundary": "CUDA KV remap microbenchmark; not request-level latency"
+    },
+    "offline_action_policy_d3": {
+      "evaluation_decisions": 80,
+      "switches_vs_h0": 24,
+      "cumulative_regret_ms": 2.081999999999695,
+      "harmful_decisions": 1,
+      "harmful_rate": 0.0125,
+      "total_gain_ms": 41.47999999999996,
+      "total_harm_ms": 0.9719999999996398,
+      "chooser_p99_us": 0.9,
+      "hot_loop_allocations": 0,
+      "boundary": "offline held-out replay; requires monitored same-process canary before enablement"
+    },
+    "paged_vs_direct": {
+      "correctness_passed": true,
+      "promotion_passed": false,
+      "paired_trials": 10,
+      "direct_p95_ms": 27.354304999999986,
+      "paged_p95_ms": 29.21027499999999,
+      "p95_regression_percent": 6.7849283686790995,
+      "decision": "negative performance result; Paged remains opt-in"
+    },
+    "k2_vs_k1": {
+      "correctness_passed": true,
+      "promotion_passed": true,
+      "paired_trials": 30,
+      "measured_responses_by_variant": {
+        "k1": 480,
+        "k2": 480
+      },
+      "paged_graph_entries_per_variant": 600,
+      "fallbacks": 0,
+      "client_median_regression_percent": 0.5499641327739502,
+      "client_median_regression_upper_95_percent": 2.856088774849146,
+      "client_p95_regression_percent": 1.5157638208224355,
+      "kernel_launches_by_variant": {
+        "k1": 480,
+        "k2": 480
+      },
+      "k1_kernel_duration_ms": 8.173752,
+      "k2_kernel_duration_ms": 4.051267,
+      "kernel_duration_reduction_percent": 50.43565060452042,
+      "scope": "Qwen2.5-0.5B D64/GQA7/page16/context17 repeated cached decode"
+    }
+  },
+  "claim_boundaries": [
+    "K2 is qualified only against K1 inside the restricted Paged path.",
+    "Paged did not beat Direct under the formal service promotion protocol.",
+    "Microbenchmark improvements do not imply TTFT or throughput improvements.",
+    "The application journey proves an exercised local workflow, not external adoption.",
+    "The artifact is an independent research project, not a peer-reviewed publication."
+  ],
+  "evidence": {
+    "upstream": {
+      "path": "results/upstream-compatibility.json",
+      "sha256": "d8d83c11faea538a3d7cef4afe76a0904db920c4e920b8db16c4ea1cf420b8a8"
+    },
+    "application": {
+      "path": "results/user-application-journey.json",
+      "sha256": "2fb62ab28a0ee80eb955d9a9675b47a9f4f74249113a28cf76531ceb5c590285"
+    },
+    "browser_qa": {
+      "path": "results/user-application-browser-qa.json",
+      "sha256": "e146dad80db3dd09e0f8f2250db489d0a362ad74223f849291a1865833a9cef7"
+    },
+    "production_launcher": {
+      "path": "scripts/start_production.ps1",
+      "sha256": "d7681b094cf88b724c49012be6f27170d8f81a8311d85a53a5eae95b67c204c7"
+    },
+    "remap": {
+      "path": "results/research/h1-vector-remap-v1.0.0/manifest.json",
+      "sha256": "f4112a6150d269fa37987b6755fe269b7fb86a74db7c32205e2fcb435842c05f"
+    },
+    "remap_trials": {
+      "path": "results/research/h1-vector-remap-v1.0.0/trials.jsonl",
+      "sha256": "280e7418b92aca6c317fd20800e14ee78d90fc7c7e500bd6fd4f34235d7f0053"
+    },
+    "policy": {
+      "path": "results/research/h4-kv-action-v1.6.0/report.json",
+      "sha256": "2cf3437038eb532dfd28e8a70ff6ff34ab957d5c014bd982182b223cc7d7f46d"
+    },
+    "policy_report": {
+      "path": "results/research/h4-kv-action-v1.6.0/report.md",
+      "sha256": "21c8cb9d1d15dcde8d8136c8b4b6bc2fe54e99213929855d5293852956c5bed5"
+    },
+    "paged_direct": {
+      "path": "results/research/h7-production-paged-v1.1.0/summary.json",
+      "sha256": "5492dd431547bea7d6e4fa4c309e32a59b3cd879c59f4d0fe992b109a5be7011"
+    },
+    "paged_direct_report": {
+      "path": "results/research/h7-production-paged-v1.1.0/report.md",
+      "sha256": "2d22aebdd07142d9fcd862662f5e6338c50e54b8adce355c6ddb6b57f30850ce"
+    },
+    "k2": {
+      "path": "results/research/h8-k2-production-v2.10.0/summary.json",
+      "sha256": "7ce9f436b8e595cea9c7cd6c1f3e676031b43d1378862b3c4336c984e0c226e1"
+    },
+    "k2_mechanism": {
+      "path": "results/research/h8-k2-production-v2.10.0/mechanisms.json",
+      "sha256": "50a5d822edfaffb7fffde3f7786e4bc3d2d6e7e56233e5538f5cd96f3214bb4f"
+    },
+    "k2_trials": {
+      "path": "results/research/h8-k2-production-v2.10.0/trials.json",
+      "sha256": "1fe829cafe490dc089971facd20f6816e62ae72eb561078a1ebaaf6d1b580f13"
+    },
+    "k2_report": {
+      "path": "results/research/h8-k2-production-v2.10.0/report.md",
+      "sha256": "9308587bcf2913c51d18e354697245559896d2af7c45b61b659b97fdd4edf969"
+    },
+    "k2_chart": {
+      "path": "results/research/h8-k2-production-v2.10.0/k2-production-comparison.svg",
+      "sha256": "35878ce4f296bf0210307017094efbdd23bf22c0770444ef510fda79e2135423"
+    }
+  }
+}

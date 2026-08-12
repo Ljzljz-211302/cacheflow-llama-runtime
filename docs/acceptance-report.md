@@ -10,6 +10,8 @@
 
 ## 当前结论
 
+最终可交付定性、正负结果边界及全部证据哈希统一见 [`final-outcome.md`](final-outcome.md) 与 [`results/final-outcome.json`](../results/final-outcome.json)。该入口由正式工件生成，并纳入快速验收的漂移检查。
+
 2026-08-08 在外层提交 `bf6f8b1`、vendor提交 `130bd22` 上，唯一严格入口 `scripts/verify.ps1 -Full` 曾原生以0退出。随后Standards复审指出当时的Williams设计没有覆盖真实执行流的row/backend边界，长驻结果也缺少从逐wave原始证据独立重算的验证器。当前提交已改为16-trial联合 `backend×mode` Williams设计、trial washout和可篡改检测的长驻验证器，定向实验及131项快速测试通过；在新的完整Full再次以0退出前，本段不把旧Full冒充当前HEAD验收。阈值未放宽，Full产生的非正式易波动输出不替换已提交的正式研究 evidence。
 
 “存在代码”“单元测试通过”和“生产路径通过”是三个不同层级。本报告只把有生产 smoke 或真实模型证据的条目标为生产接入。

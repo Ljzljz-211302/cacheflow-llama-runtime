@@ -34,6 +34,15 @@ try {
         throw "architecture ownership audit failed"
     }
 
+    python scripts\build_final_outcome.py --check
+    if ($LASTEXITCODE -ne 0) {
+        throw "final outcome evidence binding failed"
+    }
+    python scripts\validate_final_evidence.py
+    if ($LASTEXITCODE -ne 0) {
+        throw "final formal evidence closure failed"
+    }
+
     $manifest = Get-Content -Raw -Encoding utf8 "config\artifacts.json" | ConvertFrom-Json
     foreach ($artifact in $manifest.artifacts) {
         $path = Join-Path $projectRoot $artifact.path
