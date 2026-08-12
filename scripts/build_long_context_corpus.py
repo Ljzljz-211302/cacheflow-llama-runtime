@@ -45,6 +45,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:8330")
     parser.add_argument("--output", type=Path, default=ROOT / "config/paged_objective_workloads_v3.json")
+    parser.add_argument("--corpus-version", default="3.0.0")
     args = parser.parse_args()
 
     workloads = []
@@ -81,7 +82,7 @@ def main() -> None:
 
     payload = {
         "schema_version": 2,
-        "corpus_version": "3.0.0",
+        "corpus_version": args.corpus_version,
         "selection_rule": (
             "Deterministic source-bound prefixes from three project documents at six fixed token "
             "lengths; no latency outcome is read and no prompt is deleted after measurement."
