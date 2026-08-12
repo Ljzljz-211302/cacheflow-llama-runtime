@@ -70,6 +70,12 @@ class ObjectivePagedBenchmarkTests(unittest.TestCase):
         self.assertIn("primary_p95_limit_percent", summary)
         self.assertIn("worst_workload_median_regression_percent", summary)
 
+    def test_service_and_model_paged_capability_share_context_32_boundary(self):
+        service = (ROOT / "vendor/llama.cpp/tools/server/server-context.cpp").read_text(encoding="utf-8")
+        model = (ROOT / "vendor/llama.cpp/src/llama-context.cpp").read_text(encoding="utf-8")
+        self.assertIn("resident_prefix <= 32", service)
+        self.assertIn("layout.context_length <= 32", model)
+
 
 if __name__ == "__main__":
     unittest.main()
