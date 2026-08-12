@@ -198,7 +198,7 @@ logit 计算把一个 token 分给一个 lane；lane 串行遍历 D64 做点积�
 
 实现把长 context 先切为 32-token tile，再把 8 个 tile 组成 256-token partition；第一 kernel 为每个 partition 输出 FP32 `(m,l,o)`，第二 kernel 用第 4 节公式合并。host 根据图的最大上下文容量确定 partition 数，实际长度之外的 CTA 写中性状态后退出。该设计把单 CTA 的串行上下文长度限制在 256 token，并保持精确 online-softmax 语义，但增加一次 kernel launch、临时显存、state traffic 和空 partition 调度。
 
-生产 GGML oracle 已覆盖 1–2048 token 的 24 个边界值并在所有多页 case 使用反序物理页，全部通过。H10 的 18-workload、360-cell 正式实验显示 512–2048 token 的 Paged 相对 Direct 中位回退 +50.35%，95% 区间 [+49.19%, +51.19%]，因此它解决了“不能运行长上下文”，没有解决“优于 Direct”。完整算法、数据来源和结果见 [长上下文报告](long-context-paged-attention.md)。
+生产 GGML oracle 已覆盖 1–2048 token 的 24 个边界值并在所有多页 case 使用反序物理页，全部通过。这里记录的 H10 是旧 split-K2 根因基线：18-workload、360-cell 正式实验在 512–2048 token 上相对 Direct 中位回退 +50.35%，95% 区间 [+49.19%, +51.19%]。后续 K4/H13 已把主中位回退降至 +3.98%，但置信上界 +5.38% 仍未通过 +5% 门。完整算法、数据来源和最终结果见 [长上下文报告](long-context-paged-attention.md)。
 
 ### K0：仅用于诊断的两遍 logits 版本
 
@@ -326,3 +326,7 @@ memory-bound、DRAM bandwidth、L2 hit、occupancy 和 roofline 主张。
 4. correctness、guards、Sanitizer gate 通过后，才运行第 8 节无 profiler paired benchmark。
 5. 用 NSYS（以及条件允许时 NCU）选择 K2 或 K3；一次只改变一个机制。
 6. 保留失败候选和反例，形成 Issue #5 报告；不要在本 Issue 接入默认服务路径。
+
+## 11. 后续生产实现状态
+
+上述内容是 Issue #5 当时的设计边界，后续已经完成生产 GGML dispatch、服务 action 接入和 1–2048 token oracle。旧 split-K2 的长上下文正式结果为 +50.35% 回退；按真实 GQA7 几何重构的 K4 使用整组 K/V 复用、`half2` 访问和设备端自适应 partition，在严格平衡的 H13 中把主中位回退降到 +3.98%，但 95% 区间上界 +5.38% 仍未通过 +5% 门。因此当前状态是“实现和正确性完成、算法改进被数据支持、生产晋级未通过”，而不是本节早期所述的“尚未接入”。详见 [长上下文最终报告](long-context-paged-attention.md)。

@@ -30,12 +30,12 @@ SOURCE_PATHS = {
     "objective_paged": "results/research/h9-objective-paged-v2.0.0/summary.json",
     "objective_paged_report": "results/research/h9-objective-paged-v2.0.0/report.md",
     "objective_paged_chart": "results/research/h9-objective-paged-v2.0.0/comparison.svg",
-    "long_paged_protocol": "config/production_paged_objective_protocol_v4.json",
-    "long_paged_corpus": "config/paged_objective_workloads_v3.json",
-    "long_paged_manifest": "results/research/h10-long-context-paged-v4.0.0/manifest.json",
-    "long_paged": "results/research/h10-long-context-paged-v4.0.0/summary.json",
-    "long_paged_report": "results/research/h10-long-context-paged-v4.0.0/report.md",
-    "long_paged_chart": "results/research/h10-long-context-paged-v4.0.0/comparison.svg",
+    "long_paged_protocol": "config/production_paged_objective_protocol_v7.json",
+    "long_paged_corpus": "config/paged_objective_workloads_v4.json",
+    "long_paged_manifest": "results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/manifest.json",
+    "long_paged": "results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/summary.json",
+    "long_paged_report": "results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/report.md",
+    "long_paged_chart": "results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/comparison.svg",
 }
 
 
@@ -314,7 +314,7 @@ def build_final_outcome(root: Path) -> dict[str, Any]:
                 "worst_workload_median_regression_percent": long_paged["worst_workload_median_regression_percent"],
                 "regression_by_context_tokens": long_paged["regression_by_context_tokens"],
                 "promotion_passed": long_paged["promotion_passed"],
-                "decision": "no crossover through 2048 tokens; split Paged remains opt-in",
+                "decision": "K4 reduced the long-context regression but missed the upper-CI gate; Paged remains opt-in",
             },
         },
         "claim_boundaries": [
@@ -372,7 +372,7 @@ def validate_final_outcome(outcome: dict[str, Any]) -> None:
     if not objective["all_workloads_cross_page"] or objective["promotion_passed"]:
         raise ValueError("objective Paged production boundary was rewritten")
     long_paged = outcome["research_results"]["long_context_paged_vs_direct"]
-    if (long_paged["workload_count"] != 18 or long_paged["observations"] != 360 or
+    if (long_paged["workload_count"] != 18 or long_paged["observations"] != 432 or
             long_paged["minimum_context_tokens"] != 64 or
             long_paged["maximum_context_tokens"] != 2048 or
             long_paged["primary_metric"] != "server_prompt_ms" or
@@ -414,11 +414,11 @@ def render_final_outcome(outcome: dict[str, Any]) -> str:
         f"4. **Paged-vs-Direct 负结果**：正确性通过，但 P95 从 {paged['direct_p95_ms']:.3f} ms 增至 {paged['paged_p95_ms']:.3f} ms（回退 {paged['p95_regression_percent']:.2f}%），超过 5% 门槛，因此 Paged 保持 opt-in。",
         f"5. **K2-vs-K1 正结果**：{k2['paired_trials']} 组同进程配对、每 variant {measured_responses} 条测量响应、{k2['paged_graph_entries_per_variant']} 次 Paged graph、0 fallback；请求 median/P95 回退 {k2['client_median_regression_percent']:.2f}%/{k2['client_p95_regression_percent']:.2f}%，median 回退 95% 上界 {k2['client_median_regression_upper_95_percent']:.2f}%；相同 {kernel_launches} 次 kernel 总时长由 {k2['k1_kernel_duration_ms']:.3f} ms 降至 {k2['k2_kernel_duration_ms']:.3f} ms（-{k2['kernel_duration_reduction_percent']:.2f}%），通过预注册替换门槛。",
         f"6. **客观 Prompt 矩阵负结果**：冻结 6 类输入、30 组随机化匹配进程块、360 个 workload-arm 观测，实际上下文覆盖 {min(objective['actual_context_tokens'].values())}–{max(objective['actual_context_tokens'].values())} token 且全部跨页。总体匹配块中位回退 {objective['median_regression_percent']:.2f}%（负值表示 Paged 更快），但 block-workload 回退分布 P95 为 {objective['block_workload_regression_p95_percent']:.2f}%、最差 workload 中位回退 {objective['worst_workload_median_regression_percent']:.2f}%，均超过门槛；该设计不冒充共享热状态 Trial Pair。",
-        f"7. **长上下文 H10 结果**：把 K2 改为 32-token tile、256-token partition 和第二 kernel 的 FP32 online-softmax state merge，正确性能力覆盖 64–{long_paged['maximum_context_tokens']} token。正式实验使用 3 个仓库文档来源、18 个精确 token workload、{long_paged['matched_process_blocks']} 个随机化匹配进程块和 {long_paged['observations']} 个 workload-arm 观测；512–2048 token 的服务端 prompt 时间中位回退 {long_paged['median_regression_percent']:.2f}%，process-block cluster bootstrap 95% 区间 [{long_paged['bootstrap_95_percent'][0]:.2f}%, {long_paged['bootstrap_95_percent'][1]:.2f}%]，未发现 Paged 优于 Direct 的交叉点，因此不晋级。",
+        f"7. **长上下文 H10→H13 根因修复**：H10 的旧 split-K2 在主区间回退 50.35%；K4 改为一个 256-thread CTA 覆盖完整 7:1 GQA 组、以 `half2` 复用 K/V，并在设备端选择 64/128-token partition。24 个 CPU/CUDA oracle case 覆盖 1–{long_paged['maximum_context_tokens']} token。H13 使用 3 个仓库文档来源、18 个精确 token workload、{long_paged['matched_process_blocks']} 个严格平衡的匹配进程块和 {long_paged['observations']} 个 workload-arm 观测；512–2048 token 的服务端 prompt 时间中位回退降至 {long_paged['median_regression_percent']:.2f}%，process-block cluster bootstrap 95% 区间 [{long_paged['bootstrap_95_percent'][0]:.2f}%, {long_paged['bootstrap_95_percent'][1]:.2f}%]。因置信上界仍超过 +5% 门，不晋级。",
         "",
         "## 面试与简历允许使用的结论",
         "",
-        "可以表述为：在 llama.cpp 上实现缓存感知调度、KV 生命周期、CUDA Remap/Swap 和受限 Paged Decode；将 K2 从 32 token 扩展为支持 2048 token 的分区在线 softmax，并用来源绑定的长上下文矩阵证明当前实现尚未达到 Direct 基线，从而定位后续算子优化方向。",
+        "可以表述为：在 llama.cpp 上实现缓存感知调度、KV 生命周期、CUDA Remap/Swap 和受限 Paged Decode；从 H10 的 +50.35% 回退定位旧 K2 的标量计算与 GQA 重复加载问题，重构出整组 GQA 复用、half2 访问和自适应分区的 K4，在平衡长上下文矩阵中把主中位回退降至约 +3.98%，但因置信上界未过门而保持 fail-closed。",
         "",
         "不可以表述为：Paged Attention 全面优于 llama.cpp、端到端延迟提升 50.44%、已经发表论文、已经获得外部用户采用。",
         "",
@@ -427,7 +427,7 @@ def render_final_outcome(outcome: dict[str, Any]) -> str:
         "- 图文总结报告：[`docs/final-illustrated-report.md`](final-illustrated-report.md)",
         "- K2/K1 请求与 kernel 对比图：[`results/research/h8-k2-production-v2.10.0/k2-production-comparison.svg`](../results/research/h8-k2-production-v2.10.0/k2-production-comparison.svg)",
         "- 客观 Prompt 矩阵分层结果图：[`results/research/h9-objective-paged-v2.0.0/comparison.svg`](../results/research/h9-objective-paged-v2.0.0/comparison.svg)",
-        "- 长上下文 Paged/Direct 分层结果图：[`results/research/h10-long-context-paged-v4.0.0/comparison.svg`](../results/research/h10-long-context-paged-v4.0.0/comparison.svg)",
+        "- 长上下文 Paged/Direct 分层结果图：[`results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/comparison.svg`](../results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/comparison.svg)",
         "- 长上下文算法与实验报告：[`docs/research/long-context-paged-attention.md`](research/long-context-paged-attention.md)",
         "- K2 正式报告：[`results/research/h8-k2-production-v2.10.0/report.md`](../results/research/h8-k2-production-v2.10.0/report.md)",
         "- Paged-vs-Direct 正式负结果：[`results/research/h7-production-paged-v1.1.0/report.md`](../results/research/h7-production-paged-v1.1.0/report.md)",
@@ -477,7 +477,7 @@ def render_architecture_chart() -> str:
         for x, label in boxes
     )
     arrows = "".join(f'<path d="M{x} 131 H{x + 30}" stroke="#475569" stroke-width="2" marker-end="url(#a)"/>' for x in (205, 425, 645, 865))
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="270" viewBox="0 0 1100 270"><defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#475569"/></marker></defs><style>text{{font-family:Segoe UI,Arial,sans-serif;fill:#172033;font-size:16px}}.sub{{font-size:13px;fill:#526079}}</style><rect width="1100" height="270" fill="#f8fafc"/><text x="35" y="40" font-size="22" font-weight="700">Real execution path and contribution boundary</text>{nodes}{arrows}<text x="120" y="205" text-anchor="middle" class="sub">SSE, sessions, RAG</text><text x="320" y="205" text-anchor="middle" class="sub">queue, cancel, backpressure</text><text x="540" y="205" text-anchor="middle" class="sub">action choice, lifecycle</text><text x="760" y="205" text-anchor="middle" class="sub">real upstream hot path</text><text x="980" y="205" text-anchor="middle" class="sub">Remap / Swap / Paged K1-K2</text><path d="M220 235 H1070" stroke="#2563eb" stroke-width="4"/><text x="645" y="258" text-anchor="middle" class="sub">Personal contribution crosses control plane, model runtime, and GPU operator layers</text></svg>'''
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="270" viewBox="0 0 1100 270"><defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#475569"/></marker></defs><style>text{{font-family:Segoe UI,Arial,sans-serif;fill:#172033;font-size:16px}}.sub{{font-size:13px;fill:#526079}}</style><rect width="1100" height="270" fill="#f8fafc"/><text x="35" y="40" font-size="22" font-weight="700">Real execution path and contribution boundary</text>{nodes}{arrows}<text x="120" y="205" text-anchor="middle" class="sub">SSE, sessions, RAG</text><text x="320" y="205" text-anchor="middle" class="sub">queue, cancel, backpressure</text><text x="540" y="205" text-anchor="middle" class="sub">action choice, lifecycle</text><text x="760" y="205" text-anchor="middle" class="sub">real upstream hot path</text><text x="980" y="205" text-anchor="middle" class="sub">Remap / Swap / Paged K1-K4</text><path d="M220 235 H1070" stroke="#2563eb" stroke-width="4"/><text x="645" y="258" text-anchor="middle" class="sub">Personal contribution crosses control plane, model runtime, and GPU operator layers</text></svg>'''
 
 
 def render_illustrated_report(outcome: dict[str, Any]) -> str:
@@ -517,7 +517,7 @@ def render_illustrated_report(outcome: dict[str, Any]) -> str:
 
 ### 3.2 处理过程
 
-原始记录先做协议一致性检查：请求参数、trial/arm 顺序、PID、计数器增量和响应内容必须完整。H1/H8 在共享状态的 trial pair 内计算差值；H9/H10 按随机化匹配进程块比较两个独立进程 arm，不冒充 Trial Pair。不确定性按相应的 pair、匹配进程块或 trace cluster 重采样 bootstrap，以保留相关样本结构。H10 的主指标选 `server_prompt_ms`，因为单 token completion 中被选择的 KV 动作与 attention graph 在 prompt 阶段执行；`predicted_ms=0.001` 只是采样后的量化余量，v3 因误选该字段被完整保留为无效实验。只有正确性、延迟上界、覆盖范围与零 fallback 同时满足，候选才能晋级。
+原始记录先做协议一致性检查：请求参数、trial/arm 顺序、PID、计数器增量和响应内容必须完整。H1/H8 在共享状态的 trial pair 内计算差值；H9 与 H10–H14 按随机化匹配进程块比较两个独立进程 arm，不冒充 Trial Pair。不确定性按相应的 pair、匹配进程块或 trace cluster 重采样 bootstrap，以保留相关样本结构。长上下文实验的主指标选 `server_prompt_ms`，因为单 token completion 中被选择的 KV 动作与 attention graph 在 prompt 阶段执行；`predicted_ms=0.001` 只是采样后的量化余量，v3 因误选该字段被完整保留为无效实验。H13 还强制 6/6 平衡臂顺序，并从 raw arm 重建 normalized trials。只有正确性、延迟上界、覆盖范围与零 fallback 同时满足，候选才能晋级。
 
 ## 4. 实验结果
 
@@ -528,19 +528,19 @@ def render_illustrated_report(outcome: dict[str, Any]) -> str:
 - **Paged-vs-Direct 负结果**：P95 从 {paged['direct_p95_ms']:.3f} ms 上升到 {paged['paged_p95_ms']:.3f} ms，回退 {paged['p95_regression_percent']:.2f}%，超过 5% 门槛。因此默认启动器不启用 Paged。
 - **K2-vs-K1 正结果**：30 组同进程配对、每臂 480 条测量响应和 600 次 Paged graph entry、0 fallback。请求 median/P95 仅回退 {k2['client_median_regression_percent']:.2f}%/{k2['client_p95_regression_percent']:.2f}%，median 回退 bootstrap 95% 上界 {k2['client_median_regression_upper_95_percent']:.2f}%；相同 480 次 kernel 总时长从 {k2['k1_kernel_duration_ms']:.3f} ms 降至 {k2['k2_kernel_duration_ms']:.3f} ms，降低 {k2['kernel_duration_reduction_percent']:.2f}%。
 - **H9 客观矩阵负结果**：6类冻结输入、30组随机化匹配进程块、360个 workload-arm 观测均实际跨页。总体中位数显示 Paged 改善 {-objective['median_regression_percent']:.2f}%，但 block-workload 回退分布P95为 {objective['block_workload_regression_p95_percent']:.2f}%，最差workload中位回退 {objective['worst_workload_median_regression_percent']:.2f}%，分别超过20%和5%门槛，因此不能晋级。
-- **H10 长上下文负结果**：18 个来源绑定 workload、10 个随机化匹配进程块、360 个 workload-arm 观测覆盖 64–2048 token 和 4–128 个物理页，输出逐项一致、Paged graph 覆盖完整且 0 fallback。512–2048 token 主区间的 `server_prompt_ms` 中位回退 {long_paged['median_regression_percent']:.2f}%，cluster bootstrap 95% 区间 [{long_paged['bootstrap_95_percent'][0]:.2f}%, {long_paged['bootstrap_95_percent'][1]:.2f}%]，P95 回退 {long_paged['p95_regression_percent']:.2f}%；因此 2048 token 内没有观察到交叉点。
+- **H10→H13 长上下文根因修复**：H10 的旧 split-K2 主中位回退为 50.35%。K4 用整组 GQA7 复用、`half2` K/V 访问和设备端自适应 partition 重构算子；H13 以 18 个来源绑定 workload、12 个严格平衡的匹配进程块和 432 个 workload-arm 观测覆盖 64–2048 token，合计 3456 个测量请求，输出逐项一致、Paged graph 覆盖完整且 0 fallback。512–2048 token 主区间的 `server_prompt_ms` 中位回退降至 {long_paged['median_regression_percent']:.2f}%，cluster bootstrap 95% 区间 [{long_paged['bootstrap_95_percent'][0]:.2f}%, {long_paged['bootstrap_95_percent'][1]:.2f}%]，P95 回退 {long_paged['p95_regression_percent']:.2f}%；算法改进有明确幅度，但置信上界仍未通过 +5% 晋级门。
 
 ![K2/K1 正式对比图](../results/research/h8-k2-production-v2.10.0/k2-production-comparison.svg)
 
 ![客观Prompt矩阵分层结果](../results/research/h9-objective-paged-v2.0.0/comparison.svg)
 
-![长上下文Paged/Direct结果](../results/research/h10-long-context-paged-v4.0.0/comparison.svg)
+![长上下文Paged/Direct结果](../results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/comparison.svg)
 
 ## 5. 应用结果与最终边界
 
 应用旅程已覆盖 UI、SSE、并发、取消、429 背压、重启恢复和本地知识检索，并记录 {int(app['infra_metrics']['cached_prompt_tokens'])} 个缓存 prompt token、{int(app['infra_metrics']['cuda_kv_kernel_launches'])} 次自研 CUDA KV launch、{int(app['infra_metrics']['cuda_kv_remap_vectorized_bytes'])} 个向量化 remap 字节。它能作为可运行应用项目和有实验链的 AI Infra 研究项目交付。
 
-最终不能声称“Paged 全面优于 Direct”或“端到端加速 {k2['kernel_duration_reduction_percent']:.2f}%”。准确结论是：**短上下文受限 Paged 内部，K2 已以预注册实验替换 K1；长上下文 split-K2 已正确运行到 2048 token，但来源绑定的 H10 仍显示 Direct 更快，因此 Paged 保持 opt-in。两臂复用同一底层分配器，本实验也不提供碎片率或容量优势证据。**
+最终不能声称“Paged 全面优于 Direct”或“端到端加速 {k2['kernel_duration_reduction_percent']:.2f}%”。准确结论是：**短上下文受限 Paged 内部，K2 已以预注册实验替换 K1；长上下文 K4 已把旧 K2 的主中位回退从 50.35% 降至 {long_paged['median_regression_percent']:.2f}%，但 95% 区间上界 {long_paged['bootstrap_95_percent'][1]:.2f}% 仍未通过 +5% 门，因此 Paged 保持 opt-in。两臂复用同一底层分配器，本实验也不提供碎片率或容量优势证据。**
 
 ## 6. 复现与审计
 

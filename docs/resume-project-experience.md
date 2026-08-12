@@ -16,7 +16,7 @@
 - 设计 KV Block Manager 与 Prefix 索引，实现引用计数、partial-tail Copy-on-Write、Pinned Memory 异步 Swap、检查点恢复和故障回退，并以真实 Qwen CUDA 请求验证共享 21 个 Prefix KV Block 后输出与 cold decode 一致。
 - 实现 descriptor-driven CUDA KV Remap 算子：使用 `uint4` 进行 128-bit Gather/Scatter，支持重叠映射 snapshot 语义、非对齐/尾部标量回退和非法 grid 拒绝；Compute Sanitizer memcheck/racecheck 均为 0 error。
 - 分离无 profiler 主结果与 Nsight Systems 机制回放：aligned 1-block CUDA-event 改善 57.10%（95% CI 38.51%–57.14%），misaligned 反例回退 137.94%；scalar/vector launch 数均为 10/10，排除“减少 launch”解释，并明确 NCU 同时受 driver/tool 不兼容与 performance-counter 权限限制。
-- 实现受限 Qwen2.5 Paged Decode K1/K2 CUDA kernel 与生产 dispatch；K2 以双 warp tile 将每 KV head 的 K/V 装载从 7 次降为 4 次，并实现转置 shared K 与 warp stable-softmax；同进程 30 组×每臂 16 次请求中端到端 median/P95 保持在 0.55%/1.52% 回退内（median 回退 95% 上界 2.86%），NSYS 相同 480 次 kernel 总时长下降 50.44%，通过预注册生产替换门槛；Paged 相对 Direct 的旧负结果仍保留并保持 opt-in。
+- 实现受限 Qwen2.5 Paged Decode K1–K4 CUDA kernel 与生产 dispatch：短上下文 K2 以双 warp tile 将每 KV head 的 K/V 装载从 7 次降为 4 次，NSYS 相同 480 次 kernel 总时长下降 50.44%；长上下文 K4 进一步用一个 256-thread CTA 覆盖完整 GQA7、`half2` 复用 K/V 和设备端自适应 partition，将 H10 旧 K2 的主中位回退从 +50.35% 降至 +3.98%。因 H13 的 95% 上界 +5.38% 未过 +5% 门，Paged 仍保持 opt-in。
 - 设计 Direct/Remap/Paged/Swap/Recompute 统一候选接口、capability/resource gate 与可解释代价模型；Issue #6 正式 replay 仅覆盖 Direct、device/host Swap、Recompute 的 200 条观测，另完成 500 万次零分配 chooser 开销微基准，保留 Remap/Paged 当时被 mask 及服务器状态无法完全克隆的边界。
 - 设计 backend-local 在线 Ridge 收益门控、置信下界、有限探索和漂移回退；16-trial 联合 Williams 实验平衡 8 个 `backend×policy` treatment 的位置与一阶前驱效应，CPU/CUDA paired oracle regret 为 5.04%/10.52%，生产 chooser 最坏 trial P99 为 2/5μs（预算 50μs）。
 - 审计一手论文、作者实现和 NVIDIA 官方文档，区分本机可复现 baseline 与 related work；预注册研究问题、配对/bootstrap 统计、证伪门槛和负结果规则，避免外部数字挪用与事后调参。
@@ -35,7 +35,7 @@
 
 ## 禁止使用的夸大表述
 
-- “实现了通用 FlashAttention/PagedAttention”——当前仅实现并接入受限 Qwen2.5-0.5B Paged Decode K1/K2，split-K2 的 host 正确性能力门覆盖 D64/GQA7/context≤2048；v2.10 的 K2/K1 替换只覆盖 page16/context17，H10 长上下文 Paged/Direct 仍为负结果，不能外推通用模型或 prefill；
+- “实现了通用 FlashAttention/PagedAttention”——当前仅实现并接入受限 Qwen2.5-0.5B Paged Decode K1–K4；K4 的 host 正确性能力门覆盖 D64/GQA7/context≤2048，24 个 production oracle case 全部通过。H13 将旧 K2 的主中位回退从 +50.35% 降至 +3.98%，但 95% 区间上界 +5.38% 未过门，不能外推为通用模型、prefill 或 Paged 已优于 Direct；
 - “端到端推理加速 53.33%”——该数字仅属于 KV Remap 微基准；
 - “支持生产级公网多租户”——当前定位为单机可信环境；
 - “科研成果/论文成果”——除非后续确有导师、立项、论文或投稿事实。

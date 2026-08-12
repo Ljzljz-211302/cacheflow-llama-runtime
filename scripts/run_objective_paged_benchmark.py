@@ -21,6 +21,7 @@ from llama_lab.objective_paged_benchmark import (  # noqa: E402
     arm_plan,
     file_sha256,
     load_definition,
+    validate_reconstructed_rows,
     workload_order,
     validate_frozen_source_revision,
 )
@@ -151,8 +152,7 @@ def validate_artifact(root: Path, protocol_path: Path, output: Path) -> dict:
         if completed is None:
             raise AssertionError("objective raw arm is missing")
         reconstructed_rows.extend(completed)
-    if reconstructed_rows != rows:
-        raise AssertionError("objective normalized trials differ from raw arm evidence")
+    validate_reconstructed_rows(protocol, rows, reconstructed_rows)
     expected = analyze(analysis_protocol(protocol, amendment), corpus, rows)
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
     if any("source_sha256" in row for row in corpus["workloads"]):

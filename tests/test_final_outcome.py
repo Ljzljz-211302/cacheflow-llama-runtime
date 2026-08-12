@@ -33,6 +33,7 @@ class FinalOutcomeTests(unittest.TestCase):
         self.assertFalse(long_context["promotion_passed"])
         self.assertEqual(long_context["maximum_context_tokens"], 2048)
         self.assertEqual(long_context["primary_metric"], "server_prompt_ms")
+        self.assertEqual(long_context["observations"], 432)
 
     def test_validator_rejects_rewriting_negative_paged_result(self):
         outcome = build_final_outcome(ROOT)

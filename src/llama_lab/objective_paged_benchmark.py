@@ -10,6 +10,46 @@ from pathlib import Path
 from typing import Any
 
 
+_NORMALIZED_TRIAL_FIELDS_V1 = frozenset({
+    "pair", "order_in_pair", "action", "workload_id", "category",
+    "prompt_sha256", "client_elapsed_ms", "actual_context_tokens", "contents",
+    "paged_calls", "paged_fallbacks", "action_decisions",
+    "action_reason_decisions", "action_observations", "raw",
+})
+_NORMALIZED_TRIAL_FIELDS_V2 = _NORMALIZED_TRIAL_FIELDS_V1 | {
+    "server_decode_ms", "server_prompt_ms",
+}
+
+
+def validate_reconstructed_rows(
+    protocol: dict[str, Any],
+    persisted_rows: list[dict[str, Any]],
+    reconstructed_rows: list[dict[str, Any]],
+) -> None:
+    """Validate raw-to-normalized evidence using the protocol's frozen row schema."""
+    schema_version = int(protocol.get("schema_version", 0))
+    if schema_version == 1:
+        expected_fields = _NORMALIZED_TRIAL_FIELDS_V1
+    elif schema_version == 2:
+        expected_fields = _NORMALIZED_TRIAL_FIELDS_V2
+        if protocol.get("service", {}).get("paged_kernel_variant") is not None:
+            expected_fields = expected_fields | {"paged_kernel_variant"}
+    else:
+        raise ValueError(f"unsupported objective protocol schema_version: {schema_version}")
+    if len(persisted_rows) != len(reconstructed_rows):
+        raise AssertionError("objective normalized trial count differs from raw arm evidence")
+    for index, (persisted, reconstructed) in enumerate(zip(persisted_rows, reconstructed_rows)):
+        if set(persisted) != expected_fields:
+            raise AssertionError(
+                f"objective normalized trial schema differs at row {index} for schema v{schema_version}"
+            )
+        projected = {field: reconstructed[field] for field in expected_fields}
+        if persisted != projected:
+            raise AssertionError(
+                f"objective normalized trials differ from raw arm evidence at row {index}"
+            )
+
+
 def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 

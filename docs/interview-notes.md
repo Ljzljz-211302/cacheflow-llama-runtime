@@ -227,9 +227,9 @@ o' &= e^{m-m'}o+e^{m_t-m'}o_t
 
 合并，最后输出 `o/l`。这样不会错误地平均各分区已经归一化的输出，也把单 CTA 的最长扫描限制为 256 token。生产 CPU/CUDA oracle 用 24 个长度覆盖页、tile、partition 边界，反转所有多页用例的物理页顺序，验证到 2048 token。
 
-性能输入不是硬编码的 `one`。构建器从架构文档、面试手册、Paged 研究文档读取正文，用真实 Qwen tokenizer 生成每个来源的 64/128/256/512/1024/2048-token prompt，共 18 个 workload，并绑定源文件、模型和二进制哈希。正式 H10 运行 10 个随机化匹配进程块、360 个 workload-arm 单元和 1440 个测量请求；输出一致且 0 fallback。
+性能输入不是硬编码的 `one`。构建器从架构文档、面试手册、Paged 研究文档读取正文，用真实 Qwen tokenizer 生成每个来源的 64/128/256/512/1024/2048-token prompt，共 18 个 workload，并绑定源文件、模型和二进制哈希。H10 用 10 个匹配进程块形成旧 K2 根因基线；最终 H13 使用严格平衡的 6 组 Direct-first / 6 组 Paged-first，共 432 个 workload-arm 单元和 3456 个测量请求；输出一致且 0 fallback。
 
-主指标选服务端 `prompt_ms`，因为单 token completion 的 KV 动作与 attention graph 在 prompt 阶段执行。早期 v3 误选恒为 0.001 ms 的 `predicted_ms`，因此整轮标记为无效并移入 superseded。v4 在 512–2048 token 上测得 Paged 相对 Direct 中位回退 50.35%，95% 区间 49.19%–51.19%，P95 回退 63.74%，到 2048 token 没有交叉点。
+主指标选服务端 `prompt_ms`，因为单 token completion 的 KV 动作与 attention graph 在 prompt 阶段执行。早期 v3 误选恒为 0.001 ms 的 `predicted_ms`，因此整轮标记为无效并移入 superseded。H10 在 512–2048 token 上测得旧 K2 中位回退 50.35%，从而把根因定位到标量计算、GQA K/V 重复加载和固定分区。K4 用一个 CTA 覆盖 7:1 GQA 组、`half2` 访问与设备端自适应分区；H13 在严格平衡臂顺序的 12 个匹配进程块中把主中位回退降到 3.98%，95% 区间 2.50%–5.38%，P95 13.34%，最差 workload 8.76%。它只差 CI 上界门 0.38 个百分点，因此是明确的算法改进，但不能宣称 Paged 已优于 Direct 或已通过生产晋级。
 
 面试时不要说“长上下文证明 Paged 更快”。应说：我解决了正确性和可扩展性，建立了来源绑定的客观评测，并证明当前 split-K2 仍受标量 QK/PV、scratch/merge 和空 partition 调度开销限制。因为 Direct/Paged 共享同一底层分配器，这组 A/B 也不能证明内存碎片或容量优势；要验证该价值，必须另建真实 contiguous-reservation allocator baseline。
 

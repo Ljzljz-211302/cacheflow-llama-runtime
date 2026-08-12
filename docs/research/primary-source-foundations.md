@@ -127,4 +127,4 @@ NVIDIA 官方说明，[Nsight Compute Memory Workload Analysis](https://docs.nvi
 - FlashInfer 的 Q1 身份是条件式的；在 Linux/WSL 适配、版本锁定和 correctness gate 完成前仍属于 R。
 - FastServe 缺少可识别的根许可证；本文不做法律判断，只据此禁止复制其代码并将其降级为论文相关工作。
 - vLLM 和 TensorRT-LLM 可以提供产品级 sanity check，但不同模型格式、kernel、allocator 和 scheduler 使其不具备单变量因果可比性。
-- 项目当前实现 Direct/KV Remap 与受限 Qwen2.5-0.5B Paged Decode K1/K2，但不是完整通用 Paged Decode Attention；split-K2 的 host 正确性能力门覆盖 D64/GQA7/context≤2048，v2.10 的 K2/K1 性能晋级只覆盖 page16/context17，H10 在 64–2048 token 未观察到 Paged/Direct crossover。
+- 项目当前实现 Direct/KV Remap 与受限 Qwen2.5-0.5B Paged Decode K1–K4，但不是完整通用 Paged Decode Attention；K4 的 host 正确性能力门覆盖 D64/GQA7/context≤2048，v2.10 的 K2/K1 性能晋级只覆盖 page16/context17。长上下文 H13 将 H10 旧 K2 的主中位回退从 +50.35% 降至 +3.98%，但置信上界 +5.38% 未过 +5% 门。

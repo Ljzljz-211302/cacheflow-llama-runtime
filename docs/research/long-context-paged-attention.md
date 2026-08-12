@@ -52,7 +52,7 @@ O=\frac{o}{l}.
 
 固定覆盖 24 个边界长度：1、15、16、17、31、32、33、63、64、65、127、128、129、255、256、257、511、512、513、1023、1024、1025、2047、2048。它们分别覆盖页首、页尾、跨页、tile 边界与 partition 边界。所有多页用例反转物理页顺序，确保 kernel 真的通过页表寻址，而不是偶然依赖连续布局。24/24 用例通过；构建脚本中的 CUDA 单元测试、真实模型换入换出与既有回归测试也通过。
 
-对 1025 token 以上用例采用 NMSE 不超过 \(6\times10^{-3}\) 的门槛。GPU 分区归约与通用 CPU reference 使用不同累加顺序，长序列会放大浮点舍入差异；该阈值只说明当前 K2 相对 CPU oracle 的已声明误差界，不构成 K1/K2 数值误差对照或任意长度的通用容差。
+对 1025 token 以上用例采用 NMSE 不超过 \(6\times10^{-3}\) 的门槛。GPU 分区归约与通用 CPU reference 使用不同累加顺序，长序列会放大浮点舍入差异；该阈值只说明当前生产 K4 相对 CPU oracle 的已声明误差界，不构成不同 kernel variant 间的数值误差对照，也不是任意长度的通用容差。
 
 ## 5. 输入数据从哪里来
 
@@ -80,7 +80,7 @@ r=100\left(\frac{T_{Paged}}{T_{Direct}}-1\right)\%.
 
 (r>0) 表示 Paged 更慢，(r<0) 表示 Paged 更快。总体不确定性按进程块整簇 bootstrap 10,000 次，避免把同一进程中的多个 workload 错当成完全独立样本。
 
-## 7. 正式结果
+## 7. H10 旧 K2 根因基线（历史正式结果）
 
 | 实际上下文 | 物理页数 | Paged 相对 Direct 中位回退 |
 |---:|---:|---:|
@@ -97,13 +97,13 @@ r=100\left(\frac{T_{Paged}}{T_{Direct}}-1\right)\%.
 
 完整原始行、汇总、协议哈希和文件清单位于 [`results/research/h10-long-context-paged-v4.0.0`](../../results/research/h10-long-context-paged-v4.0.0/report.md)。
 
-## 8. 为什么 Paged 仍慢于 Direct
+## 8. 为什么 H10 的旧 K2 明显慢于 Direct
 
-第一，Qwen2.5-0.5B 的 `14Q/2KV/D64` 计算量很小，Direct 路径已高度成熟；页表寻址和自研 kernel 的固定成本占比很高。第二，split-K2 仍使用标量式 QK/PV 工作与显式 shared-memory staging，没有利用上游 fused attention 已有的向量化或 Tensor Core 路径。第三，partition 方案新增 scratch 写回和 merge kernel；host 又按最大图容量启动 partition，短于容量的部分 CTA 只能快速退出，仍有调度成本。第四，两臂使用同一 KV 分配器，Paged 没有在本 A/B 中获得容量、碎片治理或避免连续预留的系统级收益。
+第一，Qwen2.5-0.5B 的 `14Q/2KV/D64` 计算量很小，Direct 路径已高度成熟；页表寻址和自研 kernel 的固定成本占比很高。第二，H10 的 split-K2 使用标量式 QK/PV 工作与显式 shared-memory staging，没有利用上游 fused attention 已有的向量化路径。第三，它每个 CTA 只处理两个 query head，对同一个 KV head 的数据重复加载；真实 GQA7 几何本可让七个 query head 共享一次 K/V 读取。第四，固定 partition 方案新增 scratch 写回和 merge kernel，且会启动不必要的工作。第五，两臂使用同一 KV 分配器，Paged 没有在本 A/B 中获得容量、碎片治理或避免连续预留的系统级收益。这些是 H10 形成 K4 重构方案的根因证据，不是对最终 K4 的原样描述。
 
 因此问题不是“prompt 太短”这一单一原因。扩展到 2048 token 后，Paged 的绝对工作量增加，但 Direct 仍更快；本轮数据已经否定了“只要输入变长，当前 K2 就自然超过 Direct”的假设。
 
-## 9. 本轮成果与下一步
+## 9. H10 阶段的结论与后续假设（历史）
 
 本轮的有效成果不是虚构一条正曲线，而是：完成真实长上下文算子、建立来源绑定的数据流水线、发现并废弃错误计时指标、运行预注册矩阵、给出有不确定性区间的可复核负结果，并定位瓶颈。
 
@@ -116,3 +116,21 @@ r=100\left(\frac{T_{Paged}}{T_{Direct}}-1\right)\%.
 5. 若要证明 Paged 的容量/碎片优势，另建真正的 contiguous-reservation allocator baseline，并测可服务并发数、峰值显存和碎片率，不能从当前执行路径 A/B 推断。
 
 任何下一版都应先冻结协议，再用同一 18-workload 长上下文矩阵重跑；只有正确性、零 fallback、延迟置信上界和最差 workload 同时通过，才允许默认启用。
+
+## 10. K4 根因修复与最终边界
+
+H10 之后没有继续调门槛，而是重写算子执行结构。K4 针对真实模型的 `14Q/2KV/D64`、即每个 KV head 对应 7 个 query head 的 GQA 几何设计：一个 256-thread CTA 负责一个 KV-head partition，其中 7 个 warp 分别计算 7 个 query head，第 8 个 warp 参与 K/V 搬运；K/V 以 `half2` 访问并只为整组加载一次。softmax 仍以 FP32 保存 `(m,l,o)` 状态。设备读取实际 `context_lengths` 后，在 context 不超过 512 时使用 64-token partition，以上使用 128-token partition；host 不做同步，CUDA graph 也不重建。生产 CPU/CUDA oracle 的 24 个 case 在 1–2048 token、反序物理页及页/tile/partition 边界上全部通过。
+
+实验协议也修复了一个系统性混杂：单纯逐块随机可能偶然产生严重的臂顺序失衡，v6 实际为 9 组 Paged-first、1 组 Direct-first。H13 因此预注册并强制 6 组 Direct-first、6 组 Paged-first；验证器从 raw arm 文件重新构造 normalized trials，不能只改汇总文件。当前语料仍来自三份仓库文档，但重新绑定到最新文件哈希和真实 tokenizer 前缀。
+
+| 正式阶段 | 算子/设计 | 主中位回退 | 95% 区间 | P95 | 最差 workload | 结论 |
+|---|---|---:|---:|---:|---:|---|
+| H10/v4 | scalar split-K2 | +50.35% | [+49.19%, +51.19%] | +63.74% | +53.46% | 失败，形成根因基线 |
+| H13/v7 | GQA-aware、自适应 K4 | +3.98% | [+2.50%, +5.38%] | +13.34% | +8.76% | 仅 CI 上界门失败 |
+| H14/v8 | K4 + 64-token tile | +4.48% | [+3.54%, +5.45%] | +16.81% | +6.50% | 未改善，已回退 |
+
+H13 含 18 个 workload、12 个平衡匹配进程块、432 个 workload-arm 单元和 3456 个测量请求；输出逐项一致、Paged 调用完整、fallback 为 0。K4 将 H10 的回退幅度降低约 92%，但不能写成“Paged 优于 Direct”，因为点估计仍为正且置信上界超过预注册 +5% 门 0.38 个百分点。最终生产选择保持 Direct，K4 作为有完整负结果边界的候选实现保留。
+
+剩余根因不是再换一个 tile 常数，而是 Direct 使用 upstream 成熟 vector attention，Paged 仍维护独立 arithmetic kernel；同时当前 A/B 的两臂共用分配器，没有让 Paged 的容量或碎片收益进入成本函数。若继续，正确方向是给 upstream vector attention 抽象 page-indirect K/V accessor，在保持其向量化 QK/PV 主体的同时替换地址生成，并另建真实 contiguous-reservation/fragmentation 场景。完整最终工件位于 [`results/research/h13-balanced-adaptive-gqa-paged-v7.0.0`](../../results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/report.md)。
+
+![H13 K4 长上下文结果](../../results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/comparison.svg)

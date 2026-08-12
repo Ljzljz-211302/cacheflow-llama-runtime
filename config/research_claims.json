@@ -374,7 +374,7 @@
       "status": "existing-evidence",
       "independent_variables": [
         "Direct versus split-Paged action override in independent service processes",
-        "seeded arm and workload order within each matched process block",
+        "seeded and exactly balanced Direct-first/Paged-first arm order plus seeded workload order within each matched process block",
         "three source-document families at six exact tokenizer-derived context lengths"
       ],
       "dependent_metrics": [
@@ -387,10 +387,10 @@
         "Windows scheduling and localhost request noise",
         "single-token completion and batch one",
         "shared allocator between Direct and Paged arms",
-        "scalar QK/PV work, scratch-state traffic, merge launch, and inactive partitions"
+        "page-table indirection, scratch-state traffic, merge launch, and the gap from upstream's mature vector-attention implementation"
       ],
       "baselines": ["paged-decode-contiguous"],
-      "mechanism": "The long-context K2 processes 32-token tiles inside 256-token partitions, emits FP32 online-softmax (m,l,o) states, and merges those states in a second CUDA kernel. The corpus is derived from three hash-bound repository documents with the real Qwen tokenizer rather than a runner-embedded prompt.",
+      "mechanism": "The retained K4 maps one 256-thread CTA to a complete 7:1 GQA group, loads FP16 K/V once per group with half2 access, chooses 64-token partitions through context 512 and 128-token partitions above it on device, emits FP32 online-softmax (m,l,o) states, and merges only effective partitions. The corpus is derived from three hash-bound repository documents with the real Qwen tokenizer rather than a runner-embedded prompt.",
       "falsification": [
         "Any output differs, any expected Paged graph entry is missing, or any fallback occurs.",
         "The process-block cluster-bootstrap upper 95% regression bound exceeds 5%.",
@@ -398,19 +398,20 @@
         "Any 512-2048-token workload median regression exceeds 10%."
       ],
       "evidence_sources": [
-        "config/production_paged_objective_protocol_v4.json",
-        "config/paged_objective_workloads_v3.json",
-        "results/research/h10-long-context-paged-v4.0.0/manifest.json",
-        "results/research/h10-long-context-paged-v4.0.0/summary.json",
-        "results/research/h10-long-context-paged-v4.0.0/trials.json",
-        "results/research/h10-long-context-paged-v4.0.0/comparison.svg",
+        "config/production_paged_objective_protocol_v7.json",
+        "config/paged_objective_workloads_v4.json",
+        "results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/manifest.json",
+        "results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/summary.json",
+        "results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/trials.json",
+        "results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/comparison.svg",
         "docs/research/long-context-paged-attention.md"
       ],
       "observed_results": [
         "Twenty-four production GGML CPU/CUDA oracle cases passed from context 1 through 2048, including page, tile, and partition boundaries with reversed physical pages.",
-        "Ten randomized matched process blocks covered 18 source-bound workloads and 360 workload-arm cells, with 1440 measured requests, exact outputs, complete Paged graph coverage, and zero fallback.",
-        "At 512-2048 tokens, server prompt-time median regression was +50.35%, with a process-block cluster-bootstrap 95% interval of [+49.19%, +51.19%]; regression P95 was +63.74% and the worst workload median was +53.46%.",
-        "No Paged-over-Direct crossover was observed through 2048 tokens, so production promotion failed and Paged remains opt-in.",
+        "Twelve matched process blocks with exactly six Direct-first and six Paged-first blocks covered 18 source-bound workloads and 432 workload-arm cells, with 3456 measured requests, exact outputs, complete Paged graph coverage, and zero fallback.",
+        "At 512-2048 tokens, K4 server prompt-time median regression was +3.98%, with a process-block cluster-bootstrap 95% interval of [+2.50%, +5.38%]; regression P95 was +13.34% and the worst workload median was +8.76%.",
+        "K4 reduced the H10 K2 median regression from +50.35% to +3.98%, but its confidence upper bound remained 0.38 percentage points above the +5% gate; production promotion therefore failed and Paged remains opt-in.",
+        "A preregistered 64-token tile follow-up produced +4.48% with a [+3.54%, +5.45%] interval and was reverted because it did not improve the gate.",
         "The superseded v3 run selected a quantized 0.001 ms predicted-time field and is retained as invalid metric-selection evidence rather than a positive result."
       ],
       "scope_limits": [

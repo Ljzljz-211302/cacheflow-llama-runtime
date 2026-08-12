@@ -17,7 +17,7 @@
 2. 峰值 KV 与可驻留请求数是否改善；
 3. TTFT、TPOT/TBT、请求尾延迟和吞吐是否改善。
 
-当前已实现 Direct/Scalar Remap/Vector Remap 与受限 Paged Decode K1/K2；只有通过对应 falsification gate 和预注册协议的范围可以写入简历，仍标记为 `prospective` 的通用 Paged、长上下文或跨设备结论不得宣传为既有能力。
+当前已实现 Direct/Scalar Remap/Vector Remap 与受限 Paged Decode K1–K4；K4 正确性覆盖 1–2048 token，并在 H13 中将旧 K2 的主中位回退从 +50.35% 降至 +3.98%，但置信上界 +5.38% 未过 +5% 晋级门。只有通过对应 falsification gate 和预注册协议的范围可以写入简历；通用 Paged、Paged 优于 Direct 或跨设备结论不得宣传为既有能力。
 
 ## 2. 研究问题总览
 

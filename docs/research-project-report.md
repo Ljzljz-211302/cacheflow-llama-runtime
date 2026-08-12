@@ -66,7 +66,7 @@
 
 - 上表是 KV Remap 微基准，不等价于 TTFT、TPS 或端到端延迟提升；
 - 实验只覆盖单台 RTX 4050 Laptop GPU 和指定 FP16 KV 布局，不能外推到 A100/H100 或多 GPU；
-- 当前实现包含 KV 数据移动算子与受限 Qwen2.5-0.5B Paged Decode K1/K2；split-K2 的 host 正确性能力门覆盖 D64/GQA7/context≤2048，v2.10 的 K2/K1 正式替换只覆盖 page16/context17，H10 的 Paged/Direct 负结果覆盖 64–2048；它不是通用 FlashAttention、GEMM、prefill PagedAttention 或任意模型实现；
+- 当前实现包含 KV 数据移动算子与受限 Qwen2.5-0.5B Paged Decode K1–K4；K4 的 host 正确性能力门覆盖 D64/GQA7/context≤2048，24 个 production oracle case 全部通过。H13 将 H10 旧 K2 的主中位回退从 +50.35% 降至 +3.98%，但置信上界 +5.38% 未过 +5% 门；它不是通用 FlashAttention、GEMM、prefill PagedAttention 或任意模型实现；
 - 真实应用指标证明算子被调用，不能证明已有外部用户或线上采用率。
 - 本次增量的确定性功能、Sanitizer、真实模型与 Remap 性能门禁均通过；2026-08-08 严格 Full 也原生退出 0。此前两次时序敏感失败保留为历史反例；一次 Full 通过只说明该冻结提交和环境满足门槛，不声称未来所有运行都不会受统计波动影响。
 

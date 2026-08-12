@@ -8,6 +8,7 @@ from pathlib import Path
 
 from llama_lab.objective_paged_benchmark import (
     analyze, arm_plan, load_definition, validate_frozen_source_revision,
+    validate_reconstructed_rows,
 )
 
 
@@ -127,6 +128,23 @@ class ObjectivePagedBenchmarkTests(unittest.TestCase):
         overlay = ROOT / binding["vendor_overlay_file"]
         self.assertEqual(hashlib.sha256(overlay.read_bytes()).hexdigest(), binding["vendor_overlay_sha256"])
         self.assertEqual(len(binding["vendor_diff_sha256"]), 64)
+
+    def test_raw_reconstruction_is_dispatched_by_frozen_schema(self):
+        legacy = {
+            "pair": 1, "order_in_pair": 1, "action": "direct",
+            "workload_id": "w", "category": "c", "prompt_sha256": "a" * 64,
+            "client_elapsed_ms": [1.0], "actual_context_tokens": [17],
+            "contents": ["x"], "paged_calls": 0, "paged_fallbacks": 0,
+            "action_decisions": 1, "action_reason_decisions": 1,
+            "action_observations": 1, "raw": "raw/w.json",
+        }
+        rebuilt = {**legacy, "server_decode_ms": [0.1], "server_prompt_ms": [0.9]}
+        validate_reconstructed_rows({"schema_version": 1}, [legacy], [rebuilt])
+        tampered = {**legacy, "paged_calls": 1}
+        with self.assertRaisesRegex(AssertionError, "raw arm evidence"):
+            validate_reconstructed_rows({"schema_version": 1}, [tampered], [rebuilt])
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            validate_reconstructed_rows({"schema_version": 99}, [legacy], [rebuilt])
 
     def test_service_and_model_paged_capability_share_context_2048_boundary(self):
         service = (ROOT / "vendor/llama.cpp/tools/server/server-context.cpp").read_text(encoding="utf-8")
