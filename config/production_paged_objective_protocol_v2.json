@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "protocol_version": "2.0.0",
+  "preregistered_at_utc": "2026-08-12T13:30:00Z",
+  "supersedes": "v1 exposed one-page dominance and unbounded workload-level tails; v1 remains immutable and non-promotional",
+  "claim": "objective-cross-page-paged-vs-direct-prompt-matrix",
+  "random_seed": 20260813,
+  "paired_trials": 30,
+  "arm_order": "seeded random Direct/Paged order independently within every pair",
+  "workload_order": "seeded random workload order independently within every arm",
+  "workload_file": "config/paged_objective_workloads_v2.json",
+  "server_binary": "build/patched-cuda-ninja3/bin/llama-server.exe",
+  "model": "models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+  "device": {"name": "NVIDIA GeForce RTX 4050 Laptop GPU", "compute_capability": "8.9"},
+  "service": {"context_size": 512, "parallel_slots": 1, "gpu_layers": 99, "threads": 8, "flash_attention": true, "kv_block_size_tokens": 16},
+  "request": {"predicted_tokens": 1, "temperature": 0, "cache_prompt": true, "warm_requests_per_workload_arm": 1, "measured_requests_per_workload_arm": 4},
+  "capability": {"minimum_actual_context_tokens": 17, "maximum_actual_context_tokens": 32, "page_size_tokens": 16, "required_actual_page_counts": [2], "paged_fallbacks_must_be_zero": true},
+  "analysis": {
+    "primary_effect": "100 * (median_paged_ms / median_direct_ms - 1) per pair and workload",
+    "primary_estimator": "median paired regression across the frozen cross-page workload matrix",
+    "confidence": "pair-cluster bootstrap 95% interval, 10000 resamples",
+    "tail_guardrail": "P95 across all pair-workload median regressions",
+    "worst_workload_guardrail": "maximum workload median paired regression",
+    "strata": ["workload_id", "category", "actual_page_count"],
+    "outcome_based_deletion": "forbidden"
+  },
+  "acceptance": {
+    "exact_output_match": true,
+    "maximum_primary_regression_upper_95_percent": 5.0,
+    "maximum_primary_p95_regression_percent": 20.0,
+    "maximum_any_workload_median_regression_percent": 5.0,
+    "minimum_workload_coverage": 6,
+    "minimum_pairs_per_workload": 30
+  }
+}

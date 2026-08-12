@@ -43,6 +43,16 @@ def render_report(summary: dict, corpus: dict) -> str:
             f"{result['actual_page_count']} | {effect['median']:+.2f}% | {effect['p95']:+.2f}% |"
         )
     decision = "PASS" if summary["promotion_passed"] else "FAIL"
+    gate_lines = [
+        f"- Preregistered upper bound: +{summary['promotion_limit_percent']:.2f}% → **{decision}**"
+    ]
+    if "primary_p95_limit_percent" in summary:
+        gate_lines = [
+            f"- Preregistered median-CI upper bound: +{summary['promotion_limit_percent']:.2f}%",
+            f"- P95 regression / limit: {primary['p95']:+.2f}% / +{summary['primary_p95_limit_percent']:.2f}%",
+            f"- Worst workload median / limit: {summary['worst_workload_median_regression_percent']:+.2f}% / +{summary['worst_workload_limit_percent']:.2f}%",
+            f"- Required page coverage passed: {summary['page_coverage_passed']} → **{decision}**",
+        ]
     return "\n".join([
         "# Objective Paged-vs-Direct prompt-matrix report", "",
         f"- Frozen corpus: `{corpus['corpus_version']}`; {summary['workload_count']} workloads",
@@ -50,7 +60,7 @@ def render_report(summary: dict, corpus: dict) -> str:
         f"- Raw workload-arm observations: {summary['observations']}",
         f"- Primary median paired regression: {primary['median']:+.2f}%",
         f"- Pair-cluster bootstrap 95% interval: [{interval[0]:+.2f}%, {interval[1]:+.2f}%]",
-        f"- Preregistered upper bound: +{summary['promotion_limit_percent']:.2f}% → **{decision}**", "",
+        *gate_lines, "",
         "| Workload | Category | Actual tokens | Pages | Median regression | P95 regression |",
         "|---|---|---:|---:|---:|---:|", *rows, "",
         "Positive values mean Paged is slower. Results are stratified rather than inferred from one synthetic prompt.", "",

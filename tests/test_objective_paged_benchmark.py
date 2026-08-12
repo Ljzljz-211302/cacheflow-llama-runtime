@@ -60,6 +60,16 @@ class ObjectivePagedBenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "full pair/action/workload matrix"):
             analyze(self.protocol, self.corpus, evidence)
 
+    def test_v2_requires_cross_page_coverage_and_tail_guardrails(self):
+        protocol, corpus = load_definition(
+            ROOT, ROOT / "config/production_paged_objective_protocol_v2.json"
+        )
+        evidence = rows(protocol, corpus)
+        summary = analyze(protocol, corpus, evidence)
+        self.assertTrue(summary["page_coverage_passed"])
+        self.assertIn("primary_p95_limit_percent", summary)
+        self.assertIn("worst_workload_median_regression_percent", summary)
+
 
 if __name__ == "__main__":
     unittest.main()

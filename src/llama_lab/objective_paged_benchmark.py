@@ -150,15 +150,36 @@ def analyze(
     all_effects = [value for values in effects_by_pair.values() for value in values]
     interval = _cluster_bootstrap(effects_by_pair, int(protocol["random_seed"]))
     limit = float(protocol["acceptance"]["maximum_primary_regression_upper_95_percent"])
-    return {
+    primary = summarize(all_effects)
+    required_pages = set(map(int, protocol["capability"].get("required_actual_page_counts", [])))
+    actual_pages = {int(row["actual_page_count"]) for row in per_workload.values()}
+    page_coverage_passed = not required_pages or actual_pages == required_pages
+    has_extended_gates = "maximum_primary_p95_regression_percent" in protocol["acceptance"]
+    tail_limit = float(protocol["acceptance"].get("maximum_primary_p95_regression_percent", float("inf")))
+    worst_limit = float(protocol["acceptance"].get("maximum_any_workload_median_regression_percent", float("inf")))
+    worst_workload_median = max(
+        float(row["paired_regression_percent"]["median"]) for row in per_workload.values()
+    )
+    result = {
         "schema_version": 1,
         "protocol_version": protocol["protocol_version"],
         "paired_trials": pairs,
         "workload_count": len(workloads),
         "observations": len(rows),
-        "primary_paired_regression_percent": summarize(all_effects),
+        "primary_paired_regression_percent": primary,
         "primary_pair_cluster_bootstrap_95_percent": interval,
         "promotion_limit_percent": limit,
-        "promotion_passed": interval[1] <= limit,
+        "promotion_passed": (
+            interval[1] <= limit and primary["p95"] <= tail_limit
+            and worst_workload_median <= worst_limit and page_coverage_passed
+        ),
         "per_workload": per_workload,
     }
+    if has_extended_gates:
+        result.update({
+            "primary_p95_limit_percent": tail_limit,
+            "worst_workload_median_regression_percent": worst_workload_median,
+            "worst_workload_limit_percent": worst_limit,
+            "page_coverage_passed": page_coverage_passed,
+        })
+    return result
