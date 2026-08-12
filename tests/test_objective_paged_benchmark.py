@@ -185,6 +185,14 @@ class ObjectivePagedBenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "registered Paged kernel"):
             analyze(protocol, corpus, evidence)
 
+    def test_v6_registers_context_adaptive_k4_and_more_samples(self):
+        protocol, _ = load_definition(
+            ROOT, ROOT / "config/production_paged_objective_protocol_v6.json"
+        )
+        self.assertEqual(protocol["service"]["paged_kernel_variant"], "K4")
+        self.assertEqual(protocol["request"]["measured_requests_per_workload_arm"], 8)
+        self.assertIn("device-side", protocol["operator_design"]["adaptive_partitioning"])
+
 
 if __name__ == "__main__":
     unittest.main()
