@@ -112,11 +112,21 @@ class ObjectivePagedBenchmarkTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(overlay.read_bytes()).hexdigest(), binding["vendor_overlay_sha256"])
         self.assertEqual(len(binding["vendor_diff_sha256"]), 64)
 
-    def test_service_and_model_paged_capability_share_context_32_boundary(self):
+    def test_service_and_model_paged_capability_share_context_2048_boundary(self):
         service = (ROOT / "vendor/llama.cpp/tools/server/server-context.cpp").read_text(encoding="utf-8")
         model = (ROOT / "vendor/llama.cpp/src/llama-context.cpp").read_text(encoding="utf-8")
-        self.assertIn("resident_prefix <= 32", service)
-        self.assertIn("layout.context_length <= 32", model)
+        self.assertIn("resident_prefix <= 2048", service)
+        self.assertIn("layout.context_length <= 2048", model)
+
+    def test_v3_is_source_bound_and_uses_long_context_primary(self):
+        protocol, corpus = load_definition(
+            ROOT, ROOT / "config/production_paged_objective_protocol_v3.json"
+        )
+        self.assertEqual(protocol["analysis"]["primary_timing_field"], "server_decode_ms")
+        self.assertEqual(protocol["analysis"]["primary_minimum_context_tokens"], 512)
+        self.assertEqual({row["actual_prompt_tokens"] for row in corpus["workloads"]},
+                         {64, 128, 256, 512, 1024, 2048})
+        self.assertTrue(all(len(row["source_sha256"]) == 64 for row in corpus["workloads"]))
 
 
 if __name__ == "__main__":

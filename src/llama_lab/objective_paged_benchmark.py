@@ -45,7 +45,15 @@ def load_definition(root: Path, protocol_path: Path) -> tuple[dict[str, Any], di
     if len(ids) != len(set(ids)) or any(not row.get("prompt") for row in workloads):
         raise ValueError("objective corpus IDs/prompts must be non-empty and unique")
     if len({row.get("category") for row in workloads}) < 4:
-        raise ValueError("objective corpus must cover at least four prompt categories")
+        minimum_categories = int(protocol.get("minimum_prompt_categories", 4))
+        if len({row.get("category") for row in workloads}) < minimum_categories:
+            raise ValueError("objective corpus has insufficient prompt-category coverage")
+    for row in workloads:
+        if "source_sha256" not in row:
+            continue
+        source = root / row["source"]
+        if not source.is_file() or file_sha256(source) != row["source_sha256"]:
+            raise ValueError(f"objective workload source binding differs: {row['id']}")
     return protocol, corpus
 
 
@@ -102,7 +110,8 @@ def analyze(
         prompt_hash = hashlib.sha256(workloads[row["workload_id"]]["prompt"].encode()).hexdigest()
         if row["prompt_sha256"] != prompt_hash:
             raise ValueError("objective row prompt differs from frozen corpus")
-        samples = row["client_elapsed_ms"]
+        primary_field = protocol.get("analysis", {}).get("primary_timing_field", "client_elapsed_ms")
+        samples = row[primary_field]
         if len(samples) != measured or any(float(value) <= 0 for value in samples):
             raise ValueError("objective row has incomplete timing samples")
         contexts = {int(value) for value in row["actual_context_tokens"]}
@@ -140,8 +149,9 @@ def analyze(
             if direct_context != paged_context:
                 raise ValueError("objective Direct/Paged context mismatch")
             context = direct_context
-            direct_median = statistics.median(map(float, direct["client_elapsed_ms"]))
-            paged_median = statistics.median(map(float, paged["client_elapsed_ms"]))
+            timing_field = protocol.get("analysis", {}).get("primary_timing_field", "client_elapsed_ms")
+            direct_median = statistics.median(map(float, direct[timing_field]))
+            paged_median = statistics.median(map(float, paged[timing_field]))
             regression = (paged_median / direct_median - 1.0) * 100.0
             direct_values.append(direct_median)
             paged_values.append(paged_median)
@@ -156,8 +166,23 @@ def analyze(
             "paged_arm_median_ms": summarize(paged_values),
             ("matched_block_regression_percent" if matched_blocks else "paired_regression_percent"): summarize(regressions),
         }
-    all_effects = [value for values in effects_by_pair.values() for value in values]
-    interval = _cluster_bootstrap(effects_by_pair, int(protocol["random_seed"]))
+    primary_minimum = int(protocol.get("analysis", {}).get("primary_minimum_context_tokens", 0))
+    primary_workloads = {
+        workload_id for workload_id, row in per_workload.items()
+        if int(row["actual_context_tokens"]) >= primary_minimum
+    }
+    primary_effects_by_pair = {
+        pair: [
+            (statistics.median(map(float, keyed[(pair, "paged", workload_id)][
+                protocol.get("analysis", {}).get("primary_timing_field", "client_elapsed_ms")])) /
+             statistics.median(map(float, keyed[(pair, "direct", workload_id)][
+                protocol.get("analysis", {}).get("primary_timing_field", "client_elapsed_ms")])) - 1.0) * 100.0
+            for workload_id in sorted(primary_workloads)
+        ]
+        for pair in range(1, pairs + 1)
+    }
+    all_effects = [value for values in primary_effects_by_pair.values() for value in values]
+    interval = _cluster_bootstrap(primary_effects_by_pair, int(protocol["random_seed"]))
     limit = float(protocol["acceptance"]["maximum_primary_regression_upper_95_percent"])
     primary = summarize(all_effects)
     required_pages = set(map(int, protocol["capability"].get("required_actual_page_counts", [])))
@@ -175,6 +200,9 @@ def analyze(
         "protocol_version": protocol["protocol_version"],
         ("matched_process_blocks" if matched_blocks else "paired_trials"): pairs,
         "workload_count": len(workloads),
+        "primary_workload_count": len(primary_workloads),
+        "primary_minimum_context_tokens": primary_minimum,
+        "primary_timing_field": protocol.get("analysis", {}).get("primary_timing_field", "client_elapsed_ms"),
         "observations": len(rows),
         ("primary_matched_block_regression_percent" if matched_blocks else "primary_paired_regression_percent"): primary,
         ("primary_block_cluster_bootstrap_95_percent" if matched_blocks else "primary_pair_cluster_bootstrap_95_percent"): interval,

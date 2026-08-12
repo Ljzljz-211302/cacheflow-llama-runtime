@@ -224,6 +224,8 @@ def normalize_cell(protocol: dict, workload: dict, cell: dict, cell_path: Path, 
         "workload_id": workload["id"], "category": workload["category"],
         "prompt_sha256": prompt_sha256(workload["prompt"]),
         "client_elapsed_ms": elapsed_values,
+        "server_decode_ms": [float(row["timings"]["predicted_ms"]) for row in responses],
+        "server_prompt_ms": [float(row["timings"]["prompt_ms"]) for row in responses],
         "actual_context_tokens": [int(row["timings"]["cache_n"]) + int(row["timings"]["prompt_n"]) for row in responses],
         "contents": [row["content"] for row in responses],
         "paged_calls": metric_delta(before, after, "llamacpp:paged_decode_calls_total "),
@@ -292,6 +294,10 @@ def collect_arm(protocol: dict, corpus: dict, server: Path, model: Path, output:
                     "seed": int(protocol["random_seed"]),
                     "cache_prompt": bool(payload_base["cache_prompt"]),
                 }
+                if "actual_prompt_tokens" in workload:
+                    token_status, tokenized = request_json(f"{base_url}/tokenize", {"content": workload["prompt"]})
+                    if token_status != 200 or len(tokenized.get("tokens", [])) != int(workload["actual_prompt_tokens"]):
+                        raise AssertionError("runtime tokenizer differs from the frozen corpus")
                 before = get_text(f"{base_url}/metrics")
                 for _ in range(int(payload_base["warm_requests_per_workload_arm"])):
                     request_json(f"{base_url}/completion", payload)
