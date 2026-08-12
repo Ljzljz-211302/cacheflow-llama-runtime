@@ -107,13 +107,16 @@ def collect_arm(protocol: dict, corpus: dict, server: Path, model: Path, output:
                 pair: int, order: int, action: str, port: int) -> list[dict]:
     arm_dir = output / "raw" / f"pair-{pair:02d}-{order}-{action}"
     arm_dir.mkdir(parents=True)
+    slot_save_path = arm_dir / "slot-state"
+    slot_save_path.mkdir()
     log_path = arm_dir / "server.log"
     service = protocol["service"]
     command = [
         str(server.resolve()), "-m", str(model.resolve()), "--host", "127.0.0.1",
         "--port", str(port), "-c", str(service["context_size"]), "-np", str(service["parallel_slots"]),
         "-t", str(service["threads"]), "-ngl", str(service["gpu_layers"]), "--flash-attn", "on",
-        "--no-warmup", "--metrics", "--slots", "--kv-block-runtime", "--kv-block-size",
+        "--no-warmup", "--metrics", "--slots", "--slot-save-path", str(slot_save_path.resolve()),
+        "--kv-block-runtime", "--kv-block-size",
         str(service["kv_block_size_tokens"]), "--kv-paged-decode", "--kv-action-policy", "analytical",
         "--kv-action-override", action, "-lv", "4",
     ]
