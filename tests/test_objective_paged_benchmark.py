@@ -6,7 +6,9 @@ import json
 import unittest
 from pathlib import Path
 
-from llama_lab.objective_paged_benchmark import analyze, arm_plan, load_definition
+from llama_lab.objective_paged_benchmark import (
+    analyze, arm_plan, load_definition, validate_frozen_source_revision,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -129,6 +131,20 @@ class ObjectivePagedBenchmarkTests(unittest.TestCase):
         self.assertEqual({row["actual_prompt_tokens"] for row in corpus["workloads"]},
                          {64, 128, 256, 512, 1024, 2048})
         self.assertTrue(all(len(row["source_sha256"]) == 64 for row in corpus["workloads"]))
+
+    def test_v4_source_provenance_uses_measurement_revision_after_docs_evolve(self):
+        _, corpus = load_definition(
+            ROOT, ROOT / "config/production_paged_objective_protocol_v4.json"
+        )
+        summary = json.loads((
+            ROOT / "results/research/h10-long-context-paged-v4.0.0/summary.json"
+        ).read_text(encoding="utf-8"))
+        validate_frozen_source_revision(ROOT, corpus, summary["git_revision"])
+        with self.assertRaises(ValueError):
+            load_definition(
+                ROOT, ROOT / "config/production_paged_objective_protocol_v4.json",
+                validate_live_sources=True,
+            )
 
     def test_v3_primary_excludes_short_context_worst_case(self):
         protocol, corpus = load_definition(

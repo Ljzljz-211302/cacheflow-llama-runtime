@@ -366,6 +366,60 @@
         "No hardware DRAM-byte, occupancy, bank-conflict-counter, or memory-bound claim because NCU counters remain unavailable"
       ],
       "negative_result_policy": "Retain failed K1/K2 protocols and keep the Paged-over-Direct action boundary unchanged; do not promote unsupported shapes or contexts."
+    },
+    {
+      "id": "H8-long-context-paged-crossover",
+      "question": "After extending the production Paged kernel to source-bound contexts through 2048 tokens, does it outperform the Direct path?",
+      "hypothesis": "For Qwen2.5-0.5B D64/GQA7/page16 at 512-2048 tokens, split-Paged preserves exact output and keeps the upper 95% regression bound, regression P95, and every workload median within preregistered production limits.",
+      "status": "existing-negative-evidence",
+      "independent_variables": [
+        "Direct versus split-Paged action override in independent service processes",
+        "seeded arm and workload order within each matched process block",
+        "three source-document families at six exact tokenizer-derived context lengths"
+      ],
+      "dependent_metrics": [
+        "exact response equality and actual tokenizer context length",
+        "server prompt time at 512, 1024, and 2048 tokens",
+        "process-block cluster bootstrap uncertainty and worst-workload regression",
+        "production Paged graph entries, action observations, and fallbacks"
+      ],
+      "confounders": [
+        "Windows scheduling and localhost request noise",
+        "single-token completion and batch one",
+        "shared allocator between Direct and Paged arms",
+        "scalar QK/PV work, scratch-state traffic, merge launch, and inactive partitions"
+      ],
+      "baselines": ["production-direct"],
+      "mechanism": "The long-context K2 processes 32-token tiles inside 256-token partitions, emits FP32 online-softmax (m,l,o) states, and merges those states in a second CUDA kernel. The corpus is derived from three hash-bound repository documents with the real Qwen tokenizer rather than a runner-embedded prompt.",
+      "falsification": [
+        "Any output differs, any expected Paged graph entry is missing, or any fallback occurs.",
+        "The process-block cluster-bootstrap upper 95% regression bound exceeds 5%.",
+        "The primary regression P95 exceeds 20%.",
+        "Any 512-2048-token workload median regression exceeds 10%."
+      ],
+      "evidence_sources": [
+        "config/production_paged_objective_protocol_v4.json",
+        "config/paged_objective_workloads_v3.json",
+        "results/research/h10-long-context-paged-v4.0.0/manifest.json",
+        "results/research/h10-long-context-paged-v4.0.0/summary.json",
+        "results/research/h10-long-context-paged-v4.0.0/trials.json",
+        "results/research/h10-long-context-paged-v4.0.0/comparison.svg",
+        "docs/research/long-context-paged-attention.md"
+      ],
+      "observed_results": [
+        "Twenty-four production GGML CPU/CUDA oracle cases passed from context 1 through 2048, including page, tile, and partition boundaries with reversed physical pages.",
+        "Ten randomized matched process blocks covered 18 source-bound workloads and 360 workload-arm cells, with 1440 measured requests, exact outputs, complete Paged graph coverage, and zero fallback.",
+        "At 512-2048 tokens, server prompt-time median regression was +50.35%, with a process-block cluster-bootstrap 95% interval of [+49.19%, +51.19%]; regression P95 was +63.74% and the worst workload median was +53.46%.",
+        "No Paged-over-Direct crossover was observed through 2048 tokens, so production promotion failed and Paged remains opt-in.",
+        "The superseded v3 run selected a quantized 0.001 ms predicted-time field and is retained as invalid metric-selection evidence rather than a positive result."
+      ],
+      "scope_limits": [
+        "Qwen2.5-0.5B, FP16 KV, D64, GQA ratio 7, page 16, batch/query token 1, complete CUDA offload",
+        "One RTX 4050 Laptop GPU on Windows, actual contexts 64-2048",
+        "No allocator-fragmentation or memory-capacity claim because both arms share the same allocator",
+        "No larger-model, multi-sequence batching, prefill, or universal Paged Attention claim"
+      ],
+      "negative_result_policy": "Keep the source-bound negative artifact and invalid v3 artifact, leave Paged disabled by default, and require a new preregistered run after any vectorized QK/PV or dispatch change."
     }
   ]
 }

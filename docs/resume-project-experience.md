@@ -35,7 +35,7 @@
 
 ## 禁止使用的夸大表述
 
-- “实现了通用 FlashAttention/PagedAttention”——当前仅实现并接入受限 Qwen2.5-0.5B Paged Decode K1/K2，host 正确性能力门覆盖 D64/GQA7/context≤32，K2 正式性能晋级只覆盖 page16/context17 的重复 cached 请求，不能外推通用模型、长上下文或 prefill；
+- “实现了通用 FlashAttention/PagedAttention”——当前仅实现并接入受限 Qwen2.5-0.5B Paged Decode K1/K2，split-K2 的 host 正确性能力门覆盖 D64/GQA7/context≤2048；v2.10 的 K2/K1 替换只覆盖 page16/context17，H10 长上下文 Paged/Direct 仍为负结果，不能外推通用模型或 prefill；
 - “端到端推理加速 53.33%”——该数字仅属于 KV Remap 微基准；
 - “支持生产级公网多租户”——当前定位为单机可信环境；
 - “科研成果/论文成果”——除非后续确有导师、立项、论文或投稿事实。

@@ -22,6 +22,7 @@ from llama_lab.objective_paged_benchmark import (  # noqa: E402
     file_sha256,
     load_definition,
     workload_order,
+    validate_frozen_source_revision,
 )
 from production_journey import cuda_environment, get_text, request_json, terminate_process, wait_ready  # noqa: E402
 from run_k2_production_experiment import erase_slot, metric_delta  # noqa: E402
@@ -146,6 +147,8 @@ def validate_artifact(root: Path, protocol_path: Path, output: Path) -> dict:
     rows = json.loads((output / "trials.json").read_text(encoding="utf-8"))
     expected = analyze(analysis_protocol(protocol, amendment), corpus, rows)
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+    if any("source_sha256" in row for row in corpus["workloads"]):
+        validate_frozen_source_revision(root, corpus, summary["git_revision"])
     binding = dict(protocol.get("artifact_binding") or {})
     if amendment:
         binding.update(amendment["post_run_evidence_binding"])
@@ -341,7 +344,7 @@ def main() -> None:
             "promotion_passed": summary["promotion_passed"],
         }, ensure_ascii=False))
         return
-    protocol, corpus = load_definition(ROOT, args.protocol)
+    protocol, corpus = load_definition(ROOT, args.protocol, validate_live_sources=True)
     amendment = validation_amendment(ROOT, args.protocol)
     if (args.output / "manifest.json").exists():
         raise FileExistsError("completed objective artifact is immutable; use --validate-only")

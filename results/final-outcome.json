@@ -122,6 +122,63 @@
       "worst_workload_limit_percent": 5.0,
       "promotion_passed": false,
       "decision": "negative production result: median improves, but tail and worst-workload gates fail"
+    },
+    "long_context_paged_vs_direct": {
+      "protocol_version": "4.0.0",
+      "matched_process_blocks": 10,
+      "workload_count": 18,
+      "observations": 360,
+      "minimum_context_tokens": 64,
+      "maximum_context_tokens": 2048,
+      "primary_minimum_context_tokens": 512,
+      "primary_metric": "server_prompt_ms",
+      "median_regression_percent": 50.34813527693551,
+      "bootstrap_95_percent": [
+        49.19162053365483,
+        51.190328341765664
+      ],
+      "p95_regression_percent": 63.743548556443855,
+      "worst_workload_median_regression_percent": 53.45689283463612,
+      "regression_by_context_tokens": {
+        "64": {
+          "median": 11.888192750819947,
+          "p95": 14.972597957971917,
+          "minimum": -1.2624771514451905,
+          "maximum": 15.315309647655472
+        },
+        "128": {
+          "median": 24.00435281899892,
+          "p95": 24.64107196532681,
+          "minimum": 20.79264525506104,
+          "maximum": 24.711818537141017
+        },
+        "256": {
+          "median": 51.44688696874266,
+          "p95": 52.89012715094753,
+          "minimum": 40.54924941552848,
+          "maximum": 53.050487171192515
+        },
+        "512": {
+          "median": 49.313969980422016,
+          "p95": 52.726627553340485,
+          "minimum": 48.998884811007315,
+          "maximum": 53.10581172810921
+        },
+        "1024": {
+          "median": 48.476497283083546,
+          "p95": 52.95885327948087,
+          "minimum": 47.366069601352976,
+          "maximum": 53.45689283463612
+        },
+        "2048": {
+          "median": 51.71778001609496,
+          "p95": 52.42454110833255,
+          "minimum": 40.81509979835762,
+          "maximum": 52.503070118581164
+        }
+      },
+      "promotion_passed": false,
+      "decision": "no crossover through 2048 tokens; split Paged remains opt-in"
     }
   },
   "claim_boundaries": [
@@ -130,7 +187,8 @@
     "Microbenchmark improvements do not imply TTFT or throughput improvements.",
     "The application journey proves an exercised local workflow, not external adoption.",
     "The artifact is an independent research project, not a peer-reviewed publication.",
-    "The objective prompt matrix supersedes single-prompt interpretation and keeps Paged disabled because the block-workload regression-tail and worst-workload gates fail; its independent-process blocks are not shared-hot-state Trial Pairs."
+    "The objective prompt matrix supersedes single-prompt interpretation and keeps Paged disabled because the block-workload regression-tail and worst-workload gates fail; its independent-process blocks are not shared-hot-state Trial Pairs.",
+    "The source-bound 64-2048 token matrix found no Paged-over-Direct crossover; Direct and Paged share the same allocator in this implementation, so it cannot claim a memory-fragmentation advantage from this A/B."
   ],
   "evidence": {
     "upstream": {
@@ -216,6 +274,30 @@
     "objective_paged_chart": {
       "path": "results/research/h9-objective-paged-v2.0.0/comparison.svg",
       "sha256": "331e0f95a9bee6f7e1e3874d87acdef1f03559fafc25451adeb5db9900e2b878"
+    },
+    "long_paged_protocol": {
+      "path": "config/production_paged_objective_protocol_v4.json",
+      "sha256": "2fc90e4211b4302e5b1899cf5fbb64282e526ac56ac9625e071ece476c9fd858"
+    },
+    "long_paged_corpus": {
+      "path": "config/paged_objective_workloads_v3.json",
+      "sha256": "5ac9e5b8b6fd83438152ef6e2c7601953a26a1de29a4272270ad533061b606cf"
+    },
+    "long_paged_manifest": {
+      "path": "results/research/h10-long-context-paged-v4.0.0/manifest.json",
+      "sha256": "56caf80f25be81fe5218db876bd6eb7b713858700de0db8b5d70e3a5fb9fd949"
+    },
+    "long_paged": {
+      "path": "results/research/h10-long-context-paged-v4.0.0/summary.json",
+      "sha256": "c00f94e24d9b28ceb025bfdc87699f3dea2bccb8a8295535fefb5035ae1ae22f"
+    },
+    "long_paged_report": {
+      "path": "results/research/h10-long-context-paged-v4.0.0/report.md",
+      "sha256": "f0b01d98b0fb88a920f2d319df65e15e86cb98e2d7cd1611d0db02ec88b3226c"
+    },
+    "long_paged_chart": {
+      "path": "results/research/h10-long-context-paged-v4.0.0/comparison.svg",
+      "sha256": "1953492bb73ff161706dbaf5d62cda2b900217a2dde674b1b677b70a646fac4e"
     }
   }
 }

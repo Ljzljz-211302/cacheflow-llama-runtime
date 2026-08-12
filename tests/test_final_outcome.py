@@ -29,6 +29,10 @@ class FinalOutcomeTests(unittest.TestCase):
         self.assertFalse(objective["promotion_passed"])
         self.assertTrue(objective["all_workloads_cross_page"])
         self.assertEqual(objective["observations"], 360)
+        long_context = outcome["research_results"]["long_context_paged_vs_direct"]
+        self.assertFalse(long_context["promotion_passed"])
+        self.assertEqual(long_context["maximum_context_tokens"], 2048)
+        self.assertEqual(long_context["primary_metric"], "server_prompt_ms")
 
     def test_validator_rejects_rewriting_negative_paged_result(self):
         outcome = build_final_outcome(ROOT)

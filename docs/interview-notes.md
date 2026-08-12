@@ -211,6 +211,28 @@ K2-T2 的 T2 表示一个 CTA 同时处理两个 query heads。CTA 内有两个 
 
 最后必须区分两个问题：K2 已证明在同一受限 Paged 路径内可替换 K1；Paged 相对 Direct 的 v1.1 P95 仍回退 6.78%，所以 Paged 整体仍是 opt-in。前者是算子内部替换成功，后者是动作选择边界，二者不矛盾。还要区分“kernel 加速”和“端到端加速”：v2.10 的 kernel 总时长下降 50.44%，请求级 median/P95 点估计分别小幅回退 0.55%/1.52%，但 median 回退 95% 上界 2.86% 仍低于预注册 5% 门槛。因此简历写“kernel 降低 50.44%，端到端保持在 1.52% 内并通过 bounded replacement”，不写“端到端提升 50.44%”或普适加速定理；P95 bootstrap 区间只作描述，也不冒充总体尾延迟非劣证明。
 
+### 长上下文为什么要分区，最终结果怎样？
+
+先定义三个名词。**Tile** 是一次装入 shared memory 并计算的小块，本项目固定为最多 32 token；**partition** 是由 8 个 tile 组成、可由一个 CTA 独立处理的 256-token 逻辑区间；**online softmax state** 是不保存全部 logits 也能继续合并的三元组 `(m,l,o)`，分别表示当前最大 logit、重标定后的指数和、未归一化的加权 V 向量。
+
+原 K2 把整段上下文的 K/V 工作放进一个 CTA，shared memory 与串行工作都随长度增长，所以能力门停在 32 token。长上下文版本让第一层 CUDA kernel 并行计算多个 partition 的 `(m,l,o)`，第二层 kernel 再按
+
+\[
+\begin{aligned}
+m' &= \max(m,m_t),\\
+l' &= e^{m-m'}l+e^{m_t-m'}l_t,\\
+o' &= e^{m-m'}o+e^{m_t-m'}o_t
+\end{aligned}
+\]
+
+合并，最后输出 `o/l`。这样不会错误地平均各分区已经归一化的输出，也把单 CTA 的最长扫描限制为 256 token。生产 CPU/CUDA oracle 用 24 个长度覆盖页、tile、partition 边界，反转所有多页用例的物理页顺序，验证到 2048 token。
+
+性能输入不是硬编码的 `one`。构建器从架构文档、面试手册、Paged 研究文档读取正文，用真实 Qwen tokenizer 生成每个来源的 64/128/256/512/1024/2048-token prompt，共 18 个 workload，并绑定源文件、模型和二进制哈希。正式 H10 运行 10 个随机化匹配进程块、360 个 workload-arm 单元和 1440 个测量请求；输出一致且 0 fallback。
+
+主指标选服务端 `prompt_ms`，因为单 token completion 的 KV 动作与 attention graph 在 prompt 阶段执行。早期 v3 误选恒为 0.001 ms 的 `predicted_ms`，因此整轮标记为无效并移入 superseded。v4 在 512–2048 token 上测得 Paged 相对 Direct 中位回退 50.35%，95% 区间 49.19%–51.19%，P95 回退 63.74%，到 2048 token 没有交叉点。
+
+面试时不要说“长上下文证明 Paged 更快”。应说：我解决了正确性和可扩展性，建立了来源绑定的客观评测，并证明当前 split-K2 仍受标量 QK/PV、scratch/merge 和空 partition 调度开销限制。因为 Direct/Paged 共享同一底层分配器，这组 A/B 也不能证明内存碎片或容量优势；要验证该价值，必须另建真实 contiguous-reservation allocator baseline。
+
 ### Benefit Gating 怎么讲？
 
 先讲负结果：固定adaptive chunk在不同backend/workload上结论反号。然后画出同一生产Seam的两条shadow plan，说明learned policy只在悲观CacheFlow cost仍低于乐观upstream cost加安全margin时启用。重点追问是置信半径、SLO reward、drift与探索预算。最后展示16-trial联合 `backend×mode` Williams验收：每个treatment×位置和有向前驱各2次，trial边界有washout，并报告paired oracle regret；不声称这是所有模型和硬件上的全局最优。

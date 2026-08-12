@@ -5,6 +5,7 @@ import json
 import math
 import random
 import statistics
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,9 @@ def summarize(values: list[float]) -> dict[str, float]:
     }
 
 
-def load_definition(root: Path, protocol_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+def load_definition(
+    root: Path, protocol_path: Path, *, validate_live_sources: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
     if "prompt" in protocol.get("request", {}):
         raise ValueError("objective protocol must not embed a benchmark prompt")
@@ -48,13 +51,31 @@ def load_definition(root: Path, protocol_path: Path) -> tuple[dict[str, Any], di
         minimum_categories = int(protocol.get("minimum_prompt_categories", 4))
         if len({row.get("category") for row in workloads}) < minimum_categories:
             raise ValueError("objective corpus has insufficient prompt-category coverage")
-    for row in workloads:
-        if "source_sha256" not in row:
-            continue
-        source = root / row["source"]
-        if not source.is_file() or file_sha256(source) != row["source_sha256"]:
-            raise ValueError(f"objective workload source binding differs: {row['id']}")
+    if validate_live_sources:
+        for row in workloads:
+            if "source_sha256" not in row:
+                continue
+            source = root / row["source"]
+            if not source.is_file() or file_sha256(source) != row["source_sha256"]:
+                raise ValueError(f"objective workload source binding differs: {row['id']}")
     return protocol, corpus
+
+
+def validate_frozen_source_revision(
+    root: Path, corpus: dict[str, Any], revision: str,
+) -> None:
+    """Prove source provenance at measurement revision while allowing docs to evolve."""
+    expected_by_source = {
+        row["source"]: row["source_sha256"]
+        for row in corpus.get("workloads", []) if "source_sha256" in row
+    }
+    for source, expected_sha256 in expected_by_source.items():
+        completed = subprocess.run(
+            ["git", "show", f"{revision}:{source}"], cwd=root,
+            check=True, capture_output=True,
+        )
+        if hashlib.sha256(completed.stdout).hexdigest() != expected_sha256:
+            raise ValueError(f"objective historical source binding differs: {source}")
 
 
 def arm_plan(protocol: dict[str, Any]) -> list[tuple[int, int, str]]:
@@ -219,9 +240,6 @@ def analyze(
         "protocol_version": protocol["protocol_version"],
         ("matched_process_blocks" if matched_blocks else "paired_trials"): pairs,
         "workload_count": len(workloads),
-        "primary_workload_count": len(primary_workloads),
-        "primary_minimum_context_tokens": primary_minimum,
-        "primary_timing_field": protocol.get("analysis", {}).get("primary_timing_field", "client_elapsed_ms"),
         "observations": len(rows),
         ("primary_matched_block_regression_percent" if matched_blocks else "primary_paired_regression_percent"): primary,
         ("primary_block_cluster_bootstrap_95_percent" if matched_blocks else "primary_pair_cluster_bootstrap_95_percent"): interval,
@@ -231,8 +249,14 @@ def analyze(
             and worst_workload_median <= worst_limit and page_coverage_passed
         ),
         "per_workload": per_workload,
-        "regression_by_context_tokens": by_context,
     }
+    if "primary_minimum_context_tokens" in protocol.get("analysis", {}):
+        result.update({
+            "primary_workload_count": len(primary_workloads),
+            "primary_minimum_context_tokens": primary_minimum,
+            "primary_timing_field": protocol["analysis"]["primary_timing_field"],
+            "regression_by_context_tokens": by_context,
+        })
     if has_extended_gates:
         result.update({
             "primary_p95_limit_percent": tail_limit,
