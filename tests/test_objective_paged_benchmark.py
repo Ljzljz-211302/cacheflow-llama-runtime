@@ -24,6 +24,8 @@ def rows(protocol, corpus):
                 "category": workload["category"],
                 "prompt_sha256": hashlib.sha256(workload["prompt"].encode()).hexdigest(),
                 "client_elapsed_ms": [base * (1.01 if action == "paged" else 1)] * 4,
+                "server_decode_ms": [base * (1.01 if action == "paged" else 1)] * 4,
+                "server_prompt_ms": [base * (1.01 if action == "paged" else 1)] * 4,
                 "actual_context_tokens": [17] * 4,
                 "contents": [","] * 4,
                 "paged_calls": 4 if action == "paged" else 0,
@@ -127,6 +129,23 @@ class ObjectivePagedBenchmarkTests(unittest.TestCase):
         self.assertEqual({row["actual_prompt_tokens"] for row in corpus["workloads"]},
                          {64, 128, 256, 512, 1024, 2048})
         self.assertTrue(all(len(row["source_sha256"]) == 64 for row in corpus["workloads"]))
+
+    def test_v3_primary_excludes_short_context_worst_case(self):
+        protocol, corpus = load_definition(
+            ROOT, ROOT / "config/production_paged_objective_protocol_v3.json"
+        )
+        evidence = rows(protocol, corpus)
+        contexts = {row["id"]: row["actual_prompt_tokens"] for row in corpus["workloads"]}
+        for row in evidence:
+            context = contexts[row["workload_id"]]
+            row["actual_context_tokens"] = [context] * 4
+            if context < 512 and row["action"] == "paged":
+                row["server_decode_ms"] = [100.0] * 4
+        summary = analyze(protocol, corpus, evidence)
+        self.assertEqual(summary["primary_workload_count"], 9)
+        self.assertLess(summary["worst_workload_median_regression_percent"], 2.0)
+        self.assertEqual(set(summary["regression_by_context_tokens"]),
+                         {"64", "128", "256", "512", "1024", "2048"})
 
 
 if __name__ == "__main__":

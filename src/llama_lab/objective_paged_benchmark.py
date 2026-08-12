@@ -166,6 +166,17 @@ def analyze(
             "paged_arm_median_ms": summarize(paged_values),
             ("matched_block_regression_percent" if matched_blocks else "paired_regression_percent"): summarize(regressions),
         }
+        for secondary_field in protocol.get("analysis", {}).get("secondary_metrics", []):
+            direct_secondary = [
+                statistics.median(map(float, keyed[(pair, "direct", workload_id)][secondary_field]))
+                for pair in range(1, pairs + 1)
+            ]
+            paged_secondary = [
+                statistics.median(map(float, keyed[(pair, "paged", workload_id)][secondary_field]))
+                for pair in range(1, pairs + 1)
+            ]
+            per_workload[workload_id][f"direct_{secondary_field}"] = summarize(direct_secondary)
+            per_workload[workload_id][f"paged_{secondary_field}"] = summarize(paged_secondary)
     primary_minimum = int(protocol.get("analysis", {}).get("primary_minimum_context_tokens", 0))
     primary_workloads = {
         workload_id for workload_id, row in per_workload.items()
@@ -191,10 +202,18 @@ def analyze(
     has_extended_gates = "maximum_primary_p95_regression_percent" in protocol["acceptance"]
     tail_limit = float(protocol["acceptance"].get("maximum_primary_p95_regression_percent", float("inf")))
     worst_limit = float(protocol["acceptance"].get("maximum_any_workload_median_regression_percent", float("inf")))
+    effect_key = "matched_block_regression_percent" if matched_blocks else "paired_regression_percent"
     worst_workload_median = max(
-        float(row["matched_block_regression_percent" if matched_blocks else "paired_regression_percent"]["median"])
-        for row in per_workload.values()
+        float(per_workload[workload_id][effect_key]["median"])
+        for workload_id in primary_workloads
     )
+    by_context: dict[str, dict[str, float]] = {}
+    for context in sorted({int(row["actual_context_tokens"]) for row in per_workload.values()}):
+        effects = [
+            float(row[effect_key]["median"])
+            for row in per_workload.values() if int(row["actual_context_tokens"]) == context
+        ]
+        by_context[str(context)] = summarize(effects)
     result = {
         "schema_version": 1,
         "protocol_version": protocol["protocol_version"],
@@ -212,6 +231,7 @@ def analyze(
             and worst_workload_median <= worst_limit and page_coverage_passed
         ),
         "per_workload": per_workload,
+        "regression_by_context_tokens": by_context,
     }
     if has_extended_gates:
         result.update({
