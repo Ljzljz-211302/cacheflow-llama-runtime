@@ -103,6 +103,12 @@ def validate_artifact(root: Path, protocol_path: Path, output: Path) -> dict:
     rows = json.loads((output / "trials.json").read_text(encoding="utf-8"))
     expected = analyze(protocol, corpus, rows)
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+    binding = protocol.get("artifact_binding")
+    if binding and (
+        summary.get("server_sha256") != binding["server_sha256"]
+        or summary.get("vendor_revision") != binding["vendor_revision"]
+    ):
+        raise AssertionError("objective artifact binary/source binding differs")
     for field, value in expected.items():
         if summary.get(field) != value:
             raise AssertionError(f"objective summary field is not derived from raw rows: {field}")
@@ -246,6 +252,12 @@ def main() -> None:
         raise FileExistsError("completed objective artifact is immutable; use --validate-only")
     if device_identity()["name"] != protocol["device"]["name"]:
         raise RuntimeError("objective benchmark device differs from protocol")
+    binding = protocol.get("artifact_binding")
+    if binding and (
+        file_sha256(args.server) != binding["server_sha256"]
+        or git_output("-C", "vendor/llama.cpp", "rev-parse", "HEAD") != binding["vendor_revision"]
+    ):
+        raise RuntimeError("objective benchmark binary/source binding differs from protocol")
     clean = not bool(git_output("status", "--porcelain", "--untracked-files=no"))
     if not clean:
         raise RuntimeError("objective benchmark requires a clean tracked worktree")
