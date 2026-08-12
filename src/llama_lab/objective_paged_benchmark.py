@@ -81,9 +81,20 @@ def arm_plan(protocol: dict[str, Any]) -> list[tuple[int, int, str]]:
     generator = random.Random(int(protocol["random_seed"]))
     result = []
     block_count = int(protocol.get("matched_process_blocks", protocol.get("paired_trials")))
-    for pair in range(1, block_count + 1):
-        actions = ["direct", "paged"]
-        generator.shuffle(actions)
+    balanced = bool(protocol.get("balanced_arm_order", False))
+    if balanced:
+        first_actions = ["direct"] * (block_count // 2) + ["paged"] * (block_count // 2)
+        if block_count % 2:
+            first_actions.append(generator.choice(["direct", "paged"]))
+        generator.shuffle(first_actions)
+    else:
+        first_actions = []
+        for _ in range(block_count):
+            actions = ["direct", "paged"]
+            generator.shuffle(actions)
+            first_actions.append(actions[0])
+    for pair, first in enumerate(first_actions, 1):
+        actions = [first, "paged" if first == "direct" else "direct"]
         result.extend((pair, order, action) for order, action in enumerate(actions, 1))
     return result
 

@@ -193,6 +193,14 @@ class ObjectivePagedBenchmarkTests(unittest.TestCase):
         self.assertEqual(protocol["request"]["measured_requests_per_workload_arm"], 8)
         self.assertIn("device-side", protocol["operator_design"]["adaptive_partitioning"])
 
+    def test_balanced_arm_plan_has_equal_first_position_counts(self):
+        protocol = copy.deepcopy(self.protocol)
+        protocol["matched_process_blocks"] = 12
+        protocol["balanced_arm_order"] = True
+        first = [action for _, order, action in arm_plan(protocol) if order == 1]
+        self.assertEqual(first.count("direct"), 6)
+        self.assertEqual(first.count("paged"), 6)
+
 
 if __name__ == "__main__":
     unittest.main()

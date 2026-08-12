@@ -145,6 +145,14 @@ def validate_artifact(root: Path, protocol_path: Path, output: Path) -> dict:
     if manifest["corpus_sha256"] != file_sha256(corpus_path):
         raise AssertionError("objective artifact corpus hash differs")
     rows = json.loads((output / "trials.json").read_text(encoding="utf-8"))
+    reconstructed_rows = []
+    for pair, order, action in arm_plan(protocol):
+        completed = load_completed_arm(protocol, corpus, output, pair, order, action)
+        if completed is None:
+            raise AssertionError("objective raw arm is missing")
+        reconstructed_rows.extend(completed)
+    if reconstructed_rows != rows:
+        raise AssertionError("objective normalized trials differ from raw arm evidence")
     expected = analyze(analysis_protocol(protocol, amendment), corpus, rows)
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
     if any("source_sha256" in row for row in corpus["workloads"]):
