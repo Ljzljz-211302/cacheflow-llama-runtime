@@ -201,6 +201,12 @@ class ObjectivePagedBenchmarkTests(unittest.TestCase):
         self.assertEqual(first.count("direct"), 6)
         self.assertEqual(first.count("paged"), 6)
 
+    def test_v8_preregisters_tile64_without_relaxing_v7_gates(self):
+        v7, _ = load_definition(ROOT, ROOT / "config/production_paged_objective_protocol_v7.json")
+        v8, _ = load_definition(ROOT, ROOT / "config/production_paged_objective_protocol_v8.json")
+        self.assertEqual(v8["operator_design"]["token_tile"].split()[0], "64")
+        self.assertEqual(v8["acceptance"], v7["acceptance"])
+
 
 if __name__ == "__main__":
     unittest.main()

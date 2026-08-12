@@ -1,0 +1,48 @@
+{
+  "schema_version": 2,
+  "protocol_version": "8.0.0",
+  "preregistered_at_utc": "2026-08-12T16:05:07Z",
+  "supersedes": "v7 fixed arm-order imbalance and missed only the primary upper-CI gate at 5.38%; v8 changes only K4's token tile from 32 to 64 to halve long-context load/synchronization rounds",
+  "claim": "source-bound-long-context-balanced-order-tile64-gqa-paged-vs-direct-noninferiority",
+  "random_seed": 20260819,
+  "matched_process_blocks": 12,
+  "balanced_arm_order": true,
+  "arm_order": "seeded assignment of exactly six Direct-first and six Paged-first matched-process blocks",
+  "workload_order": "seeded random workload order independently within every arm",
+  "workload_file": "config/paged_objective_workloads_v4.json",
+  "minimum_prompt_categories": 3,
+  "server_binary": "build/patched-cuda-ninja3/bin/llama-server.exe",
+  "model": "models/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+  "artifact_binding": {
+    "server_sha256": "6c6b1873c0347baabc65f36ce25b5fe1c04a3363b600ee5e0ce05c11a495da76",
+    "model_sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+    "vendor_revision": "43304f9fe3b056e9465adf154fa7e860e4e3609e",
+    "vendor_diff_sha256": "c2a48bcc5623301f1f5f7c80c5e53b75da9ef16b6a7d0c17142971c279d865e7",
+    "vendor_overlay_file": "config/objective_paged_vendor_overlay_v2.patch",
+    "vendor_overlay_sha256": "595f9293490d0eda3355436a77911ef2a716405cdd178bcaa571bacf58d7e37a"
+  },
+  "device": {"name": "NVIDIA GeForce RTX 4050 Laptop GPU", "compute_capability": "8.9"},
+  "service": {"context_size": 2304, "parallel_slots": 1, "gpu_layers": 99, "threads": 8, "flash_attention": true, "kv_block_size_tokens": 16, "paged_kernel_variant": "K4"},
+  "operator_design": {
+    "model_geometry": "14 query heads / 2 KV heads / head dimension 64 (GQA ratio 7)",
+    "cta_mapping": "one 256-thread CTA per KV-head partition; seven warps own the seven query heads and one warp assists K/V movement",
+    "memory_path": "page-indirect FP16 K/V tiles loaded once per GQA group with half2 vector access",
+    "token_tile": "64 tokens; every warp evaluates two logits per lane, halving tile barriers relative to v7",
+    "adaptive_partitioning": "device-side context dispatch uses 64-token partitions through 512 tokens and 128-token partitions above 512; no host synchronization and no graph rebuild",
+    "numerics": "FP32 online softmax inside each partition plus FP32 merge over effective partitions only"
+  },
+  "request": {"predicted_tokens": 1, "temperature": 0, "cache_prompt": true, "warm_requests_per_workload_arm": 1, "measured_requests_per_workload_arm": 8},
+  "capability": {"minimum_actual_context_tokens": 64, "maximum_actual_context_tokens": 2048, "page_size_tokens": 16, "required_actual_page_counts": [4, 8, 16, 32, 64, 128], "paged_fallbacks_must_be_zero": true},
+  "analysis": {
+    "primary_timing_field": "server_prompt_ms",
+    "primary_minimum_context_tokens": 512,
+    "metric_rationale": "In one-token completion, the selected KV action and attention graph execute in the prompt phase; predicted_ms is a post-sampling remainder and lacks sufficient resolution.",
+    "primary_effect": "100 * (median Paged server prompt ms / median Direct server prompt ms - 1) per matched process block and workload",
+    "primary_estimator": "median matched-block regression across source families at 512, 1024, and 2048 tokens",
+    "confidence": "process-block cluster bootstrap 95% interval, 10000 resamples",
+    "secondary_metrics": ["client_elapsed_ms", "server_decode_ms"],
+    "strata": ["source family", "actual context tokens", "actual page count", "arm order"],
+    "outcome_based_deletion": "forbidden"
+  },
+  "acceptance": {"exact_output_match": true, "maximum_primary_regression_upper_95_percent": 5.0, "maximum_primary_p95_regression_percent": 20.0, "maximum_any_workload_median_regression_percent": 10.0, "minimum_workload_coverage": 18, "minimum_pairs_per_workload": 12}
+}
