@@ -219,10 +219,13 @@ def normalize_cell(protocol: dict, workload: dict, cell: dict, cell_path: Path, 
     elapsed_values = cell["client_elapsed_ms"]
     if cell["workload_id"] != workload["id"] or cell["payload"] != expected_payload:
         raise ValueError("completed objective arm differs from the frozen workload")
+    expected_kernel = protocol["service"].get("paged_kernel_variant")
+    if expected_kernel is not None and cell.get("paged_kernel_variant") != expected_kernel:
+        raise ValueError("completed objective arm differs from the registered Paged kernel")
     if len(responses) != int(protocol["request"]["measured_requests_per_workload_arm"]):
         raise ValueError("completed objective arm has incomplete responses")
     before, after = cell["metrics_before"], cell["metrics_after"]
-    return {
+    result = {
         "pair": pair, "order_in_pair": order, "action": action,
         "workload_id": workload["id"], "category": workload["category"],
         "prompt_sha256": prompt_sha256(workload["prompt"]),
@@ -238,6 +241,9 @@ def normalize_cell(protocol: dict, workload: dict, cell: dict, cell_path: Path, 
         "action_observations": metric_delta(before, after, f'llamacpp:kv_action_observations_total{{action="{action}"}}'),
         "raw": str(cell_path.relative_to(output).as_posix()),
     }
+    if expected_kernel is not None:
+        result["paged_kernel_variant"] = expected_kernel
+    return result
 
 
 def load_completed_arm(protocol: dict, corpus: dict, output: Path,
@@ -268,6 +274,7 @@ def collect_arm(protocol: dict, corpus: dict, server: Path, model: Path, output:
     slot_save_path.mkdir()
     log_path = arm_dir / "server.log"
     service = protocol["service"]
+    kernel_variant = service.get("paged_kernel_variant")
     command = [
         str(server.resolve()), "-m", str(model.resolve()), "--host", "127.0.0.1",
         "--port", str(port), "-c", str(service["context_size"]), "-np", str(service["parallel_slots"]),
@@ -282,7 +289,10 @@ def collect_arm(protocol: dict, corpus: dict, server: Path, model: Path, output:
     result_rows = []
     base_url = f"http://127.0.0.1:{port}"
     with log_path.open("wb") as log:
-        process = subprocess.Popen(command, cwd=ROOT, env=cuda_environment(), stdout=log,
+        environment = cuda_environment()
+        if kernel_variant is not None:
+            environment["LLAMA_CACHEFLOW_PAGED_KERNEL"] = str(kernel_variant)
+        process = subprocess.Popen(command, cwd=ROOT, env=environment, stdout=log,
                                    stderr=subprocess.STDOUT,
                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         try:
@@ -316,6 +326,7 @@ def collect_arm(protocol: dict, corpus: dict, server: Path, model: Path, output:
                 cell = {
                     "pair": pair, "order_in_pair": order, "action": action,
                     "workload_id": workload_id, "payload": payload,
+                    "paged_kernel_variant": kernel_variant,
                     "responses": responses, "client_elapsed_ms": elapsed_values,
                     "metrics_before": before, "metrics_after": after,
                 }

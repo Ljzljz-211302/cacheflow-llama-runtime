@@ -130,6 +130,9 @@ def analyze(
         prompt_hash = hashlib.sha256(workloads[row["workload_id"]]["prompt"].encode()).hexdigest()
         if row["prompt_sha256"] != prompt_hash:
             raise ValueError("objective row prompt differs from frozen corpus")
+        expected_kernel = protocol["service"].get("paged_kernel_variant")
+        if expected_kernel is not None and row.get("paged_kernel_variant") != expected_kernel:
+            raise ValueError("objective row differs from the registered Paged kernel")
         primary_field = protocol.get("analysis", {}).get("primary_timing_field", "client_elapsed_ms")
         samples = row[primary_field]
         if len(samples) != measured or any(float(value) <= 0 for value in samples):

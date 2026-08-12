@@ -19,7 +19,7 @@ def rows(protocol, corpus):
     for pair, _, action in arm_plan(protocol):
         for workload in corpus["workloads"]:
             base = 10.0 + pair / 100
-            result.append({
+            row = {
                 "pair": pair,
                 "action": action,
                 "workload_id": workload["id"],
@@ -35,7 +35,10 @@ def rows(protocol, corpus):
                 "action_decisions": 4,
                 "action_reason_decisions": 4,
                 "action_observations": 4,
-            })
+            }
+            if "paged_kernel_variant" in protocol["service"]:
+                row["paged_kernel_variant"] = protocol["service"]["paged_kernel_variant"]
+            result.append(row)
     return result
 
 
@@ -171,6 +174,16 @@ class ObjectivePagedBenchmarkTests(unittest.TestCase):
         self.assertLess(summary["worst_workload_median_regression_percent"], 2.0)
         self.assertEqual(set(summary["regression_by_context_tokens"]),
                          {"64", "128", "256", "512", "1024", "2048"})
+
+    def test_v5_binds_and_rejects_paged_kernel_substitution(self):
+        protocol, corpus = load_definition(
+            ROOT, ROOT / "config/production_paged_objective_protocol_v5.json"
+        )
+        self.assertEqual(protocol["service"]["paged_kernel_variant"], "K4")
+        evidence = rows(protocol, corpus)
+        evidence[0]["paged_kernel_variant"] = "K2"
+        with self.assertRaisesRegex(ValueError, "registered Paged kernel"):
+            analyze(protocol, corpus, evidence)
 
 
 if __name__ == "__main__":
