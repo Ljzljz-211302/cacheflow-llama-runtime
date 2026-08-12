@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="../assets/handbook.css">
 </head>
 <body><main>
-<div class="kicker">CacheFlow Runtime · Interview Handbook · 2026-08-09</div>
+<div class="kicker">CacheFlow Runtime · Interview Handbook · 2026-08-13</div>
 <h1>只读这一份：用一条请求讲透 CacheFlow Runtime</h1>
 <p class="lead">这不是名词表，而是一条可以完整复述的因果链：大模型逐 token（模型处理文本时使用的整数片段）生成导致 KV Cache（保存各层历史 Key/Value、避免重复计算的缓存）持续增长；缓存增长带来容量、碎片和搬运问题；项目用分块管理、GPU（擅长大规模并行计算的图形处理器）算子与在线决策解决这些问题；最后用配对实验（同一条件分别运行基线和候选）与置信区间（效果估计的不确定范围）判断优化是否值得进入默认路径。</p>
 
@@ -28,12 +28,13 @@
   <li><a href="#architecture">项目整体架构与一次请求</a></li>
   <li><a href="#kv">KV Cache、分页、Prefix、COW 与 Swap</a></li>
   <li><a href="#cuda">CUDA 基础与 Remap 算子</a></li>
-  <li><a href="#paged">Paged Decode Attention 算法与 K1 算子</a></li>
+  <li><a href="#paged">Paged Decode Attention：K1–K4、批处理与生产边界</a></li>
   <li><a href="#policy">统一动作成本模型与在线 Ridge</a></li>
   <li><a href="#experiment">因果实验、统计与全部关键数据</a></li>
   <li><a href="#evidence">可复核证据链与工程质量</a></li>
   <li><a href="#qa">高频追问与完整回答</a></li>
   <li><a href="#deep-dive">系统、CUDA、机器学习与统计深挖</a></li>
+  <li><a href="#infra-core">AI Infra 通用八股：不依赖本项目也要会</a></li>
   <li><a href="#whiteboard">白板推导、代码定位与速记</a></li>
 </ol>
 <p>第一次阅读按顺序；复习时先闭卷回答每节末尾“自测”，再看答案。核心缩写在开场或首次使用处给出中文含义，其他术语均在对应正文中给出定义、原理和项目落点。</p>
@@ -201,6 +202,31 @@ token stream + Prometheus + trace + research artifacts</div>
 <h3>3.3 Engine trace 说明什么</h3>
 <p>一次 CPU mixed workload 记录 242 个完整 span，总时长 9.553 秒：execute 占 99.9145%，commit 0.0674%，plan 0.0148%，prepare 0.0033%。Span 是带开始与结束时间的阶段记录。这个结果说明控制面的事务分层开销很小，主要时间仍在模型执行；它不是采样调用栈火焰图，不能据此推断某个 CPU 函数的周期占比。</p>
 
+<h3>3.4 Batch、sequence 与 token batch 不是同一个概念</h3>
+<p><strong>sequence（序列）</strong>是一条独立生成状态，例如一个用户的一次对话；它拥有自己的历史 token、KV Cache、结束状态和取消状态。<strong>token batch</strong>是某一轮送进模型的 token 集合，它可能同时包含多个 sequence 的 Decode token，也可能包含某个长 Prompt 的多个 Prefill token。面试中说“batch=8”必须进一步说明：是 8 条 sequence、8 个 token，还是内部 micro-batch 上限，否则结论不可复现。</p>
+<table><thead><tr><th>概念</th><th>回答的问题</th><th>典型变化</th></tr></thead><tbody>
+<tr><td>并发请求数</td><td>系统里同时有多少用户请求？</td><td>受接入、排队和完成影响</td></tr>
+<tr><td>active sequence 数</td><td>多少条生成状态仍占用 KV？</td><td>请求完成、取消或抢占时变化</td></tr>
+<tr><td>iteration batch</td><td>本轮真正让哪些 sequence/token 上 GPU？</td><td>每轮重新计划</td></tr>
+<tr><td>micro-batch</td><td>一次大计划如何拆成后端可执行小块？</td><td>受显存和 kernel 形状约束</td></tr>
+</tbody></table>
+<p>项目的 Engine/Scheduler 已经以多 sequence 的 iteration plan 为抽象；但当前生产 Paged K4 的算子能力仍限定为单 sequence、单 query token。两者必须分层表述：<strong>控制面支持 continuous batching，不等于某个候选 Attention kernel 已支持多 sequence。</strong></p>
+
+<h3>3.5 Continuous batching 怎样完成一轮</h3>
+<ol>
+<li>读取所有 sequence 的 phase、剩余 Prefill、Decode 可运行状态、deadline 和 KV 占用，形成不可变 snapshot。</li>
+<li>先依据显存块、最大 token 数和算子 capability 计算本轮预算，不能先选请求再祈祷显存足够。</li>
+<li>在预算内组合 Decode 与 chunked Prefill；Decode 通常优先以控制 TPOT，Aging 则让等待过久的 Prefill 最终获得执行机会。</li>
+<li>生成 iteration plan，并预留新 KV 块；此时正式映射尚未改变。</li>
+<li>执行模型和必要的 Remap/Swap/Paged 动作；CUDA event 完成后才 commit 新映射。</li>
+<li>移除完成/取消 sequence、回收引用归零的块，再进入下一轮。下一轮 batch 成员可以完全不同。</li>
+</ol>
+<p>这解释了 AI Infra 中的核心矛盾：扩大 batch 往往提高 GPU 吞吐，却可能增加排队时间；过度偏向 Decode 会让长 Prefill 饥饿；过度塞入 Prefill 又会拉高活跃用户的 TPOT。因此调度目标不是单一“GPU 利用率最高”，而是在 SLO、容量、公平和吞吐之间求可行解。</p>
+
+<h3>3.6 Admission、Scheduling 与 Execution 的边界</h3>
+<p><strong>Admission control（准入控制）</strong>决定新请求是否可以进入系统；<strong>Scheduling（调度）</strong>决定已进入系统的请求本轮谁运行；<strong>Execution（执行）</strong>把计划变成模型和 CUDA 工作。三者不能混为一个优先队列：准入错误会让承诺的 KV 超过物理容量，调度错误会造成饥饿或尾延迟，执行错误则可能留下半完成 GPU 状态。</p>
+<div class="quiz"><strong>自测：</strong>为什么“HTTP 同时来了 16 个请求”不能证明 kernel 的 batch 是 16？<details><summary>答案</summary>请求可能仍在排队、Prefill、等待 KV 或已被背压；只有 iteration plan 中本轮实际进入模型的 active sequences/tokens 才构成执行 batch，还可能被后端继续拆成 micro-batch。</details></div>
+
 <h2 id="kv">4. KV Cache：从内存问题到系统设计</h2>
 <div class="module-card"><div class="module-title">M2 · KV Block Runtime：状态与容量平面</div>
 <dl><dt>它接收什么？</dt><dd>sequence 的 token 位置、Prefix 命中结果、本轮容量 reservation，以及 Engine 提交或释放动作。</dd>
@@ -225,6 +251,29 @@ token stream + Prometheus + trace + research artifacts</div>
 <div class="diagram">swap cost ≈ fixed + bytes / effective_bandwidth + queue/overlap cost
 recompute cost ≈ cached_tokens × prefill_ms_per_token</div>
 <p>Swap handle 必须绑定模型身份、布局、校验和和生命周期。保存失败不能发布 handle，恢复失败要清理临时状态并回到可行的 Recompute，保证事务完整性。</p>
+
+<h3>4.5 显存到底由什么组成</h3>
+<p>推理显存不是只有模型权重。近似可以拆为：</p>
+<div class="diagram">VRAM ≈ model weights + KV cache + temporary activations + CUDA workspaces + graph buffers + allocator reserve</div>
+<p>其中权重在模型加载后相对固定；KV 随活跃 sequence 的上下文增长，是服务端最重要的动态项；workspace 和 CUDA Graph buffer 又会制造不可忽略的峰值。只报告“KV 理论字节数”不能证明服务可容纳多少并发，因为真正的 OOM 由总峰值和分配器可用连续区间决定。</p>
+<p>若模型有 <code>L</code> 层、每 token 有 <code>Hkv</code> 个 KV head、每个 head 维度为 <code>D</code>、每元素 <code>b</code> bytes，则单序列 KV 近似为：</p>
+<div class="diagram">KV_bytes = context_tokens × L × 2(K和V) × Hkv × D × b</div>
+<p>多序列时应对各自实际上下文求和，而不是简单使用 <code>最大上下文×最大并发</code>；后者是连续预留常见的容量浪费来源。</p>
+
+<h3>4.6 内部碎片、外部碎片与可服务容量</h3>
+<p><strong>内部碎片</strong>是已分配页内部未使用的空间，例如 page size=16 而序列最后一页只用了 1 token；<strong>外部碎片</strong>是总空闲显存足够，但被分割成许多小洞，找不到所需连续大块。分页主要缓解外部碎片，并把内部浪费限制在每条 sequence 的最后一页。</p>
+<div class="diagram">最后一页浪费 tokens = (page_size − context_tokens mod page_size) mod page_size
+内部碎片上界 &lt; active_sequences × page_size × 每token KV字节</div>
+<p>因此评价 Paged 的系统价值不能只测单请求 kernel。还要构造不同长度 sequence 动态进入/离开的压力场景，报告峰值显存、已用页、最后页浪费、最大可服务并发、拒绝/OOM 次数。当前 Direct/Paged A/B 共用同一底层分配器，只能比较执行路径，不能从中推断容量或碎片优势。</p>
+
+<h3>4.7 多序列 KV 生命周期必须满足的守恒关系</h3>
+<ul>
+<li>每个 sequence 的逻辑块链独立，不能因 batch 合并而共享可写尾页。</li>
+<li>物理页的 <code>refcount</code>等于所有 Block Table 与 Prefix Index 对它的有效引用总数。</li>
+<li>完成或取消只释放该 sequence 持有的引用；共享 Prefix 仍被其他序列使用时不能回收。</li>
+<li>抢占后的 Swap/Recompute 状态必须保留恢复所需身份，不能同时把 sequence 标为 runnable。</li>
+<li>页回收发生在 GPU 最后一次读取完成之后；CPU 删除映射不代表设备已经停止访问。</li>
+</ul>
 
 <h2 id="cuda">5. CUDA 基础与 Remap 算子</h2>
 <div class="module-card"><div class="module-title">M3 · CUDA Remap / Swap：GPU 数据平面</div>
@@ -254,6 +303,27 @@ recompute cost ≈ cached_tokens × prefill_ms_per_token</div>
 <li>NSYS 可能改变时序，所以其 trace 不与主延迟表混合。</li>
 </ul>
 
+<h3>5.5 一个 GPU kernel 为什么会慢</h3>
+<p>不能看到耗时高就直接说“显存带宽瓶颈”。kernel 的时间可能受五类因素影响：</p>
+<ol>
+<li><strong>Launch-bound</strong>：工作量很小，固定启动与调度成本占主导；常见于 batch 小、张量小。</li>
+<li><strong>Memory-bound</strong>：搬运数据所需时间高于计算时间；需要 DRAM/L2 throughput 和 warp stall 等计数支持。</li>
+<li><strong>Compute-bound</strong>：算术指令或 Tensor Core 已接近计算上限；提高带宽未必有效。</li>
+<li><strong>Latency-bound</strong>：依赖链长或可运行 warp 太少，访存延迟无法被其他工作隐藏。</li>
+<li><strong>Synchronization-bound</strong>：CTA 内 barrier、跨 kernel merge 或 host/device sync 使并行工作等待。</li>
+</ol>
+<p><strong>Occupancy（占用率）</strong>是一个 SM 上实际驻留 warp 数相对硬件上限的比例；它受寄存器、shared memory 和线程数限制。占用率低可能无法隐藏延迟，但占用率高不等于 kernel 一定快。<strong>算术强度</strong>是每搬运一个 byte 完成多少运算；Roofline 用它判断理论上更可能受计算上限还是带宽上限约束。</p>
+
+<h3>5.6 从症状到证据的性能诊断顺序</h3>
+<div class="diagram">端到端回退
+→ 分解 queue / CPU plan / H2D-D2H / kernel / sync
+→ NSYS 定位时间线与空洞
+→ NCU 查看目标 kernel 的吞吐、stall、occupancy
+→ 检查 grid、shape、对齐和数据布局
+→ 提出一个可证伪修改
+→ 无 profiler 配对复测</div>
+<p>NSYS 回答“时间花在哪个阶段、kernel 是否并发、是否发生同步”；NCU 回答“某个 kernel 内部为什么慢”。代码静态分析只能产生假设，例如“GQA 重复读 K/V”；只有硬件计数或隔离实验才能把它升级为机制结论。</p>
+
 <h2 id="paged">6. Paged Decode Attention：模型侧算法与 CUDA 实现</h2>
 <div class="module-card"><div class="module-title">M4 · Paged Decode Attention：模型算子平面</div>
 <dl><dt>它接收什么？</dt><dd>当前 token 的 Query、分页 K/V、page table、context length、GQA 头映射和模型形状。</dd>
@@ -261,7 +331,7 @@ recompute cost ≈ cached_tokens × prefill_ms_per_token</div>
 <dt>它为什么存在？</dt><dd>Remap 后再算 Attention 要额外读写完整 KV；若 kernel 能直接查页表，理论上可省掉中间搬运和临时缓冲。</dd>
 <dt>原理是什么？</dt><dd>逐历史 token 计算缩放 Q·K；按 GQA 将多个 Query head 映射到 KV head；用 online softmax 单遍维护最大值、分母与加权和。</dd>
 <dt>对应基础知识</dt><dd>线性代数点积/矩阵乘；指数与 softmax；浮点溢出和数值稳定；Transformer causal attention；CUDA reduction。</dd>
-<dt>代码与证据</dt><dd><code>llama-kv-cache-paged.cu</code> 受限 K1 dispatch；FP32 oracle、跨页/碎片/边界测试和生产服务 A/B 决定它保持 evidence-gated。</dd></dl></div>
+<dt>代码与证据</dt><dd><code>ggml-cuda/fattn-paged.cuh</code>、<code>llama-context.cpp</code> 与 server Paged adapter；24 个 CPU/CUDA oracle、跨页/反序物理页/分区边界测试和 H10→H13 服务 A/B 决定它保持 evidence-gated。</dd></dl></div>
 <h3>6.1 它与 Remap 的根本差别</h3>
 <p>Remap 先把非连续 KV 搬到目标布局，再由普通 Attention 读取；Paged Decode Attention 让 Attention kernel 自己查询 page table，直接读取物理页。前者付出搬运成本但后续计算访问规则简单；后者省掉中间搬运，却在每个历史 token 上增加页表寻址，性能取决于上下文、布局和 KV 复用。</p>
 
@@ -291,6 +361,46 @@ final output = o / l</div>
 <p><strong>K2-T2</strong> 中的 T2 表示一个 CUDA thread block（CTA）包含两个 warp，每个 warp 负责一个 query head。Qwen2.5-0.5B 有 14 个 query heads、2 个 KV heads，即每 7 个 query heads 共用一个 KV head。K1 为每个 query head 单独装载 K/V，所以每 KV head 要装载 7 次；K2 每个 CTA 让两个 query heads 复用一次 shared-memory staging，因而分成 4 个 tile、装载 4 次。K 采用按维度转置的 shared-memory 布局，softmax 的 max 与 sum 使用 warp shuffle 归约；这减少的是代码层可确认的重复装载和同步，不能在缺少 NCU counter 时写成“已测得 DRAM bytes 或 bank conflict 降低”。</p>
 <p>正式 v2.10 在同一长驻服务进程内按固定随机种子运行 30 组 K1/K2 配对。每 arm 清空 slot，完成 1 次完整 prompt、4 次 cached warm request，再记录 16 次 context17 cached one-token 请求。每 variant 的 480 个测量响应逐字一致，并累计 600 次请求级 Paged graph entry、0 fallback；请求级 median 为 6.900/6.938 ms（K2 回退 0.55%，配对簇 bootstrap 回退 95% 上界 2.86%），P95 为 30.102/30.559 ms（回退 1.52%）；PID 隔离 NSYS 中相同 480 次目标 kernel 总时长从 8.174 ms 降至 4.051 ms（-50.44%）。它通过的是“median 回退 95% 上界与 P95 点估计回退均不超过 5%，且 kernel 至少降低 20%”的 K2-over-K1 替换门槛，不代表 Paged-over-Direct 已通过，也不代表端到端普适加速。</p>
 <p>如果面试官追问实验迭代：v2.5 的 kernel 虽下降 47.0%，客户端 median 仍回退 20.8%，因为单次微秒级算子差异会被 HTTP/调度噪声淹没；v2.7 又因 host gate 只允许 context17 进入 K2 而被判无效。扩展并重新做 CPU oracle 后，CUDA graph node trace 证明每个 cached 请求只有一次 Paged 动作，不能把一个八 token 请求说成八次 K2 干预。最终保持门槛不变，在同一 context17 用户场景中每 arm 重复 16 次真实请求，以 480 条原始请求/variant 估计请求级分布，并用 pair-cluster bootstrap 保留配对结构。v2.4 的预注册时间晚于结果，只算无效而非预注册失败；全部失败、无效和中止实验均留档，避免结果导向删数。</p>
+
+<h3>6.6 K3/K4：长上下文为什么必须改变执行结构</h3>
+<p>旧 K2 在 512–2048 token 的 H10 中相对 Direct 中位回退 <strong>+50.35%</strong>。根因不是 Prompt 文本本身，而是执行结构：每个 CTA 只覆盖两个 Query Head，真实 GQA7 中同一 KV Head 的 K/V 仍被分四次加载；QK/PV 计算较标量化；固定 partition 又产生多余 CTA、scratch 写回和 merge 成本。</p>
+<p><strong>K3</strong>先用 <code>half2</code> 把两个 FP16 元素作为一个向量访问，减少标量访存和指令。<strong>K4</strong>进一步按真实模型几何重排：一个 256-thread CTA 包含 8 个 warp，其中 7 个 warp 分别负责同一 GQA 组的 7 个 Query Head，第 8 个 warp 协助 K/V 搬运；整组只加载一次 K/V。设备读取真实 context 后，短一些的序列使用 64-token partition，长一些的使用 128-token partition；host 不同步，CUDA Graph 不因每次长度变化而重建。</p>
+<div class="diagram">旧 K2：1 CTA = 2 query heads；每 KV head 约加载 4 次
+K4：    1 CTA = 完整 7-query-head GQA group；每 KV head 加载 1 次
+grid：  KV-head group × effective partition（当前生产能力仍是单 sequence）</div>
+<p>24 个 production CPU/CUDA oracle case 覆盖 1、页边界、tile 边界、partition 边界直到 2048 token，多页时反转物理页序，全部通过。H13 使用 18 个来源绑定真实文档 Prompt、12 个严格平衡进程块、432 个 workload-arm 单元和 3456 个测量请求，把主中位回退降至 <strong>+3.98%</strong>，95% CI 为 <strong>[+2.50%, +5.38%]</strong>。这证明重构显著缩小差距；但 CI 上界仍高于 +5% 门，所以不能说 Paged 已严格占优。</p>
+
+<h3>6.7 为什么 batch=1 只是正确性下界，不是完整架构</h3>
+<p>用单 sequence 首先验证页表、GQA、causal mask 和 online softmax是合理的；错误在于若算子接口本身只有一个 <code>page_table</code> 和一个 <code>context_length</code>，batch=1 就不再是测试条件，而变成架构限制。通用多序列 Paged Decode 应把 batch=1 设计为下式在 <code>N=1</code> 时的退化情况：</p>
+<div class="diagram">grid = sequence × KV-head-group × partition
+
+per-sequence metadata:
+page_table_offsets[N]   page_counts[N]   context_lengths[N]
+query_offsets[N]        output_offsets[N] partition_offsets[N]</div>
+<p>混合长度 batch 中，每条 sequence 的有效 partition 数不同；merge 只能读取自己的 partial state。完成或取消的 sequence 下一轮可以离开 batch，但它的页只有在最后一个 GPU reader 完成后才能回收。CUDA Graph key 还必须表达 topology/capacity，或使用固定容量图加设备侧有效 mask，避免把旧 batch 的地址和形状错误复用。</p>
+<div class="callout danger"><strong>当前证据边界：</strong>项目的 Scheduler 是多 sequence iteration plan，但生产 K4 operator 仍是单 sequence、单 query token。不能用控制面的 continuous batching 能力替代算子层的 batch=2/4/8/16 正确性和性能证据。</div>
+
+<h3>6.8 大 batch 下 Paged 为什么可能更有利，也可能仍不赢</h3>
+<p>batch 增大会产生三种潜在收益：更多 CTA 填满 SM，使访存延迟更容易被其他 warp 隐藏；页表与 launch 固定开销被更多 sequence 摊薄；不同长度 sequence 的分页分配开始体现容量与碎片价值。但 Direct 同样会因 batch 增大提高 GPU 利用率，因此“batch 大”不是 Paged 必胜条件。</p>
+<p>应采用二维以上矩阵，而不是只测一个 batch：</p>
+<table><thead><tr><th>维度</th><th>建议取值</th><th>为什么</th></tr></thead><tbody>
+<tr><td>active sequences</td><td>1/2/4/8/16</td><td>观察占用率、吞吐与排队拐点</td></tr>
+<tr><td>context</td><td>128/512/1024/2048，且混合长度</td><td>区分页寻址固定成本与长序列工作量</td></tr>
+<tr><td>布局</td><td>连续页/随机非连续页/碎片压力</td><td>区分 arithmetic 差异与分页管理价值</td></tr>
+<tr><td>到达模式</td><td>静态批/动态到达/取消与完成</td><td>验证 continuous batching 和页回收</td></tr>
+</tbody></table>
+<p>报告必须同时给出吞吐、TTFT、TPOT、P50/P95、峰值显存、内部/外部碎片、最大并发和 OOM/拒绝率。若只报告 kernel time，就没有覆盖 Paged Attention 的系统价值。</p>
+
+<h3>6.9 怎样与 upstream 做严格公平对比</h3>
+<p><strong>Upstream baseline</strong>是未经本项目修改、固定 revision 构建出的 llama.cpp 可执行文件。它与“当前 fork 中选择 Direct action”不是同一概念：后者适合隔离 Paged kernel 差异，前者才能回答整个 fork 是否优于原仓库。</p>
+<ol>
+<li>固定 upstream revision、编译器、CUDA、编译选项、模型哈希、GPU 功耗状态与服务参数。</li>
+<li>分别构建纯 upstream 与当前 fork，记录二进制 SHA-256；不能让两臂加载不同模型或 tokenizer。</li>
+<li>使用同一冻结 workload、相同请求顺序和相同 warm-up；独立进程时平衡先后顺序。</li>
+<li>分别比较功能等价输出、请求指标和资源指标；不能把 fork 多出的缓存命中与 upstream 冷请求混在一起。</li>
+<li>报告点估计、置信区间、P95 和最差 workload；严格占优要求预先定义所有必须通过的门，而不是跑完后挑指标。</li>
+</ol>
+<p>当前 H13 是同一 fork 内 Direct/Paged 的受控比较，尚不是纯 upstream executable 对照；这不影响它定位 K4 算子差距，但限制了“整个项目超过 upstream”的结论。</p>
 
 <h2 id="policy">7. 从固定规则到统一动作成本模型</h2>
 <div class="module-card"><div class="module-title">M5 · Action / Benefit Policy：在线决策平面</div>
@@ -354,6 +464,9 @@ final output = o / l</div>
 <tr><td>Remap 机制</td><td>方法隔离 NSYS</td><td>scalar/vector 每 regime 均 10/10 launches</td><td>收益不是减少 launch 数，而是单次访问/指令路径。</td></tr>
 <tr><td>Paged H3</td><td>9 regimes ×20 pairs×2 methods=360</td><td>oracle max error 3.6e-8；17-token +22.87% 但区间 [0,47.08]；中长 context 10.41%–13.05% slower</td><td>K1 数学正确；短跨页有信号，K2 GQA reuse 是下一优化方向。</td></tr>
 <tr><td>Paged production H7</td><td>10 AB/BA，17-token 跨页</td><td>10 graph entries、0 fallback、24 NSYS layer launches；Direct/Paged P95 27.354/29.210 ms</td><td>真实生产接入和正确性成立；promotion gate 正常阻止未达阈值路径成为默认。</td></tr>
+<tr><td>K2-over-K1 H8</td><td>30 个同进程 pair；每 variant 480 个测量响应</td><td>目标 kernel 总时长 8.174→4.051 ms（-50.44%）；请求 median/P95 回退 +0.55%/+1.52%</td><td>短 context 的 K2 可替换 K1；kernel 收益不能外推为 Paged 优于 Direct。</td></tr>
+<tr><td>旧 K2 长上下文 H10</td><td>18 workloads×10 匹配进程块×2 arms；1440 个请求</td><td>512–2048 token 中位回退 +50.35%，95% CI [+49.19%,+51.19%]</td><td>形成标量 QK/PV、GQA 重复加载和固定 partition 的根因基线。</td></tr>
+<tr><td>K4 长上下文 H13</td><td>18 workloads×12 个严格平衡进程块×2 arms；3456 个请求</td><td>中位回退降至 +3.98%，95% CI [+2.50%,+5.38%]；P95 +13.34%</td><td>K4 将回退幅度降低约 92%，但 CI 上界未过 +5% 门，Paged 仍为 opt-in。</td></tr>
 <tr><td>统一动作 H4 / D3</td><td>120 traces：60 fit + 20 calibration + 40 evaluation；600 raw observations</td><td>H0 累计 regret 42.590 ms，D3 2.082 ms，下降 95.1%；D3 切换 24/80，harmful 1 次</td><td>固定 matched-workload replay 支持“通过离线风险晋级门的策略更会少犯代价大的错”；action 与独立进程绑定，尚不是线上因果证明。</td></tr>
 <tr><td>chooser overhead</td><td>5 regimes、500 万 choose</td><td>P99 1 μs，ratio P99 0.0644%，0 allocation</td><td>决策模块满足热路径预算。</td></tr>
 <tr><td>短期 Benefit</td><td>8 backend×mode treatments，16 trials，两套 Williams block</td><td>CPU/CUDA oracle regret 5.04%/10.52%；P99 最坏 2/5 μs</td><td>控制器在 50 μs 预算内保守选择。</td></tr>
@@ -396,10 +509,10 @@ final output = o / l</div>
 <div class="qa"><strong>Q4：COW 的并发 bug 最可能在哪？</strong><p>新块复制完成前就发布映射，或 refcount 更新与映射提交不是同一事务。解决方式是 shadow plan、同 stream/event 依赖和 commit 后再释放旧引用。</p></div>
 <div class="qa"><strong>Q5：为什么 Remap 需要 staging？</strong><p>源和目标块可能重叠。若直接并行写，某线程可能覆盖另一线程稍后要读的源数据。先 Gather 到独立 snapshot，再 Scatter，相当于保证 memmove 语义。</p></div>
 <div class="qa"><strong>Q6：128-bit 就一定快吗？</strong><p>不一定。需要 16-byte alignment、足够连续元素和合适规模。小 aligned case 减少指令明显；错位时退回 8-lane 标量循环，组织开销反而更高。因此 alignment 是 gate，数据也保留该反例。</p></div>
-<div class="qa"><strong>Q7：Paged kernel 为什么一个 CTA 对应一个 Query head？</strong><p>实现简单：D 个线程直接并行做一个 head 的点积和 V 累积，shared memory 完成规约，易于验证。它是 K1 基线；GQA 下多个 Query head 会重复读取同一 KV head，因此 K2 可让同组 Query heads 复用 K/V，减少重复 global load。</p></div>
+<div class="qa"><strong>Q7：Paged kernel 为什么最初一个 CTA 对应一个 Query head，后来又改掉？</strong><p>K1 让 D 个线程直接并行一个 head 的点积和 V 累积，结构简单，适合作为正确性基线；但 GQA7 下七个 Query Head 共用一个 KV Head，K1 会重复读七次 K/V。K2 只把重复次数降到约四次；K4 才用一个 256-thread CTA 覆盖完整 GQA 组，让七个计算 warp 共享一次 K/V 加载。最小正确性映射适合验证，不等于最终性能结构。</p></div>
 <div class="qa"><strong>Q8：online softmax 与普通 softmax 等价吗？</strong><p>代数上等价。每次最大值变大时，用 α=exp(old_max-new_max) 同步缩放旧分母与旧加权和，再加入新项 β。最终 o/l 就是对全部 score 做稳定 softmax 后的加权 V。</p></div>
-<div class="qa"><strong>Q9：为什么 Paged 已接生产却不默认选？</strong><p>生产接入证明路径、正确性和失败回退；默认 promotion 还要求性能门。17-token 跨页 P95 比 Direct 高 6.78%，超过预注册 5% 上限，所以 gate 让它保持 opt-in。这展示的是发布纪律：功能验收和性能晋级分开。</p></div>
-<div class="qa"><strong>Q10：下一步如何优化 Paged？</strong><p>优先 K2 GQA reuse：真实模型 14Q/2KV，7 个 Query head 共用一个 KV head；K1 为每个 Query head 重读相同 K/V。可将一组 Query heads 放在协作 CTA/warp 结构中共享加载。之后再由 NSYS/NCU 数据决定是否需要 split-KV；不会先假定长 context 必须 split-K。</p></div>
+<div class="qa"><strong>Q9：为什么 Paged 已接生产却不默认选？</strong><p>生产接入和 24 个 oracle case 证明路径与正确性；默认 promotion 还要求性能和尾部风险门。K4/H13 已把旧 K2 的长上下文中位回退从 50.35% 降至 3.98%，但 95% CI 上界 5.38% 仍超过预注册 +5%，P95 回退也有 13.34%，所以保持 opt-in。功能完成、算法改善和生产晋级是三个不同结论。</p></div>
+<div class="qa"><strong>Q10：下一步如何优化 Paged？</strong><p>不再优先调 tile 常数，因为 H14 已否证 64-token tile。算子侧应复用 upstream vector attention 的成熟 QK/PV 主体，只把连续 K/V 地址生成抽象为 page-indirect accessor；系统侧应把接口扩展为 sequence-aware，并测试 batch 1/2/4/8/16、mixed length、动态加入/取消、峰值显存和碎片。只有这样才能同时评价执行成本和 Paged 的容量收益。</p></div>
 <div class="qa"><strong>Q11：Ridge 为什么比神经网络合适？</strong><p>特征只有九维、反馈少且在线决策要求微秒级、零分配和可解释回退。Ridge 的计算和状态固定，能增量更新并给出与 A⁻¹ 相关的不确定性。神经网络在当前数据规模会增加训练、校准和部署复杂度，收益没有证据。</p></div>
 <div class="qa"><strong>Q12：为什么按动作分别建模？</strong><p>不同动作的成本生成机制不同：Remap 更依赖 bytes/fragmentation，Recompute 更依赖 cached tokens/prefill cost，Swap 更依赖带宽和固定 I/O。一个共享线性模型容易把不同斜率混在一起。</p></div>
 <div class="qa"><strong>Q13：置信下界如何防止误切换？</strong><p>对成本最小化，可比较基线的保守低成本与候选的保守高成本，或等价比较收益的 lower bound。只有考虑 prediction radius 和 margin 后仍明确更优才启用；否则 uncertainty fallback。它不是形式化零风险证明，而是工程保守门控。</p></div>
@@ -483,13 +596,14 @@ kv_index=(((2×16+0)×2+1)×64+dim)</div>
 <h3>11.8 online softmax 手算</h3>
 <p>假设两个 score 为 2 和 3，Value 标量为 10 和 20。第一项后 <code>m=2,l=1,o=10</code>。第二项到来：<code>m'=3</code>，<code>α=e^(2-3)=e^-1</code>，<code>β=1</code>，所以 <code>l'=e^-1+1</code>，<code>o'=10e^-1+20</code>，输出 <code>o'/l'</code>。这与普通 softmax 的 <code>(10e²+20e³)/(e²+e³)</code> 同时除以 <code>e³</code> 完全相同。</p>
 
-<h3>11.9 K1、K2、K3 的研究路线</h3>
+<h3>11.9 K1、K2、K3、K4 的研究路线</h3>
 <ul>
 <li><strong>K1 one-CTA/query-head：</strong>简单、正确性易验证，是可解释 baseline。</li>
-<li><strong>K2 GQA reuse：</strong>同一 KV head 服务多个 Query head 时，协同加载 K/V，降低重复读取；对应真实 GQA ratio 7。</li>
-<li><strong>K3 split-KV：</strong>把超长 context 切给多个 CTA，再合并 partial softmax state；增加并行度，也增加合并与 launch 成本。</li>
+<li><strong>K2 two-query-head tile：</strong>两个 warp 协同加载 K/V，把 GQA7 的每 KV Head 重复装载从 7 次降到约 4 次；在 context17 内部替换 K1。</li>
+<li><strong>K3 half2 vectorization：</strong>以两个 FP16 为一组访问并保留 partition/merge，为整组 GQA 映射准备向量路径。</li>
+<li><strong>K4 full-GQA CTA：</strong>一个 256-thread CTA 覆盖 7 个 Query Head，整组加载一次 K/V，并按 context 设备侧选择 partition；H13 把旧 K2 回退从 50.35% 降至 3.98%。</li>
 </ul>
-<p>选择顺序由数据决定：长 context 下 batch 1 与 batch 4 的回退差仅 0.84/1.18 个百分点，没有满足预注册 split-K 触发条件；而 GQA 重复读取是结构上明确存在的，因此下一假设是 K2。</p>
+<p>选择顺序由数据决定：短 context 的 K2 kernel 时间下降 50.44%，但 H10 暴露其长上下文执行结构仍不合理，于是 K4 按真实 GQA7 几何重构，而不是继续扩大二-head tile。H14 又验证 64-token tile 没有改善并被回退。这条路线展示“先由结构和数据提出假设，再保留失败实验”，不是把 K1、K2、K3、K4 当作数字越大越先进。</p>
 
 <h3>11.10 Ridge 的一个两特征例子</h3>
 <p>为便于手算，假设只用 <code>x=[1, KV_MB]</code>，观察 Remap 1 MB 用 0.1 ms、2 MB 用 0.15 ms。普通线性拟合试图得到固定成本与每 MB 成本；Ridge 在样本少时把两个系数向 0 收缩，避免仅凭两个点学出极端斜率。真实项目九维特征先归一化，否则 <code>kv_bytes</code> 以百万计、<code>reuse_probability</code> 在 0–1，会导致数值尺度失衡和正则作用不均。</p>
@@ -526,7 +640,7 @@ kv_index=(((2×16+0)×2+1)×64+dim)</div>
 <p>回答任何 bullet 都按四元组：<strong>代码对象—核心不变式—实验规模—关键数字</strong>。例如：</p>
 <ul>
 <li>Remap：<code>llama-kv-cache*</code>/CUDA descriptor → overlap 保持 snapshot 语义 → 160 no-profiler rows + 4 traces → aligned-1 +57.10%。</li>
-<li>Paged：<code>llama-paged-decode-cuda.cu</code> → page/table/context 在 mutation 前校验 → 360 micro observations + 10 production pairs → oracle error 3.6e-8、10 entry/0 fallback。</li>
+<li>Paged：<code>ggml-cuda/fattn-paged.cuh</code> → page/table/context 在 mutation 前校验、K4 整组 GQA7 复用 → 24 个 1–2048 token oracle + H13 的 3456 个请求 → 回退 50.35%→3.98%，但 CI 上界 5.38% 未晋级。</li>
 <li>Action policy：<code>server-kv-action-policy.*</code> → infeasible action 永不参与排序、D3 用成本差上界与 margin 选择并接受整批离线风险门禁 → 600 raw observations + 5M choose → H0/D3 regret 42.590/2.082 ms，choose P99 1 μs、0 allocation。</li>
 <li>Benefit policy：<code>server-benefit-policy.*</code> → 低置信 fail closed、backend 状态隔离 → 16 trials/8 treatments → regret 5.04%/10.52%、P99 2/5 μs。</li>
 </ul>
@@ -554,13 +668,159 @@ kv_index=(((2×16+0)×2+1)×64+dim)</div>
 <p>“harmful rate”必须带分母：实际观测按全部 eligible decisions 是 1/80=1.25%，按实际 switches 是 1/24=4.17%。材料中的 5% 是实验前注册的<strong>晋级阈值</strong>，不是第三种观测比例，也不是总体 harmful rate 的 95% 置信上界。matched-workload 的 trace-cluster mean-regret delta 95% CI 为 [−0.7232, −0.3069] ms；区间对象是按 trace 成组重采样的平均 regret 差，而不是单次请求延迟，更不是线上人口效应。</p>
 <div class="callout danger"><strong>证据边界：</strong>四个动作的成本来自独立 fixed-mode 进程，动作与进程身份绑定，因此可能存在 action×process 混杂。D3 结果足以支持进入“同进程 monitored canary”，但不能写成生产因果提速、线上 A/B 或已满足 Trial Pair。下一步是在同一长驻进程内随机或交替执行动作，记录每次策略版本、状态、选择概率和端到端结果。</div>
 
+<h2 id="infra-core">11A. AI Infra 通用八股：不依赖本项目也要会</h2>
+<p>这里的 <strong>AI Infra（人工智能基础设施）</strong>不是“用了 GPU”或“部署了一个模型接口”，而是让模型在给定硬件和服务目标下稳定、经济、可观测地训练或推理的一整套系统。推理方向通常横跨模型计算图、算子、显存管理、调度、分布式通信和在线服务。下面的问题即使面试官不问 CacheFlow，也应能独立回答。</p>
+
+<h3>11A.1 一次大模型在线推理分成哪些阶段</h3>
+<ol>
+<li><strong>接入与排队：</strong>鉴权、限流、路由、排队和取消传播。这里决定 queue time。</li>
+<li><strong>Tokenization：</strong>把文本转换成 token ID；token 数而非字符数决定模型工作量。</li>
+<li><strong>Prefill：</strong>一次处理 Prompt 中的大量 token，计算并保存每层 KV。矩阵较大，通常更容易发挥 GPU 计算并行。</li>
+<li><strong>Decode：</strong>每轮产生一个或少量新 token，同时读取全部历史 KV。单轮矩阵较窄，常更受 KV 读取、launch 和调度影响。</li>
+<li><strong>Sampling：</strong>模型先输出每个候选 token 的未归一化分数 <code>logits</code>；温度控制分布尖锐程度，Top-k 只保留分数最高的 k 项，Top-p 保留累计概率达到阈值的最小候选集合，最后从处理后的概率中选择下一个 token。</li>
+<li><strong>流式返回：</strong>把 token 逐步发送给用户，同时处理断开、取消和错误。</li>
+</ol>
+<p><strong>TTFT</strong>主要受排队和 Prefill 影响；<strong>TPOT</strong>主要受连续 Decode 轮次影响；<strong>吞吐</strong>取决于单位时间内全系统处理的 token 数。优化 Prefill 不一定改善 TPOT，提升吞吐也可能以排队和尾延迟为代价。</p>
+
+<h3>11A.2 为什么 Prefill 更像计算密集，Decode 更像访存密集</h3>
+<p>Prefill 同时处理许多 token，权重可以被一个较大的矩阵乘复用，矩阵乘的算术强度较高。Decode 每轮常只有一个新 token，仍需读取模型权重和整段历史 KV，但能复用这些数据的并行工作较少，因此矩阵更“瘦”，固定开销和内存流量占比更高。这只是常见趋势，不是无需测量的定律；模型大小、batch、量化、算子融合和硬件都会改变瓶颈。</p>
+<div class="quiz"><strong>常见追问：</strong>为什么扩大 Decode batch 往往提高吞吐？<details><summary>答案</summary>多个 sequence 可共享一次模型权重读取并提供更多并行 CTA，使瘦矩阵变宽、GPU 更饱和；代价是排队、KV 显存和单请求尾延迟可能增加。</details></div>
+
+<h3>11A.3 静态 batching、continuous batching 与 chunked prefill</h3>
+<p><strong>静态 batching</strong>先凑齐一组请求，整组完成后再换成员；实现简单，但短请求会被长请求拖住。<strong>Continuous batching</strong>在每个推理迭代重新选择成员，完成的 sequence 可立即离开，新请求可加入。<strong>Chunked prefill</strong>把长 Prompt 拆成多个 chunk，使它们与 Decode 交错，避免一个超长 Prefill 长时间阻塞在线用户。</p>
+<table><thead><tr><th>策略</th><th>优势</th><th>主要代价</th></tr></thead><tbody>
+<tr><td>静态 batch</td><td>实现和图形状简单</td><td>Head-of-line blocking，利用率受最长请求限制</td></tr>
+<tr><td>Continuous batch</td><td>成员动态变化，吞吐和响应性更好</td><td>KV 生命周期、调度和 CUDA Graph 更复杂</td></tr>
+<tr><td>Chunked prefill</td><td>降低长 Prompt 对 Decode 的阻塞</td><td>更多迭代/launch，chunk 太小会损失 Prefill 效率</td></tr>
+</tbody></table>
+<p><strong>Head-of-line blocking（队头阻塞）</strong>指队列前面的慢任务阻止后面的快任务，即使后者本可立即完成。调度器常需要在 Decode 优先、Prefill 吞吐、deadline、公平和显存之间权衡。</p>
+
+<h3>11A.4 KV Cache 为什么是服务系统的核心状态</h3>
+<p>自回归 Decode 若不保存历史 K/V，每生成一个 token 都要重新计算全部历史；KV Cache 用显存换计算。它的容量随层数、KV Head 数、Head Dimension、数据类型字节数、上下文长度和活跃 sequence 数近似线性增长。GQA/MQA 通过让多个 Query Head 共享较少 KV Head，主要减少 KV 容量和读取量，而不是减少 Query Head 数。</p>
+<p>常见优化包括：</p>
+<ul>
+<li><strong>Paged KV：</strong>用固定页和 Block Table 管理非连续物理内存。</li>
+<li><strong>Prefix caching：</strong>复用相同 Prompt 前缀已经计算好的 KV。</li>
+<li><strong>KV quantization：</strong>用更低位宽保存 K/V，降低容量和带宽，但需控制精度损失与反量化成本。</li>
+<li><strong>Offload/Swap：</strong>把冷 KV 移到 CPU 或其他设备，以传输延迟换 GPU 容量。</li>
+<li><strong>Evict/Recompute：</strong>丢弃低价值 KV，需要时重新 Prefill。</li>
+</ul>
+<p>面试回答不能只说“PagedAttention 节省显存”，还应说明它将逻辑连续与物理连续解耦，主要缓解外部碎片和过度预留，同时引入页表、间接寻址和更复杂生命周期。</p>
+
+<h3>11A.5 模型并行：DP、TP、PP、EP 分别是什么</h3>
+<p><strong>Data Parallelism（DP，数据并行）</strong>让多张卡各保存完整模型，分别处理不同请求；推理中扩展吞吐直接，但单个模型必须能放入一张卡。<strong>Tensor Parallelism（TP，张量并行）</strong>把同一层的矩阵沿维度拆到多卡，每层都需要 All-Reduce/All-Gather 等通信；能容纳更大模型，但 Decode 的频繁小通信可能昂贵。<strong>Pipeline Parallelism（PP，流水线并行）</strong>把不同层放到不同设备，让 micro-batch 像流水线一样经过各阶段；会产生 pipeline bubble。<strong>Expert Parallelism（EP，专家并行）</strong>用于 MoE（Mixture of Experts，混合专家模型：每个 token 只激活一部分子网络），将不同专家放在不同设备，请求 token 经路由后发生 All-to-All 通信。</p>
+<table><thead><tr><th>方式</th><th>拆什么</th><th>主要通信/问题</th></tr></thead><tbody>
+<tr><td>DP</td><td>请求</td><td>负载均衡、实例间缓存不共享</td></tr>
+<tr><td>TP</td><td>单层张量</td><td>每层 collective，受延迟和带宽影响</td></tr>
+<tr><td>PP</td><td>模型层</td><td>阶段不平衡与 pipeline bubble</td></tr>
+<tr><td>EP</td><td>MoE 专家</td><td>路由不均衡与 All-to-All</td></tr>
+</tbody></table>
+<p><strong>Collective communication（集合通信）</strong>是多设备共同参与的数据交换。All-Reduce 汇总各卡数据并把结果发回所有卡；All-Gather 收集各卡分片；Reduce-Scatter 先归约再分片；All-to-All 让每张卡分别向所有其他卡发送不同分片。选择并行策略必须结合模型是否装得下、互联带宽、batch、延迟目标和容错成本。</p>
+
+<h3>11A.6 量化到底优化了什么</h3>
+<p><strong>量化</strong>用更少 bit 表示权重、激活或 KV，例如 FP16、INT8、INT4。它可能降低模型容量和显存带宽，也可能让 Tensor Core（GPU 中专门加速小矩阵乘加的硬件单元）使用更高吞吐的数据类型；但必须保存 <strong>scale</strong>（把整数映回实数的缩放系数）和可选 <strong>zero-point</strong>（实数零对应的整数位置），并付出量化/反量化指令与精度风险。</p>
+<ul>
+<li><strong>Weight-only quantization：</strong>主要压缩权重；计算前按块反量化，适合 Decode 中权重带宽占比较高的场景。</li>
+<li><strong>Weight-activation quantization：</strong>权重和激活都降低位宽，可获得更高计算吞吐，但校准和异常值处理更难。</li>
+<li><strong>KV quantization：</strong>直接减少随上下文增长的 KV 容量和读取量，但误差会影响每一轮 Attention。</li>
+</ul>
+<p><strong>Calibration（校准）</strong>是用代表性数据确定量化尺度或裁剪范围；数据分布不代表线上请求时，离群激活可能导致明显误差。评价量化至少同时看模型质量、TTFT、TPOT、吞吐、峰值显存和支持的最大上下文。</p>
+
+<h3>11A.7 FlashAttention、PagedAttention 与算子融合的区别</h3>
+<p><strong>FlashAttention</strong>主要通过分块和在线 softmax，减少 Attention 中间矩阵在高带宽显存中的读写，属于计算/IO 算法优化。<strong>PagedAttention</strong>主要解决 KV 的分页布局和非连续访问，属于内存管理与 Attention 地址访问结合。二者可以组合：分页决定 K/V 从哪里读，Flash 风格算法决定如何分块计算而不物化完整 score 矩阵。</p>
+<p><strong>Kernel fusion（算子融合）</strong>把原本多个 kernel 的中间结果留在寄存器/shared memory 中，减少 launch 与显存往返。例如把 bias、activation、residual 合并。但融合过度会增加寄存器和 shared memory 使用，降低 occupancy，或让编译形状过于专用。</p>
+
+<h3>11A.8 Speculative decoding 为什么可能加速</h3>
+<p><strong>Speculative decoding（推测解码）</strong>先用更便宜的 draft 方法提出多个候选 token，再由目标模型一次验证。只要接受/拒绝规则正确，输出分布可以与目标模型保持一致。它减少的是目标模型串行 Decode 轮数，不一定减少目标模型每次验证的计算量。</p>
+<div class="diagram">期望收益取决于：一次提出 token 数 × 接受率 × 验证并行效率
+总成本还包括：draft 成本 + verify 成本 + rejection 后的浪费</div>
+<p>接受率低、draft 太慢或 batch 调度不匹配时可能负优化。常见实现有小模型 draft、N-gram/Prompt lookup 和多分支 tree speculation。评价时要报告接受长度、接受率、目标模型调用次数、TPOT 和尾延迟，不能只报告 draft 命中率。</p>
+
+<h3>11A.9 CUDA Graph、算子编译与动态形状</h3>
+<p><strong>CUDA Graph</strong>把一串重复 kernel/memcpy 调用捕获为可复用图，降低每轮 CPU launch 开销。难点是地址、shape、batch 成员和 workspace 可能动态变化。常见办法是按容量/拓扑建立多个 graph bucket，或捕获最大容量图并用设备侧有效长度屏蔽无效工作。</p>
+<p>Graph key 不完整会复用错误图；key 太细又会产生大量图、占用内存并频繁重捕获。生产系统通常在“动态灵活性”和“低启动开销”之间分桶。类似地，<strong>JIT（Just-In-Time，即运行时即时编译）</strong>和 <strong>shape specialization（针对固定张量形状生成专用代码）</strong>可让编译器消除部分动态判断，但会带来首次编译延迟和编译缓存管理。</p>
+
+<h3>11A.10 AI 推理服务的可靠性八股</h3>
+<ul>
+<li><strong>Backpressure：</strong>容量不足时拒绝或延迟接入，防止队列无限增长。</li>
+<li><strong>Timeout/Deadline：</strong>请求超过价值窗口后停止占用 GPU；取消必须传播到 scheduler 和模型流。</li>
+<li><strong>Load shedding：</strong>过载时主动丢弃低优先级工作，以保护核心 SLO。</li>
+<li><strong>Fail closed：</strong>候选优化证据不足或能力不匹配时回到安全基线。</li>
+<li><strong>Idempotency：</strong>重试同一请求不会重复提交不可撤销副作用；流式生成通常需要请求 ID 与状态记录。</li>
+<li><strong>Isolation：</strong>租户的配额、缓存键和指标不能串扰；模型版本变化后旧 KV 不能直接复用。</li>
+<li><strong>Graceful degradation：</strong>GPU/Swap/候选 kernel 失败时选择较慢但正确的路径，而不是返回静默错误。</li>
+</ul>
+
+<h3>11A.11 容量规划与必须会算的三个关系</h3>
+<div class="diagram">Little 定律：平均并发 L = 到达率 λ × 平均停留时间 W
+
+利用率接近 100% 时，排队延迟通常会非线性上升；
+所以生产容量不能只按峰值算力恰好打满。
+
+可容纳 sequence 数 ≈ 可用于KV的显存 / 平均每sequence KV字节
+实际还要扣除权重、workspace、graph、碎片和安全余量。</div>
+<p>Little 定律连接吞吐和并发：若系统每秒完成 10 个请求、平均每个请求停留 2 秒，则系统内平均约有 20 个请求。它不要求特定到达分布，但要求观察窗口内系统相对稳定。容量规划还要使用真实长度分布和 P95/P99，而不是只用平均 Prompt。</p>
+
+<h3>11A.12 通用 AI Infra 高频快问快答</h3>
+<div class="qa"><strong>Q：吞吐和延迟为什么常冲突？</strong><p>等待更多请求组成大 batch 能提高权重复用和 GPU 利用率，却增加排队时间；服务需要在吞吐收益与 TTFT/TPOT SLO 之间选择 batch 上限和等待窗口。</p></div>
+<div class="qa"><strong>Q：为什么 Decode 常比 Prefill 更难把 GPU 跑满？</strong><p>每条 sequence 每轮只有少量新 token，矩阵较窄、串行轮次多，权重/KV 读取与 launch 成本难以摊薄；扩大 active sequence batch 可以改善，但会增加 KV 容量和调度复杂度。</p></div>
+<div class="qa"><strong>Q：为什么不能用 GPU utilization 一个指标判断优化？</strong><p>利用率通常只表示一段时间 GPU 有工作，不说明 Tensor Core、带宽或有效吞吐是否高；无效 kernel、忙等或更长执行也能提高利用率。应结合 tokens/s、延迟、功耗和硬件计数。</p></div>
+<div class="qa"><strong>Q：什么时候选 TP，什么时候选 DP？</strong><p>模型能放入单卡且目标是扩吞吐时优先 DP；模型放不下或单请求计算需要多卡时使用 TP/PP。TP 引入每层通信，对低 batch Decode 尤其敏感。</p></div>
+<div class="qa"><strong>Q：PagedAttention 与操作系统虚拟内存完全一样吗？</strong><p>不完全一样。二者都用逻辑到物理映射，但 GPU PagedAttention 的页通常由用户态运行时显式管理，没有普通 CPU 缺页异常、磁盘透明换页和硬件 TLB 的完整语义。</p></div>
+<div class="qa"><strong>Q：如何证明一次优化可上线？</strong><p>先证明输出/质量等价和失败回退，再在代表性负载下比较端到端指标与资源指标，预注册尾部和最差场景门槛，最后通过 canary（先只让极少量真实流量进入候选版本的灰度验证）观察真实表现；microbenchmark 只能证明局部机制。</p></div>
+
+<h3>11A.13 Prefill/Decode 分离与分布式服务</h3>
+<p><strong>Prefill-Decode disaggregation（Prefill/Decode 分离）</strong>把计算形态不同的两个阶段放到不同实例池：Prefill 池偏向高计算吞吐，Decode 池偏向低延迟和高内存带宽。Prefill 完成后必须把 KV 传给 Decode worker，因此收益取决于调度改善能否覆盖 KV 传输、排队和失败恢复成本。</p>
+<div class="diagram">请求 → Prefill worker → KV transfer → Decode worker → token stream
+                    ↑ 路由必须知道容量、模型版本和缓存位置</div>
+<p><strong>PCIe</strong>是主机与 GPU/设备常用互联；<strong>NVLink</strong>是 NVIDIA GPU 间更高带宽的互联；<strong>RDMA</strong>允许网络设备直接访问远端内存，减少 CPU 拷贝。带宽决定大块数据传输时间，链路延迟决定频繁小通信成本。TP 每层的小 collective 对延迟敏感，KV migration 则同时受总字节数和带宽影响。</p>
+<p>分布式 Prefix Cache 还会带来路由问题：把请求送到已有相同 Prefix 的实例可以节省 Prefill，但可能造成热点和负载不均。调度目标会变成“缓存亲和性收益”与“队列/容量代价”的联合优化，而不是简单一致性哈希。</p>
+
+<h3>11A.14 可观测性：从一条慢请求追到 GPU</h3>
+<p><strong>可观测性</strong>是从系统输出推断内部状态的能力，通常结合 metrics、logs 和 traces。Metrics 适合聚合趋势；logs 记录离散事件和错误上下文；trace 用同一 request ID 串起跨模块时间段。一次慢请求至少应能分解：</p>
+<div class="diagram">admission wait → scheduler queue → tokenize → prefill → KV action
+→ decode iterations → sampling → network flush</div>
+<p>关键指标可分为：</p>
+<ul>
+<li><strong>流量：</strong>requests/s、input/output tokens/s、active sequences。</li>
+<li><strong>用户延迟：</strong>TTFT、TPOT/TBT、端到端 P50/P95/P99。</li>
+<li><strong>容量：</strong>KV used/free blocks、峰值显存、queue length、rejection/OOM。</li>
+<li><strong>执行：</strong>batch size、Prefill chunk、kernel/event time、GPU idle gap。</li>
+<li><strong>正确性与稳定性：</strong>fallback、cancel、timeout、error、重试和输出一致性。</li>
+</ul>
+<p>高基数标签会让监控系统爆炸，因此 request ID 通常进入 trace/log，而不是直接作为 Prometheus 长期标签。模型、backend、action、reason 等有限枚举更适合作为 metric label。</p>
+
+<h3>11A.15 另外十个常见追问</h3>
+<div class="qa"><strong>Q：为什么量化后模型变小却不一定更快？</strong><p>硬件可能缺少对应低位算子，反量化和布局转换可能抵消带宽收益，小 batch 又可能受 launch 而非权重读取限制；必须看实际 kernel 和端到端指标。</p></div>
+<div class="qa"><strong>Q：为什么 TP 卡数不是越多越快？</strong><p>每张卡计算量下降，但每层 collective 的固定延迟和通信比例上升；当通信超过节省的计算时继续加卡会负扩展。</p></div>
+<div class="qa"><strong>Q：什么是 pipeline bubble？</strong><p>流水线某些 stage 因前后阶段尚无可处理 micro-batch 而空闲的时间。增加 micro-batch 可降低 bubble 比例，但会增加内存和请求延迟。</p></div>
+<div class="qa"><strong>Q：Prefix Cache 为什么可能降低命中却提高整体性能？</strong><p>若为了命中把请求路由到长队列实例，节省的 Prefill 可能小于新增排队；负载感知路由可能主动放弃局部命中，换取更低 TTFT。</p></div>
+<div class="qa"><strong>Q：什么是 preemption？</strong><p>抢占是暂停或移出已占资源的低优先级 sequence，为更重要工作腾出容量。被抢占 KV 可 Swap，也可丢弃后 Recompute；选择取决于恢复成本。</p></div>
+<div class="qa"><strong>Q：为什么 P99 很重要但难测？</strong><p>P99 对少量极慢请求敏感，直接对应严重用户体验；但需要足够大样本，否则只是最大值附近的少数点，置信度很低。应报告样本量和区间。</p></div>
+<div class="qa"><strong>Q：什么是 goodput？</strong><p>Goodput 是满足质量与 SLO 的有效吞吐；超时、错误或延迟超标的完成量不能算有效服务能力。它比只看 tokens/s 更接近生产价值。</p></div>
+<div class="qa"><strong>Q：为什么需要按模型版本隔离 KV Cache？</strong><p>不同权重、RoPE 参数、KV dtype 或布局生成的 K/V 语义可能不同；错误复用可能输出看似正常但实际错误，因此缓存键必须绑定模型与布局身份。</p></div>
+<div class="qa"><strong>Q：线上扩容应该看 GPU 利用率还是队列？</strong><p>二者都不够。应结合排队延迟、active sequences、KV 容量、TTFT/TPOT SLO 和 goodput；GPU 利用率高可能是健康繁忙，也可能是慢 kernel 或过载。</p></div>
+<div class="qa"><strong>Q：AI Infra 优化的最终判断标准是什么？</strong><p>在输出质量和可靠性不下降的前提下，用更少硬件成本满足更多真实请求的 SLO。局部 FLOPS、带宽或 kernel time 都只是解释这一目标的中介指标。</p></div>
+
+<h3>11A.16 训练侧 AI Infra：与推理有什么不同</h3>
+<p>训练需要前向计算、保存中间激活、反向传播梯度并更新参数；推理通常只有前向计算和动态 KV。训练显存常近似包含权重、梯度、优化器状态、激活和临时 workspace。其中 <strong>Adam</strong> 是一种为每个参数维护梯度一阶动量与二阶平方动量的优化算法，因此它的优化器状态可能比低精度权重本身更大。</p>
+<ul>
+<li><strong>Mixed precision（混合精度）</strong>：主要矩阵计算用 FP16 或 BF16，关键累积或主权重保留更高精度。<strong>BF16（Brain Floating Point 16）</strong>是一种 16 位浮点格式，保留与 FP32 相同宽度的指数位，因此指数范围接近 FP32，通常比 FP16 更不易溢出；FP16 常配合 <strong>loss scaling（损失缩放）</strong>，先把过小梯度放大以避免下溢，计算后再按比例缩回。</li>
+<li><strong>Gradient accumulation（梯度累积）</strong>：连续运行多个 micro-batch，把梯度相加后才更新一次参数，用更多计算轮次模拟更大 global batch，不会降低单个 micro-batch 的激活峰值。</li>
+<li><strong>Activation checkpointing（激活重计算）</strong>：前向只保存部分检查点，反向需要时重新计算中间激活，以额外计算换显存。</li>
+<li><strong>Distributed Data Parallel（分布式数据并行）</strong>：每张卡处理不同数据并计算局部梯度，再用 All-Reduce 使各卡得到一致梯度。</li>
+<li><strong>ZeRO</strong>：把优化器状态、梯度乃至参数分片到不同数据并行 rank（参与分布式任务的进程编号），避免每卡完整复制。分片越彻底，显存越省，但通信与实现复杂度越高。</li>
+</ul>
+<p><strong>Global batch</strong>通常等于每卡 micro-batch × 数据并行卡数 × 梯度累积步数。扩大 global batch 可提高吞吐，却可能改变优化统计性质和收敛，因此训练系统不能只看 samples/s（每秒处理的样本数），还要看 loss（训练目标函数的数值）、收敛步数、故障恢复和最终质量。</p>
+<p>训练容错依赖 checkpoint：需要保存模型、优化器、学习率调度器、随机数状态和数据迭代位置，才能尽量从相同训练状态恢复。大规模训练中 checkpoint 写入本身可能造成 I/O 停顿，因此会使用异步保存、分片和增量策略。</p>
+
 <h2 id="whiteboard">12. 白板、代码地图与最后速记</h2>
 <h3>12.1 五张必画白板</h3>
 <ol>
 <li>Attention：<code>QKᵀ/√d → mask → softmax → V</code>，再解释 KV Cache。</li>
 <li>Block Table：两个 sequence 共享 Prefix，尾块 COW 后分叉。</li>
 <li>事务时间线：plan 无副作用，execute 由 stream/event 完成，commit 发布映射。</li>
-<li>Paged K1：<code>(sequence, q_head)</code> 对应 CTA，token 经 page table 找 physical page。</li>
+<li>Paged K1→K4：先画 <code>(sequence,q_head)</code> 正确性映射，再画 K4 的 <code>sequence×KV-head-group×partition</code> 通用目标与当前单 sequence 边界。</li>
 <li>统一策略：snapshot → feasible mask → per-action Ridge → confidence/margin → action → observe。</li>
 </ol>
 
@@ -580,8 +840,11 @@ kv_index=(((2×16+0)×2+1)×64+dim)</div>
 <div class="diagram">真实模型：Qwen2.5-0.5B = 24L / 14Q / 2KV / D64 / GQA7
 Remap：20 pairs；1/4/16/32 = 53.33/48.89/3.13/1.87%
 H2 aligned-1：+57.10%，CI [38.51,57.14]；launch 10/10
-Paged：360 observations；oracle max error 3.6e-8
-H7：10 production entries，0 fallback，24 layer launches
+Paged K1：360 observations；oracle max error 3.6e-8
+H8 K2/K1：480 responses/variant；kernel -50.44%；request median/P95 +0.55/+1.52%
+H10 old K2：512–2048 token +50.35%，CI [49.19,51.19]%
+H13 K4：3456 requests；+3.98%，CI [2.50,5.38]%；P95 +13.34%
+K4 oracle：24/24，覆盖 1–2048 token；Paged 仍 opt-in
 Chooser：5,000,000 choices，P99 1μs，0 allocation，ratio 0.0644%
 D3：120 traces / 600 observations；H0/D3 regret 42.590/2.082ms
 D3：24/80 switches；1 harmful；trace-cluster CI [-0.7232,-0.3069]ms
@@ -600,10 +863,14 @@ Engine：242 spans / 9.553s；execute 99.9145%</div>
 <li>解释为什么 capability gate 必须早于模型评分。</li>
 <li>区分 H0/A1/T1/L1、oracle regret 和 harmful decision。</li>
 <li>解释 paired bootstrap 与 Williams design 各解决什么问题。</li>
+<li>区分并发请求、active sequence、iteration batch 和 micro-batch。</li>
+<li>解释 DP/TP/PP/EP 的拆分对象与主要通信。</li>
+<li>说明 FlashAttention、PagedAttention、量化与推测解码各优化什么。</li>
+<li>设计 batch 1/2/4/8/16 的 mixed-length Paged 实验，并列出延迟、吞吐和显存指标。</li>
 <li>用 3 分钟串起“模型—KV—CUDA—策略—实验—应用”。</li>
 <li>任选一条简历 bullet，说出代码文件、关键不变式、实验规模和一个数字。</li>
 </ol>
 
-<p class="source">项目事实以 <code>docs/architecture.md</code>、<code>docs/acceptance-report.md</code>、<code>config/research_claims.json</code> 与 <code>results/research/</code> 的正式制品为准。理论来源包括 Transformer、Orca、PagedAttention、Sarathi-Serve、LinUCB/保守上下文 bandit、CUDA 官方 Programming Guide、Prometheus 官方指标语义；完整链接见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
+<p class="source">项目事实以 <code>docs/architecture.md</code>、<code>docs/acceptance-report.md</code>、<code>config/research_claims.json</code> 与 <code>results/research/</code> 的正式制品为准。理论来源包括 Transformer、Orca、PagedAttention、FlashAttention、Sarathi-Serve、Megatron-LM、SmoothQuant、Speculative Decoding、LinUCB/保守上下文 bandit、CUDA 官方 Programming Guide 与 Prometheus 官方指标语义；完整链接见 <a href="../RESOURCES.md">RESOURCES.md</a>。</p>
 <nav class="nav"><a href="index.html">← 课程首页</a><a href="../reference/interview-question-bank.html">继续压力问答 →</a></nav>
 </main></body></html>
