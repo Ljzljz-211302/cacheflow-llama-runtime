@@ -103,6 +103,58 @@ def validate_artifact(root: Path, protocol_path: Path, output: Path) -> dict:
     return summary
 
 
+def normalize_cell(protocol: dict, workload: dict, cell: dict, cell_path: Path, output: Path) -> dict:
+    pair, order, action = int(cell["pair"]), int(cell["order_in_pair"]), cell["action"]
+    expected_payload = {
+        "prompt": workload["prompt"],
+        "n_predict": int(protocol["request"]["predicted_tokens"]),
+        "temperature": float(protocol["request"]["temperature"]),
+        "seed": int(protocol["random_seed"]),
+        "cache_prompt": bool(protocol["request"]["cache_prompt"]),
+    }
+    responses = cell["responses"]
+    elapsed_values = cell["client_elapsed_ms"]
+    if cell["workload_id"] != workload["id"] or cell["payload"] != expected_payload:
+        raise ValueError("completed objective arm differs from the frozen workload")
+    if len(responses) != int(protocol["request"]["measured_requests_per_workload_arm"]):
+        raise ValueError("completed objective arm has incomplete responses")
+    before, after = cell["metrics_before"], cell["metrics_after"]
+    return {
+        "pair": pair, "order_in_pair": order, "action": action,
+        "workload_id": workload["id"], "category": workload["category"],
+        "prompt_sha256": prompt_sha256(workload["prompt"]),
+        "client_elapsed_ms": elapsed_values,
+        "actual_context_tokens": [int(row["timings"]["cache_n"]) + int(row["timings"]["prompt_n"]) for row in responses],
+        "contents": [row["content"] for row in responses],
+        "paged_calls": metric_delta(before, after, "llamacpp:paged_decode_calls_total "),
+        "paged_fallbacks": metric_delta(before, after, "llamacpp:paged_decode_fallbacks_total "),
+        "action_decisions": metric_delta(before, after, f'llamacpp:kv_action_decisions_total{{action="{action}"}}'),
+        "action_reason_decisions": action_reason_total(after, action) - action_reason_total(before, action),
+        "action_observations": metric_delta(before, after, f'llamacpp:kv_action_observations_total{{action="{action}"}}'),
+        "raw": str(cell_path.relative_to(output).as_posix()),
+    }
+
+
+def load_completed_arm(protocol: dict, corpus: dict, output: Path,
+                       pair: int, order: int, action: str) -> list[dict] | None:
+    arm_dir = output / "raw" / f"pair-{pair:02d}-{order}-{action}"
+    if not arm_dir.exists():
+        return None
+    workloads = {row["id"]: row for row in corpus["workloads"]}
+    expected = {f"{workload_id}.json" for workload_id in workloads}
+    actual = {path.name for path in arm_dir.glob("*.json")}
+    if actual != expected or not (arm_dir / "server.log").is_file():
+        raise ValueError(f"partial objective arm cannot be resumed: {arm_dir}")
+    result = []
+    for workload_id in workload_order(protocol, corpus, pair, action):
+        cell_path = arm_dir / f"{workload_id}.json"
+        cell = json.loads(cell_path.read_text(encoding="utf-8"))
+        if (int(cell["pair"]), int(cell["order_in_pair"]), cell["action"]) != (pair, order, action):
+            raise ValueError("completed objective arm identity differs from seeded plan")
+        result.append(normalize_cell(protocol, workloads[workload_id], cell, cell_path, output))
+    return result
+
+
 def collect_arm(protocol: dict, corpus: dict, server: Path, model: Path, output: Path,
                 pair: int, order: int, action: str, port: int) -> list[dict]:
     arm_dir = output / "raw" / f"pair-{pair:02d}-{order}-{action}"
@@ -160,20 +212,7 @@ def collect_arm(protocol: dict, corpus: dict, server: Path, model: Path, output:
                 }
                 cell_path = arm_dir / f"{workload_id}.json"
                 cell_path.write_text(json.dumps(cell, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                result_rows.append({
-                    "pair": pair, "order_in_pair": order, "action": action,
-                    "workload_id": workload_id, "category": workload["category"],
-                    "prompt_sha256": prompt_sha256(workload["prompt"]),
-                    "client_elapsed_ms": elapsed_values,
-                    "actual_context_tokens": [int(row["timings"]["cache_n"]) + int(row["timings"]["prompt_n"]) for row in responses],
-                    "contents": [row["content"] for row in responses],
-                    "paged_calls": metric_delta(before, after, "llamacpp:paged_decode_calls_total "),
-                    "paged_fallbacks": metric_delta(before, after, "llamacpp:paged_decode_fallbacks_total "),
-                    "action_decisions": metric_delta(before, after, f'llamacpp:kv_action_decisions_total{{action="{action}"}}'),
-                    "action_reason_decisions": action_reason_total(after, action) - action_reason_total(before, action),
-                    "action_observations": metric_delta(before, after, f'llamacpp:kv_action_observations_total{{action="{action}"}}'),
-                    "raw": str(cell_path.relative_to(output).as_posix()),
-                })
+                result_rows.append(normalize_cell(protocol, workload, cell, cell_path, output))
         finally:
             terminate_process(process)
             process.wait(timeout=15)
@@ -193,18 +232,20 @@ def main() -> None:
         print(json.dumps(validate_artifact(ROOT, args.protocol, args.output), ensure_ascii=False))
         return
     protocol, corpus = load_definition(ROOT, args.protocol)
-    if args.output.exists():
-        raise FileExistsError("objective artifact output must not already exist")
+    if (args.output / "manifest.json").exists():
+        raise FileExistsError("completed objective artifact is immutable; use --validate-only")
     if device_identity()["name"] != protocol["device"]["name"]:
         raise RuntimeError("objective benchmark device differs from protocol")
     clean = not bool(git_output("status", "--porcelain", "--untracked-files=no"))
     if not clean:
         raise RuntimeError("objective benchmark requires a clean tracked worktree")
-    args.output.mkdir(parents=True)
+    args.output.mkdir(parents=True, exist_ok=True)
     rows = []
     for pair, order, action in arm_plan(protocol):
-        rows.extend(collect_arm(protocol, corpus, args.server, args.model, args.output,
-                                pair, order, action, args.port))
+        completed = load_completed_arm(protocol, corpus, args.output, pair, order, action)
+        rows.extend(completed if completed is not None else collect_arm(
+            protocol, corpus, args.server, args.model, args.output, pair, order, action, args.port
+        ))
         print(json.dumps({"pair": pair, "order": order, "action": action}, ensure_ascii=False), flush=True)
     summary = analyze(protocol, corpus, rows)
     summary.update({
