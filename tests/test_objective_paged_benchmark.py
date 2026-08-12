@@ -63,6 +63,15 @@ class ObjectivePagedBenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "frozen corpus"):
             analyze(self.protocol, self.corpus, tampered)
 
+    def test_analysis_rejects_context_length_diverging_from_frozen_corpus(self):
+        protocol, corpus = load_definition(
+            ROOT, ROOT / "config/production_paged_objective_protocol_v4.json"
+        )
+        evidence = rows(protocol, corpus)
+        evidence[0]["actual_context_tokens"] = [65] * 4
+        with self.assertRaisesRegex(ValueError, "frozen tokenizer length"):
+            analyze(protocol, corpus, evidence)
+
     def test_analysis_rejects_missing_workload_cell(self):
         evidence = rows(self.protocol, self.corpus)[:-1]
         with self.assertRaisesRegex(ValueError, "full pair/action/workload matrix"):

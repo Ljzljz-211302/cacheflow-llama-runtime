@@ -47,10 +47,9 @@ def load_definition(
         raise ValueError("objective corpus has insufficient workload coverage")
     if len(ids) != len(set(ids)) or any(not row.get("prompt") for row in workloads):
         raise ValueError("objective corpus IDs/prompts must be non-empty and unique")
-    if len({row.get("category") for row in workloads}) < 4:
-        minimum_categories = int(protocol.get("minimum_prompt_categories", 4))
-        if len({row.get("category") for row in workloads}) < minimum_categories:
-            raise ValueError("objective corpus has insufficient prompt-category coverage")
+    minimum_categories = int(protocol.get("minimum_prompt_categories", 4))
+    if len({row.get("category") for row in workloads}) < minimum_categories:
+        raise ValueError("objective corpus has insufficient prompt-category coverage")
     if validate_live_sources:
         for row in workloads:
             if "source_sha256" not in row:
@@ -139,6 +138,9 @@ def analyze(
         if len(contexts) != 1:
             raise ValueError("objective context changed within an arm")
         context = next(iter(contexts))
+        expected_context = workloads[row["workload_id"]].get("actual_prompt_tokens")
+        if expected_context is not None and context != int(expected_context):
+            raise ValueError("objective context differs from frozen tokenizer length")
         capability = protocol["capability"]
         if not int(capability["minimum_actual_context_tokens"]) <= context <= int(capability["maximum_actual_context_tokens"]):
             raise ValueError("objective workload is outside the registered capability")
@@ -155,7 +157,6 @@ def analyze(
     if set(keyed) != expected_keys:
         raise ValueError("objective artifact does not cover the full pair/action/workload matrix")
 
-    effects_by_pair: dict[int, list[float]] = {pair: [] for pair in range(1, pairs + 1)}
     per_workload: dict[str, dict[str, Any]] = {}
     for workload_id, definition in workloads.items():
         direct_values, paged_values, regressions = [], [], []
@@ -177,7 +178,6 @@ def analyze(
             direct_values.append(direct_median)
             paged_values.append(paged_median)
             regressions.append(regression)
-            effects_by_pair[pair].append(regression)
         per_workload[workload_id] = {
             "category": definition["category"],
             "actual_context_tokens": context,
