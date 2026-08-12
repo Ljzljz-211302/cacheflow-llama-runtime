@@ -389,7 +389,7 @@
         "shared allocator between Direct and Paged arms",
         "scalar QK/PV work, scratch-state traffic, merge launch, and inactive partitions"
       ],
-      "baselines": ["production-direct"],
+      "baselines": ["paged-decode-contiguous"],
       "mechanism": "The long-context K2 processes 32-token tiles inside 256-token partitions, emits FP32 online-softmax (m,l,o) states, and merges those states in a second CUDA kernel. The corpus is derived from three hash-bound repository documents with the real Qwen tokenizer rather than a runner-embedded prompt.",
       "falsification": [
         "Any output differs, any expected Paged graph entry is missing, or any fallback occurs.",
