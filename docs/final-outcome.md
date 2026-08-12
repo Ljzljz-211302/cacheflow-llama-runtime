@@ -18,6 +18,7 @@
 3. **统一动作策略**：D3 在 80 个留出决策中切换 24 次，累计 regret 2.082 ms，harmful decision 1 次；chooser P99 0.900 us、热路径零分配。该结果仍是离线 replay。
 4. **Paged-vs-Direct 负结果**：正确性通过，但 P95 从 27.354 ms 增至 29.210 ms（回退 6.78%），超过 5% 门槛，因此 Paged 保持 opt-in。
 5. **K2-vs-K1 正结果**：30 组同进程配对、每 variant 480 条测量响应、600 次 Paged graph、0 fallback；请求 median/P95 回退 0.55%/1.52%，median 回退 95% 上界 2.86%；相同 480 次 kernel 总时长由 8.174 ms 降至 4.051 ms（-50.44%），通过预注册替换门槛。
+6. **客观 Prompt 矩阵负结果**：冻结 6 类输入、30 组随机化匹配进程块、360 个 workload-arm 观测，实际上下文覆盖 17–20 token 且全部跨页。总体匹配块中位回退 -7.96%（负值表示 Paged 更快），但 block-workload 回退分布 P95 为 158.62%、最差 workload 中位回退 44.66%，均超过门槛；该设计不冒充共享热状态 Trial Pair。
 
 ## 面试与简历允许使用的结论
 
@@ -29,6 +30,7 @@
 
 - 图文总结报告：[`docs/final-illustrated-report.md`](final-illustrated-report.md)
 - K2/K1 请求与 kernel 对比图：[`results/research/h8-k2-production-v2.10.0/k2-production-comparison.svg`](../results/research/h8-k2-production-v2.10.0/k2-production-comparison.svg)
+- 客观 Prompt 矩阵分层结果图：[`results/research/h9-objective-paged-v2.0.0/comparison.svg`](../results/research/h9-objective-paged-v2.0.0/comparison.svg)
 - K2 正式报告：[`results/research/h8-k2-production-v2.10.0/report.md`](../results/research/h8-k2-production-v2.10.0/report.md)
 - Paged-vs-Direct 正式负结果：[`results/research/h7-production-paged-v1.1.0/report.md`](../results/research/h7-production-paged-v1.1.0/report.md)
 - 研究项目总报告：[`docs/research-project-report.md`](research-project-report.md)

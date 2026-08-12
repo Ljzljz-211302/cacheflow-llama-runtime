@@ -96,6 +96,32 @@
       "k2_kernel_duration_ms": 4.051267,
       "kernel_duration_reduction_percent": 50.43565060452042,
       "scope": "Qwen2.5-0.5B D64/GQA7/page16/context17 repeated cached decode"
+    },
+    "objective_paged_vs_direct": {
+      "protocol_version": "2.0.0",
+      "matched_process_blocks": 30,
+      "workload_count": 6,
+      "observations": 360,
+      "actual_context_tokens": {
+        "controlled-cross-page": 17,
+        "database-zh-cross-page": 19,
+        "machine-learning-zh-cross-page": 19,
+        "attention-en-cross-page": 18,
+        "cuda-mixed-cross-page": 20,
+        "code-cpp-cross-page": 20
+      },
+      "all_workloads_cross_page": true,
+      "median_regression_percent": -7.957365188130061,
+      "median_regression_bootstrap_95_percent": [
+        -17.066627318944594,
+        -0.4002483951656588
+      ],
+      "block_workload_regression_p95_percent": 158.62015757061695,
+      "p95_limit_percent": 20.0,
+      "worst_workload_median_regression_percent": 44.65954800668956,
+      "worst_workload_limit_percent": 5.0,
+      "promotion_passed": false,
+      "decision": "negative production result: median improves, but tail and worst-workload gates fail"
     }
   },
   "claim_boundaries": [
@@ -103,7 +129,8 @@
     "Paged did not beat Direct under the formal service promotion protocol.",
     "Microbenchmark improvements do not imply TTFT or throughput improvements.",
     "The application journey proves an exercised local workflow, not external adoption.",
-    "The artifact is an independent research project, not a peer-reviewed publication."
+    "The artifact is an independent research project, not a peer-reviewed publication.",
+    "The objective prompt matrix supersedes single-prompt interpretation and keeps Paged disabled because the block-workload regression-tail and worst-workload gates fail; its independent-process blocks are not shared-hot-state Trial Pairs."
   ],
   "evidence": {
     "upstream": {
@@ -165,6 +192,30 @@
     "k2_chart": {
       "path": "results/research/h8-k2-production-v2.10.0/k2-production-comparison.svg",
       "sha256": "35878ce4f296bf0210307017094efbdd23bf22c0770444ef510fda79e2135423"
+    },
+    "objective_paged_protocol": {
+      "path": "config/production_paged_objective_protocol_v2.json",
+      "sha256": "d7f87819a713677acbd251bf948b693807f49c7f8d071052be09b9ad06d1bd13"
+    },
+    "objective_paged_corpus": {
+      "path": "config/paged_objective_workloads_v2.json",
+      "sha256": "0ca4c67c1963561089731629d5ebc8724c8d033d3a8a7c6887e39dc8db11096b"
+    },
+    "objective_paged_manifest": {
+      "path": "results/research/h9-objective-paged-v2.0.0/manifest.json",
+      "sha256": "ee5b5a463197b461712e2ef365834a1430c00f91377ef9f7c2de6815c89b2652"
+    },
+    "objective_paged": {
+      "path": "results/research/h9-objective-paged-v2.0.0/summary.json",
+      "sha256": "ebd1e47c20c772f626d6c68b4ddcb21c5f0861aed89f7f9d4d9f97e66068adeb"
+    },
+    "objective_paged_report": {
+      "path": "results/research/h9-objective-paged-v2.0.0/report.md",
+      "sha256": "cef5168450a61817923a870d81a1fa2310b6326af76b20bbc390f14bb4265b45"
+    },
+    "objective_paged_chart": {
+      "path": "results/research/h9-objective-paged-v2.0.0/comparison.svg",
+      "sha256": "331e0f95a9bee6f7e1e3874d87acdef1f03559fafc25451adeb5db9900e2b878"
     }
   }
 }

@@ -25,12 +25,18 @@ def main() -> None:
         "--validate-only",
     ], cwd=ROOT, check=True)
     subprocess.run([
+        sys.executable, str(ROOT / "scripts/run_objective_paged_benchmark.py"),
+        "--protocol", str(ROOT / "config/production_paged_objective_protocol_v2.json"),
+        "--output", str(ROOT / "results/research/h9-objective-paged-v2.0.0"),
+        "--validate-only",
+    ], cwd=ROOT, check=True)
+    subprocess.run([
         sys.executable, str(ROOT / "scripts/run_k2_production_experiment.py"),
         "--protocol", str(ROOT / "config/k2_production_protocol_v2.10.json"),
         "--output", str(ROOT / "results/research/h8-k2-production-v2.10.0"),
         "--validate-only",
     ], cwd=ROOT, check=True)
-    print("Final H1/H4/H7/H8 evidence closure passed.")
+    print("Final H1/H4/H7/H8/H9 evidence closure passed.")
 
 
 if __name__ == "__main__":

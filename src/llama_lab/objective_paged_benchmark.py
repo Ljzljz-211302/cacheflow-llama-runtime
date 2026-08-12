@@ -52,7 +52,8 @@ def load_definition(root: Path, protocol_path: Path) -> tuple[dict[str, Any], di
 def arm_plan(protocol: dict[str, Any]) -> list[tuple[int, int, str]]:
     generator = random.Random(int(protocol["random_seed"]))
     result = []
-    for pair in range(1, int(protocol["paired_trials"]) + 1):
+    block_count = int(protocol.get("matched_process_blocks", protocol.get("paired_trials")))
+    for pair in range(1, block_count + 1):
         actions = ["direct", "paged"]
         generator.shuffle(actions)
         result.extend((pair, order, action) for order, action in enumerate(actions, 1))
@@ -82,7 +83,8 @@ def analyze(
     protocol: dict[str, Any], corpus: dict[str, Any], rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     workloads = {row["id"]: row for row in corpus["workloads"]}
-    pairs = int(protocol["paired_trials"])
+    matched_blocks = "matched_process_blocks" in protocol
+    pairs = int(protocol.get("matched_process_blocks", protocol.get("paired_trials")))
     measured = int(protocol["request"]["measured_requests_per_workload_arm"])
     expected_keys = {
         (pair, action, workload_id)
@@ -110,8 +112,15 @@ def analyze(
         capability = protocol["capability"]
         if not int(capability["minimum_actual_context_tokens"]) <= context <= int(capability["maximum_actual_context_tokens"]):
             raise ValueError("objective workload is outside the registered capability")
-        if row["action"] == "paged" and (row["paged_calls"] < measured or row["paged_fallbacks"] != 0):
-            raise ValueError("objective Paged row did not execute without fallback")
+        if any(float(row[field]) != measured for field in (
+            "action_decisions", "action_reason_decisions", "action_observations",
+        )):
+            raise ValueError("objective action counters do not match measured requests")
+        if row["action"] == "paged":
+            if float(row["paged_calls"]) != measured or float(row["paged_fallbacks"]) != 0:
+                raise ValueError("objective Paged row did not execute exactly once per measured request")
+        elif float(row["paged_calls"]) != 0 or float(row["paged_fallbacks"]) != 0:
+            raise ValueError("objective Direct row entered the Paged graph")
         keyed[key] = row
     if set(keyed) != expected_keys:
         raise ValueError("objective artifact does not cover the full pair/action/workload matrix")
@@ -142,10 +151,10 @@ def analyze(
             "category": definition["category"],
             "actual_context_tokens": context,
             "actual_page_count": math.ceil(context / int(protocol["capability"]["page_size_tokens"])),
-            "paired_trials": pairs,
+            ("matched_process_blocks" if matched_blocks else "paired_trials"): pairs,
             "direct_arm_median_ms": summarize(direct_values),
             "paged_arm_median_ms": summarize(paged_values),
-            "paired_regression_percent": summarize(regressions),
+            ("matched_block_regression_percent" if matched_blocks else "paired_regression_percent"): summarize(regressions),
         }
     all_effects = [value for values in effects_by_pair.values() for value in values]
     interval = _cluster_bootstrap(effects_by_pair, int(protocol["random_seed"]))
@@ -158,16 +167,17 @@ def analyze(
     tail_limit = float(protocol["acceptance"].get("maximum_primary_p95_regression_percent", float("inf")))
     worst_limit = float(protocol["acceptance"].get("maximum_any_workload_median_regression_percent", float("inf")))
     worst_workload_median = max(
-        float(row["paired_regression_percent"]["median"]) for row in per_workload.values()
+        float(row["matched_block_regression_percent" if matched_blocks else "paired_regression_percent"]["median"])
+        for row in per_workload.values()
     )
     result = {
         "schema_version": 1,
         "protocol_version": protocol["protocol_version"],
-        "paired_trials": pairs,
+        ("matched_process_blocks" if matched_blocks else "paired_trials"): pairs,
         "workload_count": len(workloads),
         "observations": len(rows),
-        "primary_paired_regression_percent": primary,
-        "primary_pair_cluster_bootstrap_95_percent": interval,
+        ("primary_matched_block_regression_percent" if matched_blocks else "primary_paired_regression_percent"): primary,
+        ("primary_block_cluster_bootstrap_95_percent" if matched_blocks else "primary_pair_cluster_bootstrap_95_percent"): interval,
         "promotion_limit_percent": limit,
         "promotion_passed": (
             interval[1] <= limit and primary["p95"] <= tail_limit

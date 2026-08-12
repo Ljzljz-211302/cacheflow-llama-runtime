@@ -25,6 +25,10 @@ class FinalOutcomeTests(unittest.TestCase):
         self.assertFalse(outcome["disposition"]["default_production_paged_enabled"])
         self.assertFalse(outcome["research_results"]["paged_vs_direct"]["promotion_passed"])
         self.assertTrue(outcome["research_results"]["k2_vs_k1"]["promotion_passed"])
+        objective = outcome["research_results"]["objective_paged_vs_direct"]
+        self.assertFalse(objective["promotion_passed"])
+        self.assertTrue(objective["all_workloads_cross_page"])
+        self.assertEqual(objective["observations"], 360)
 
     def test_validator_rejects_rewriting_negative_paged_result(self):
         outcome = build_final_outcome(ROOT)

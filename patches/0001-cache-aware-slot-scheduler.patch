@@ -624,15 +624,18 @@ index 74611dc..cd041e6 100644
              current_chunk = ggml_threadpool_chunk_add(params->threadpool, 1);
 diff --git a/ggml/src/ggml-cuda/fattn-paged.cuh b/ggml/src/ggml-cuda/fattn-paged.cuh
 new file mode 100644
-index 0000000..8b7d386
+index 0000000..960c5c4
 --- /dev/null
 +++ b/ggml/src/ggml-cuda/fattn-paged.cuh
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,332 @@
 +#pragma once
 +
 +#include "common.cuh"
 +
 +#include <cfloat>
++#include <cstdlib>
++#include <cstring>
++#include <cstdio>
 +#include <type_traits>
 +
 +template<int head_dim, typename query_type>
@@ -705,6 +708,171 @@ index 0000000..8b7d386
 +    output[(uint64_t) query_head * head_dim + dim] = accumulator / online[1];
 +}
 +
++template<int head_dim, typename query_type>
++static __global__ void cacheflow_paged_decode_fattn_k2_t2(
++        const char * query,
++        const char * key,
++        const char * value,
++        const int32_t * block_table,
++        const int32_t * context_lengths,
++        float * output,
++        uint64_t q_head_stride,
++        uint64_t k_token_stride,
++        uint64_t k_head_stride,
++        uint64_t v_token_stride,
++        uint64_t v_head_stride,
++        int32_t query_heads,
++        int32_t kv_heads,
++        int32_t max_blocks,
++        int32_t page_size,
++        float scale) {
++    constexpr int32_t query_head_tile = 2;
++    const int32_t group_size = query_heads / kv_heads;
++    const int32_t tiles_per_kv = (group_size + query_head_tile - 1) / query_head_tile;
++    const int32_t tile = blockIdx.x % tiles_per_kv;
++    const int32_t kv_head = blockIdx.x / tiles_per_kv;
++    static_assert(head_dim == 64, "K2-T2 one-warp heads currently target D64");
++    const int32_t tile_head = threadIdx.x / 32;
++    const int32_t lane = threadIdx.x % 32;
++    const int32_t group_head_begin = tile * query_head_tile;
++    const int32_t active_heads = min(query_head_tile, group_size - group_head_begin);
++    const bool active = tile_head < active_heads;
++    const int32_t query_head = kv_head * group_size + group_head_begin + tile_head;
++    const int32_t context = context_lengths[0];
++
++    if (context <= 0 || (context + page_size - 1) / page_size > max_blocks) return;
++
++    __shared__ float query_tile[query_head_tile][head_dim];
++    // K is transposed in shared memory so a warp reading one dimension
++    // across logical tokens avoids a 32-way bank conflict. V keeps the
++    // token-major layout used by the output accumulation.
++    __shared__ float key_by_dim[head_dim][32];
++    __shared__ float value_by_token[32][head_dim];
++
++    // The host correctness envelope admits context <= 32; the formal v2.10
++    // performance claim is narrower and covers repeated context-17 requests.
++    // The public GGML op can receive a longer valid table, so preserve total
++    // correctness with incumbent K1 math inside this launch for context > 32.
++    // The launch grid includes one block per query head so every output is written.
++    if (context > 32) {
++        const int32_t fallback_query_head = blockIdx.x;
++        if (fallback_query_head >= query_heads) return;
++        const int32_t fallback_kv_head = fallback_query_head / group_size;
++        const int32_t dim = threadIdx.x;
++        const query_type * q = reinterpret_cast<const query_type *>(
++                query + (uint64_t) fallback_query_head * q_head_stride);
++        float accumulator = 0.0f;
++        float * online = &value_by_token[0][0];
++        if (dim == 0) {
++            online[0] = -FLT_MAX;
++            online[1] = 0.0f;
++        }
++        __syncthreads();
++        for (int32_t token = 0; token < context; ++token) {
++            const int32_t logical_block = token / page_size;
++            const int32_t cell = block_table[logical_block] + token % page_size;
++            const __half * k = reinterpret_cast<const __half *>(
++                    key + (uint64_t) cell * k_token_stride +
++                    (uint64_t) fallback_kv_head * k_head_stride);
++            const __half * v = reinterpret_cast<const __half *>(
++                    value + (uint64_t) cell * v_token_stride +
++                    (uint64_t) fallback_kv_head * v_head_stride);
++            float query_value;
++            if constexpr (std::is_same<query_type, __half>::value) {
++                query_value = __half2float(q[dim]);
++            } else {
++                query_value = q[dim];
++            }
++            query_tile[0][dim] = query_value * __half2float(k[dim]);
++            __syncthreads();
++            for (int32_t stride = head_dim / 2; stride > 0; stride /= 2) {
++                if (dim < stride) query_tile[0][dim] += query_tile[0][dim + stride];
++                __syncthreads();
++            }
++            if (dim == 0) {
++                const float score = query_tile[0][0] * scale;
++                const float next_max = fmaxf(online[0], score);
++                const float alpha = online[1] == 0.0f ? 0.0f : expf(online[0] - next_max);
++                const float beta = expf(score - next_max);
++                online[0] = next_max;
++                online[1] = online[1] * alpha + beta;
++                online[2] = alpha;
++                online[3] = beta;
++            }
++            __syncthreads();
++            accumulator = accumulator * online[2] + online[3] * __half2float(v[dim]);
++            __syncthreads();
++        }
++        output[(uint64_t) fallback_query_head * head_dim + dim] = accumulator / online[1];
++        return;
++    }
++
++    if (blockIdx.x >= kv_heads * tiles_per_kv) return;
++
++    if (active) {
++        const query_type * q = reinterpret_cast<const query_type *>(
++                query + (uint64_t) query_head * q_head_stride);
++        if constexpr (std::is_same<query_type, __half>::value) {
++            query_tile[tile_head][lane] = __half2float(q[lane]);
++            query_tile[tile_head][lane + 32] = __half2float(q[lane + 32]);
++        } else {
++            query_tile[tile_head][lane] = q[lane];
++            query_tile[tile_head][lane + 32] = q[lane + 32];
++        }
++    }
++    for (int32_t item = threadIdx.x; item < context * head_dim; item += blockDim.x) {
++        const int32_t token = item / head_dim;
++        const int32_t dim = item % head_dim;
++        const int32_t logical_block = token / page_size;
++        const int32_t cell = block_table[logical_block] + token % page_size;
++        const __half * k = reinterpret_cast<const __half *>(
++                key + (uint64_t) cell * k_token_stride +
++                (uint64_t) kv_head * k_head_stride);
++        const __half * v = reinterpret_cast<const __half *>(
++                value + (uint64_t) cell * v_token_stride +
++                (uint64_t) kv_head * v_head_stride);
++        key_by_dim[dim][token] = __half2float(k[dim]);
++        value_by_token[token][dim] = __half2float(v[dim]);
++    }
++    __syncthreads();
++
++    if (active) {
++        float logit = -FLT_MAX;
++        if (lane < context) {
++            logit = 0.0f;
++#pragma unroll
++            for (int32_t dim = 0; dim < head_dim; ++dim) {
++                logit += query_tile[tile_head][dim] * key_by_dim[dim][lane];
++            }
++            logit *= scale;
++        }
++        float maximum = logit;
++#pragma unroll
++        for (int32_t offset = 16; offset > 0; offset /= 2) {
++            maximum = fmaxf(maximum, __shfl_down_sync(0xffffffff, maximum, offset));
++        }
++        maximum = __shfl_sync(0xffffffff, maximum, 0);
++        float weight = lane < context ? expf(logit - maximum) : 0.0f;
++        float normalizer = weight;
++#pragma unroll
++        for (int32_t offset = 16; offset > 0; offset /= 2) {
++            normalizer += __shfl_down_sync(0xffffffff, normalizer, offset);
++        }
++        normalizer = __shfl_sync(0xffffffff, normalizer, 0);
++        weight /= normalizer;
++
++        float output_0 = 0.0f;
++        float output_1 = 0.0f;
++        for (int32_t token = 0; token < context; ++token) {
++            const float token_weight = __shfl_sync(0xffffffff, weight, token);
++            output_0 += token_weight * value_by_token[token][lane];
++            output_1 += token_weight * value_by_token[token][lane + 32];
++        }
++        output[(uint64_t) query_head * head_dim + lane] = output_0;
++        output[(uint64_t) query_head * head_dim + lane + 32] = output_1;
++    }
++}
++
 +static bool ggml_cuda_paged_fattn_supported(const ggml_tensor * dst) {
 +    const ggml_tensor * q = dst->src[0];
 +    const ggml_tensor * k = dst->src[1];
@@ -735,18 +903,60 @@ index 0000000..8b7d386
 +    memcpy(&scale, dst->op_params, sizeof(float));
 +    const int32_t page_size = ggml_get_op_params_i32(dst, 4);
 +    const int32_t max_blocks = (int32_t) dst->src[5]->ne[0];
++    const int32_t query_heads = (int32_t) q->ne[2];
++    const int32_t kv_heads = (int32_t) k->ne[2];
++    // A process-scoped selector is intentionally retained for reproducible
++    // incumbent/candidate service A/B. Production defaults to K2; K1 is only
++    // selected when the experiment explicitly requests the incumbent.
++    static const bool environment_force_k1 = [] {
++        const char * variant = std::getenv("LLAMA_CACHEFLOW_PAGED_KERNEL");
++        return variant && std::strcmp(variant, "K1") == 0;
++    }();
++    // Disabled by default. A formal same-process experiment can point this at
++    // a two-byte K1/K2 control file and switch only the kernel intervention
++    // without restarting the serving process or disturbing its warm state.
++    static const char * control_file = std::getenv("LLAMA_CACHEFLOW_PAGED_KERNEL_CONTROL_FILE");
++    bool control_force_k1 = false;
++    if (control_file && control_file[0] != '\0') {
++        FILE * file = std::fopen(control_file, "rb");
++        GGML_ASSERT(file != nullptr);
++        char selector[2] = {};
++        const size_t count = std::fread(selector, 1, sizeof(selector), file);
++        std::fclose(file);
++        GGML_ASSERT(count == sizeof(selector));
++        GGML_ASSERT((selector[0] == 'K' && selector[1] == '1') ||
++                    (selector[0] == 'K' && selector[1] == '2'));
++        control_force_k1 = selector[1] == '1';
++    }
++    const bool use_k2 = !environment_force_k1 && !control_force_k1 &&
++            query_heads / kv_heads == 7 && q->ne[0] == 64;
 +#define CACHEFLOW_PAGED_LAUNCH(D, Q) cacheflow_paged_decode_fattn_k1<D, Q><<<q->ne[2], D, 0, ctx.stream()>>>( \
 +        (const char *) q->data, (const char *) k->data, (const char *) v->data, \
 +        (const int32_t *) dst->src[5]->data, (const int32_t *) dst->src[6]->data, \
 +        (float *) dst->data, q->nb[2], k->nb[1], k->nb[2], v->nb[1], v->nb[2], \
 +        (int32_t) q->ne[2], (int32_t) k->ne[2], max_blocks, page_size, scale)
++#define CACHEFLOW_PAGED_K2_LAUNCH(D, Q) cacheflow_paged_decode_fattn_k2_t2<D, Q><<< \
++        (q->ne[2] > k->ne[2] * 4 ? q->ne[2] : k->ne[2] * 4), 64, 0, ctx.stream()>>>( \
++        (const char *) q->data, (const char *) k->data, (const char *) v->data, \
++        (const int32_t *) dst->src[5]->data, (const int32_t *) dst->src[6]->data, \
++        (float *) dst->data, q->nb[2], k->nb[1], k->nb[2], v->nb[1], v->nb[2], \
++        query_heads, kv_heads, max_blocks, page_size, scale)
 +    if (q->type == GGML_TYPE_F16) {
-+        if (q->ne[0] == 64) CACHEFLOW_PAGED_LAUNCH(64, __half);
-+        else CACHEFLOW_PAGED_LAUNCH(128, __half);
++        if (q->ne[0] == 64) {
++            if (use_k2) CACHEFLOW_PAGED_K2_LAUNCH(64, __half);
++            else CACHEFLOW_PAGED_LAUNCH(64, __half);
++        } else {
++            CACHEFLOW_PAGED_LAUNCH(128, __half);
++        }
 +    } else {
-+        if (q->ne[0] == 64) CACHEFLOW_PAGED_LAUNCH(64, float);
-+        else CACHEFLOW_PAGED_LAUNCH(128, float);
++        if (q->ne[0] == 64) {
++            if (use_k2) CACHEFLOW_PAGED_K2_LAUNCH(64, float);
++            else CACHEFLOW_PAGED_LAUNCH(64, float);
++        } else {
++            CACHEFLOW_PAGED_LAUNCH(128, float);
++        }
 +    }
++#undef CACHEFLOW_PAGED_K2_LAUNCH
 +#undef CACHEFLOW_PAGED_LAUNCH
 +    CUDA_CHECK(cudaGetLastError());
 +}
@@ -927,7 +1137,7 @@ index d15ccfd..1d8da05 100644
      set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
      target_compile_definitions(llama PRIVATE LLAMA_BUILD)
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
-index 168dbab..f5e8a69 100644
+index 168dbab..313df19 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
 @@ -6,6 +6,7 @@
@@ -971,7 +1181,7 @@ index 168dbab..f5e8a69 100644
 +                    model.hparams.f_max_alibi_bias == 0.0f && !model.hparams.attn_soft_cap &&
 +                    model.n_gpu_layers() > model.hparams.n_layer();
 +            paged_decode_effective = layout_status == llama_paged_decode_layout_status::success &&
-+                    layout.context_length <= 17 && model_supported && cparams.flash_attn &&
++                    layout.context_length <= 32 && model_supported && cparams.flash_attn &&
 +                    cparams.causal_attn;
 +            if (paged_decode_effective) {
 +                kv_execution_status.paged_decode_calls++;
@@ -1094,7 +1304,7 @@ index 853052b..1512159 100644
      mutable int64_t t_start_us  = 0;
      mutable int64_t t_load_us   = 0;
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
-index 7468bd9..bdd9061 100644
+index 7468bd9..7582c7d 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -495,6 +495,9 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
@@ -1126,17 +1336,7 @@ index 7468bd9..bdd9061 100644
      const bool v_trans = v->nb[1] > v->nb[2];
  
      // split the batch into streams if needed
-@@ -2090,12 +2096,20 @@ ggml_tensor * llm_graph_context::build_attn_mha(
-             v = ggml_cast(ctx0, v, GGML_TYPE_F16);
-         }
- 
-+        if (paged_decode_table && q->type != GGML_TYPE_F16) {
-+            q = ggml_cast(ctx0, q, GGML_TYPE_F16);
-+        }
-+
-         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
-                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
-         cb(cur, LLAMA_TENSOR_NAME_FATTN, il);
+@@ -2096,6 +2102,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
  
          ggml_flash_attn_ext_add_sinks(cur, sinks);
          ggml_flash_attn_ext_set_prec (cur, GGML_PREC_F32);
@@ -1147,7 +1347,7 @@ index 7468bd9..bdd9061 100644
  
          if (v_mla) {
  #if 0
-@@ -2264,10 +2278,11 @@ ggml_tensor * llm_graph_context::build_attn(
+@@ -2264,10 +2274,11 @@ ggml_tensor * llm_graph_context::build_attn(
  
  static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
             ggml_context * ctx0,
@@ -1161,7 +1361,7 @@ index 7468bd9..bdd9061 100644
  
      auto inp = std::make_unique<llm_graph_input_attn_kv>(hparams, cparams, mctx_cur);
  
-@@ -2279,6 +2294,10 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
+@@ -2279,6 +2290,10 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
  
          inp->self_kq_mask = build_attn_inp_kq_mask(ctx0, mctx_cur, ubatch, cparams);
          inp->self_kq_mask_cnv = inp->self_kq_mask;
@@ -1172,7 +1372,7 @@ index 7468bd9..bdd9061 100644
      }
  
      inp->self_k_rot = mctx_cur->build_input_k_rot(ctx0);
-@@ -2290,7 +2309,7 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
+@@ -2290,7 +2305,7 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
  llm_graph_input_attn_kv * llm_graph_context::build_attn_inp_kv() const {
      const auto * mctx_cur = static_cast<const llama_kv_cache_context *>(mctx);
  
@@ -1181,7 +1381,7 @@ index 7468bd9..bdd9061 100644
  
      return (llm_graph_input_attn_kv *) res->add_input(std::move(inp));
  }
-@@ -2343,7 +2362,8 @@ ggml_tensor * llm_graph_context::build_attn(
+@@ -2343,7 +2358,8 @@ ggml_tensor * llm_graph_context::build_attn(
      ggml_tensor * k = mctx_cur->get_k(ctx0, il);
      ggml_tensor * v = mctx_cur->get_v(ctx0, il);
  
@@ -1191,7 +1391,7 @@ index 7468bd9..bdd9061 100644
      cb(cur, "kqv_out", il);
  
      if (inp->self_v_rot) {
-@@ -2866,7 +2886,7 @@ llm_graph_input_mem_hybrid * llm_graph_context::build_inp_mem_hybrid() const {
+@@ -2866,7 +2882,7 @@ llm_graph_input_mem_hybrid * llm_graph_context::build_inp_mem_hybrid() const {
      const auto * mctx_cur = static_cast<const llama_memory_hybrid_context *>(mctx);
  
      auto inp_rs   = build_rs_inp_impl     (ctx0, ubatch, mctx_cur->get_recr());
@@ -1633,7 +1833,7 @@ index 0000000..81ee336
 +    return success;
 +}
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
-index 2802103..7df286d 100644
+index 2802103..1c435b4 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
 @@ -376,6 +376,63 @@ llama_kv_cache::llama_kv_cache(
@@ -1794,7 +1994,7 @@ index 2802103..7df286d 100644
  void llama_kv_cache_context::set_input_k_shift(ggml_tensor * dst) const {
      kv->set_input_k_shift(dst);
  }
-@@ -2630,3 +2714,72 @@ void llama_kv_cache_context::set_input_k_rot(ggml_tensor * dst) const {
+@@ -2630,3 +2714,76 @@ void llama_kv_cache_context::set_input_k_rot(ggml_tensor * dst) const {
  void llama_kv_cache_context::set_input_v_rot(ggml_tensor * dst) const {
      kv->set_input_v_rot(dst);
  }
@@ -1806,8 +2006,9 @@ index 2802103..7df286d 100644
 +    GGML_ASSERT(table && length);
 +    GGML_ASSERT(ggml_backend_buffer_is_host(table->buffer));
 +    GGML_ASSERT(ggml_backend_buffer_is_host(length->buffer));
-+    llama_paged_decode_layout layout;
-+    GGML_ASSERT(build_paged_decode_layout(*ubatch, layout) == llama_paged_decode_layout_status::success);
++    const auto & layout = prepared_paged_decode_layout;
++    GGML_ASSERT(layout.context_length == static_cast<uint32_t>(ubatch->pos[0] + 1));
++    GGML_ASSERT(!layout.block_table.empty());
 +    GGML_ASSERT(layout.block_table.size() <= static_cast<size_t>(table->ne[0]));
 +    auto * table_data = static_cast<int32_t *>(table->data);
 +    std::fill(table_data, table_data + table->ne[0], 0);
@@ -1820,7 +2021,10 @@ index 2802103..7df286d 100644
 +llama_paged_decode_layout_status llama_kv_cache_context::build_paged_decode_layout(
 +        const llama_ubatch & ubatch,
 +        llama_paged_decode_layout & output) const {
-+    return kv->build_paged_decode_layout(ubatch, sinfos[i_cur], output);
++    const auto status = kv->build_paged_decode_layout(ubatch, sinfos[i_cur], output);
++    prepared_paged_decode_layout = status == llama_paged_decode_layout_status::success ?
++            output : llama_paged_decode_layout{};
++    return status;
 +}
 +
 +llama_paged_decode_layout_status llama_kv_cache::build_paged_decode_layout(
@@ -1868,7 +2072,7 @@ index 2802103..7df286d 100644
 +    return llama_paged_decode_build_layout(sequence_cells, cacheflow_block_tokens_, output);
 +}
 diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
-index 3d68f98..50a90db 100644
+index 3d68f98..0b8de6a 100644
 --- a/src/llama-kv-cache.h
 +++ b/src/llama-kv-cache.h
 @@ -4,6 +4,7 @@
@@ -1977,6 +2181,18 @@ index 3d68f98..50a90db 100644
  
  private:
      llama_memory_status status;
+@@ -417,6 +459,11 @@ private:
+     // the index of the cur ubatch to process
+     size_t i_cur = 0;
+ 
++    // The capability gate builds this from the current slot before graph
++    // construction. The input setter consumes the same immutable snapshot so
++    // a Paged request does not rescan and resort the real KV cells twice.
++    mutable llama_paged_decode_layout prepared_paged_decode_layout;
++
+     slot_info_vec_t sinfos;
+ 
+     std::vector<llama_ubatch> ubatches;
 diff --git a/src/llama-kv-remap-cuda.cuh b/src/llama-kv-remap-cuda.cuh
 new file mode 100644
 index 0000000..60efe29
@@ -2201,10 +2417,10 @@ index db82539..e749164 100644
      //
 diff --git a/src/llama-paged-decode-cuda.cu b/src/llama-paged-decode-cuda.cu
 new file mode 100644
-index 0000000..d358546
+index 0000000..fa58440
 --- /dev/null
 +++ b/src/llama-paged-decode-cuda.cu
-@@ -0,0 +1,230 @@
+@@ -0,0 +1,386 @@
 +#include "llama-paged-decode-cuda.cuh"
 +
 +#include <cuda_fp16.h>
@@ -2224,6 +2440,7 @@ index 0000000..d358546
 +
 +constexpr uint32_t maximum_head_dim = 128;
 +constexpr uint32_t supported_page_size = 16;
++constexpr uint32_t k2_gqa_group_size = 7;
 +
 +bool reject(const char * message, const char ** reason) {
 +    if (reason) *reason = message;
@@ -2297,6 +2514,123 @@ index 0000000..d358546
 +        __syncthreads();
 +    }
 +    output[query_index] = accumulator / online_state[1];
++}
++
++template<uint32_t head_dim, uint32_t query_head_tile>
++__global__ void paged_decode_attention_k2(
++        llama_paged_decode_config config,
++        const uint32_t * page_table,
++        const uint32_t * context_lengths,
++        const __half * query,
++        const __half * k,
++        const __half * v,
++        float * output) {
++    const uint32_t tiles_per_kv =
++            (k2_gqa_group_size + query_head_tile - 1) / query_head_tile;
++    const uint32_t tile = blockIdx.x % tiles_per_kv;
++    const uint32_t sequence_kv = blockIdx.x / tiles_per_kv;
++    const uint32_t sequence = sequence_kv / config.kv_heads;
++    const uint32_t kv_head = sequence_kv % config.kv_heads;
++    const uint32_t tile_head = threadIdx.x / head_dim;
++    const uint32_t dim = threadIdx.x % head_dim;
++    const uint32_t context = context_lengths[sequence];
++    const uint32_t group_head_begin = tile * query_head_tile;
++    const uint32_t active_heads = min(
++            query_head_tile, k2_gqa_group_size - group_head_begin);
++    const bool active = tile_head < active_heads;
++
++    float q = 0.0f;
++    float accumulator = 0.0f;
++    if (active) {
++        const uint32_t query_head =
++                kv_head * k2_gqa_group_size + group_head_begin + tile_head;
++        const size_t query_index = ((size_t) sequence * config.query_heads + query_head) *
++                head_dim + dim;
++        q = __half2float(query[query_index]);
++    }
++
++    __shared__ float reduction[query_head_tile * head_dim];
++    __shared__ float key_tile[head_dim];
++    __shared__ float value_tile[head_dim];
++    // Per query head: running max, denominator, previous-scale alpha, score beta.
++    __shared__ float online_state[query_head_tile * 4];
++    if (active && dim == 0) {
++        online_state[tile_head * 4] = -FLT_MAX;
++        online_state[tile_head * 4 + 1] = 0.0f;
++    }
++    __syncthreads();
++
++    for (uint32_t token = 0; token < context; ++token) {
++        const uint32_t logical_page = token / config.page_size;
++        const uint32_t page_offset = token % config.page_size;
++        const uint32_t physical_page = page_table[
++                (size_t) sequence * config.max_pages_per_sequence + logical_page];
++        const size_t token_base = ((size_t) physical_page * config.page_size + page_offset) *
++                config.kv_heads * head_dim;
++        const size_t kv_index = token_base + (size_t) kv_head * head_dim + dim;
++        if (threadIdx.x < head_dim) {
++            key_tile[dim] = __half2float(k[kv_index]);
++            value_tile[dim] = __half2float(v[kv_index]);
++        }
++        __syncthreads();
++        if (active) {
++            reduction[tile_head * head_dim + dim] = q * key_tile[dim];
++        }
++        __syncthreads();
++        for (uint32_t stride = head_dim / 2; stride > 0; stride /= 2) {
++            if (active && dim < stride) {
++                reduction[tile_head * head_dim + dim] +=
++                        reduction[tile_head * head_dim + dim + stride];
++            }
++            __syncthreads();
++        }
++        if (active && dim == 0) {
++            float * state = online_state + tile_head * 4;
++            const float score = reduction[tile_head * head_dim] * config.scale;
++            const float next_max = fmaxf(state[0], score);
++            const float alpha = state[1] == 0.0f ? 0.0f : expf(state[0] - next_max);
++            const float beta = expf(score - next_max);
++            state[0] = next_max;
++            state[1] = state[1] * alpha + beta;
++            state[2] = alpha;
++            state[3] = beta;
++        }
++        __syncthreads();
++        if (active) {
++            const float * state = online_state + tile_head * 4;
++            accumulator = accumulator * state[2] + state[3] * value_tile[dim];
++        }
++        __syncthreads();
++    }
++
++    if (active) {
++        const uint32_t query_head =
++                kv_head * k2_gqa_group_size + group_head_begin + tile_head;
++        const size_t output_index = ((size_t) sequence * config.query_heads + query_head) *
++                head_dim + dim;
++        output[output_index] = accumulator / online_state[tile_head * 4 + 1];
++    }
++}
++
++template<uint32_t head_dim, uint32_t query_head_tile>
++cudaError_t launch_k2(
++        const llama_paged_decode_plan * plan,
++        const uint16_t * query,
++        const uint16_t * paged_k,
++        const uint16_t * paged_v,
++        float * output,
++        cudaStream_t stream) {
++    const unsigned tiles_per_kv =
++            (k2_gqa_group_size + query_head_tile - 1) / query_head_tile;
++    const unsigned blocks =
++            plan->config.batch_size * plan->config.kv_heads * tiles_per_kv;
++    paged_decode_attention_k2<head_dim, query_head_tile><<<
++            blocks, head_dim * query_head_tile, 0, stream>>>(
++            plan->config, plan->page_table, plan->context_lengths,
++            reinterpret_cast<const __half *>(query),
++            reinterpret_cast<const __half *>(paged_k),
++            reinterpret_cast<const __half *>(paged_v), output);
++    return cudaGetLastError();
 +}
 +
 +cudaError_t launch(
@@ -2420,6 +2754,44 @@ index 0000000..d358546
 +    return launch(plan, query, paged_k, paged_v, output, stream, true);
 +}
 +
++cudaError_t llama_paged_decode_launch_paged_k2(
++        const llama_paged_decode_plan * plan,
++        const uint16_t * query,
++        const uint16_t * paged_k,
++        const uint16_t * paged_v,
++        float * output,
++        cudaStream_t stream) {
++    return llama_paged_decode_launch_paged_k2_tile(
++            plan, query, paged_k, paged_v, output, stream, 2);
++}
++
++cudaError_t llama_paged_decode_launch_paged_k2_tile(
++        const llama_paged_decode_plan * plan,
++        const uint16_t * query,
++        const uint16_t * paged_k,
++        const uint16_t * paged_v,
++        float * output,
++        cudaStream_t stream,
++        uint32_t query_head_tile) {
++    if (!plan || !query || !paged_k || !paged_v || !output) return cudaErrorInvalidValue;
++    if (plan->config.query_heads / plan->config.kv_heads != k2_gqa_group_size) {
++        return cudaErrorInvalidValue;
++    }
++#define CACHEFLOW_K2_TILE(D, T) \
++    launch_k2<D, T>(plan, query, paged_k, paged_v, output, stream)
++    if (plan->config.head_dim == 64) {
++        if (query_head_tile == 2) return CACHEFLOW_K2_TILE(64, 2);
++        if (query_head_tile == 4) return CACHEFLOW_K2_TILE(64, 4);
++        if (query_head_tile == 7) return CACHEFLOW_K2_TILE(64, 7);
++    } else if (plan->config.head_dim == 128) {
++        if (query_head_tile == 2) return CACHEFLOW_K2_TILE(128, 2);
++        if (query_head_tile == 4) return CACHEFLOW_K2_TILE(128, 4);
++        if (query_head_tile == 7) return CACHEFLOW_K2_TILE(128, 7);
++    }
++#undef CACHEFLOW_K2_TILE
++    return cudaErrorInvalidValue;
++}
++
 +cudaError_t llama_paged_decode_launch_contiguous(
 +        const llama_paged_decode_plan * plan,
 +        const uint16_t * query,
@@ -2437,10 +2809,10 @@ index 0000000..d358546
 +}
 diff --git a/src/llama-paged-decode-cuda.cuh b/src/llama-paged-decode-cuda.cuh
 new file mode 100644
-index 0000000..7b912cb
+index 0000000..103b672
 --- /dev/null
 +++ b/src/llama-paged-decode-cuda.cuh
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,75 @@
 +#pragma once
 +
 +#include <cuda_runtime.h>
@@ -2483,6 +2855,28 @@ index 0000000..7b912cb
 +        const uint16_t * paged_v,
 +        float * output,
 +        cudaStream_t stream);
++
++// K2 keeps the same contract and output layout as K1. The selected T2 tile
++// owns two query heads, so each GQA KV vector is loaded once per tile (four
++// times per seven-head group rather than seven times in K1).
++cudaError_t llama_paged_decode_launch_paged_k2(
++        const llama_paged_decode_plan * plan,
++        const uint16_t * query,
++        const uint16_t * paged_k,
++        const uint16_t * paged_v,
++        float * output,
++        cudaStream_t stream);
++
++// Development seam for the preregistered K2 tile ablation. Production uses
++// the fixed tile selected before its confirmatory service experiment.
++cudaError_t llama_paged_decode_launch_paged_k2_tile(
++        const llama_paged_decode_plan * plan,
++        const uint16_t * query,
++        const uint16_t * paged_k,
++        const uint16_t * paged_v,
++        float * output,
++        cudaStream_t stream,
++        uint32_t query_head_tile);
 +
 +cudaError_t llama_paged_decode_launch_contiguous(
 +        const llama_paged_decode_plan * plan,
@@ -3239,10 +3633,10 @@ index 0000000..3af8e59
 +}
 diff --git a/tests/bench-paged-decode-cuda.cu b/tests/bench-paged-decode-cuda.cu
 new file mode 100644
-index 0000000..0d28c8e
+index 0000000..04fd4c1
 --- /dev/null
 +++ b/tests/bench-paged-decode-cuda.cu
-@@ -0,0 +1,358 @@
+@@ -0,0 +1,417 @@
 +#include "llama-paged-decode-cuda.cuh"
 +
 +#include <cuda_fp16.h>
@@ -3272,7 +3666,18 @@ index 0000000..0d28c8e
 +
 +uint16_t fp16(float value) { return __half_as_ushort(__float2half(value)); }
 +float fp32(uint16_t value) { return __half2float(__ushort_as_half(value)); }
-+enum class method { contiguous, paged };
++enum class method { contiguous, paged_k1, paged_k2, paged_k2_t4, paged_k2_full };
++
++const char * method_name(method selected) {
++    switch (selected) {
++        case method::contiguous: return "contiguous";
++        case method::paged_k1: return "paged-k1";
++        case method::paged_k2: return "paged-k2-t2";
++        case method::paged_k2_t4: return "paged-k2-t4";
++        case method::paged_k2_full: return "paged-k2-full";
++    }
++    return "unknown";
++}
 +
 +struct measured {
 +    double enqueue_ms = 0.0;
@@ -3369,9 +3774,18 @@ index 0000000..0d28c8e
 +    check(cudaEventCreate(&stop), "create stop event");
 +    const auto wall_start = std::chrono::steady_clock::now();
 +    check(cudaEventRecord(start, stream), "record start");
-+    if (selected == method::paged) {
++    if (selected == method::paged_k1) {
 +        check(llama_paged_decode_launch_paged(plan, query, paged_k, paged_v, output, stream),
-+                "launch paged");
++                "launch paged K1");
++    } else if (selected == method::paged_k2) {
++        check(llama_paged_decode_launch_paged_k2(
++                plan, query, paged_k, paged_v, output, stream), "launch paged K2");
++    } else if (selected == method::paged_k2_t4) {
++        check(llama_paged_decode_launch_paged_k2_tile(
++                plan, query, paged_k, paged_v, output, stream, 4), "launch paged K2-T4");
++    } else if (selected == method::paged_k2_full) {
++        check(llama_paged_decode_launch_paged_k2_tile(
++                plan, query, paged_k, paged_v, output, stream, 7), "launch paged K2-full");
 +    } else {
 +        check(llama_paged_decode_launch_contiguous(
 +                plan, query, contiguous_k, contiguous_v, output, stream),
@@ -3393,7 +3807,7 @@ index 0000000..0d28c8e
 +}
 +
 +void run_regime(const regime & selected, int repetitions, bool profile, bool paired,
-+        method single_method, uint32_t seed_base) {
++        bool compare_k1_k2, method k2_method, method single_method, uint32_t seed_base) {
 +    const uint32_t query_heads = selected.qwen7b_shape ? 28u : 14u;
 +    const uint32_t kv_heads = selected.qwen7b_shape ? 4u : 2u;
 +    const uint32_t head_dim = selected.qwen7b_shape ? 128u : 64u;
@@ -3481,14 +3895,20 @@ index 0000000..0d28c8e
 +    std::vector<float> contiguous_output(query_elements);
 +    check(cudaMemcpy(contiguous_output.data(), d_output, query_elements * sizeof(float),
 +            cudaMemcpyDeviceToHost), "read contiguous reference");
-+    (void) measure(method::paged, plan, d_query, d_paged_k, d_paged_v,
++    (void) measure(method::paged_k1, plan, d_query, d_paged_k, d_paged_v,
 +            d_contiguous_k, d_contiguous_v, d_output, stream);
 +    std::vector<float> paged_output(query_elements);
 +    check(cudaMemcpy(paged_output.data(), d_output, query_elements * sizeof(float),
 +            cudaMemcpyDeviceToHost), "read paged output");
-+    const float maximum_error = std::max(
++    float maximum_error = std::max(
 +            require_cpu_oracle(cpu_output, contiguous_output, seed, "contiguous"),
 +            require_cpu_oracle(cpu_output, paged_output, seed, "paged"));
++    (void) measure(method::paged_k2, plan, d_query, d_paged_k, d_paged_v,
++            d_contiguous_k, d_contiguous_v, d_output, stream);
++    check(cudaMemcpy(paged_output.data(), d_output, query_elements * sizeof(float),
++            cudaMemcpyDeviceToHost), "read paged K2 output");
++    maximum_error = std::max(
++            maximum_error, require_cpu_oracle(cpu_output, paged_output, seed, "paged-k2"));
 +
 +    if (profile) check(cudaProfilerStart(), "start profiler");
 +    std::mt19937 order_rng(seed);
@@ -3498,34 +3918,40 @@ index 0000000..0d28c8e
 +        const size_t bytes = (size_t) selected.batch * selected.context * kv_heads *
 +                head_dim * sizeof(uint16_t) * 2;
 +        if (paired) {
-+            measured contiguous{};
-+            measured paged_result{};
++            const method baseline_method =
++                    compare_k1_k2 ? method::paged_k1 : method::contiguous;
++            const method candidate_method =
++                    compare_k1_k2 ? k2_method : method::paged_k1;
++            measured baseline{};
++            measured candidate{};
 +            if (first_contiguous) {
-+                contiguous = measure(method::contiguous, plan, d_query, d_paged_k, d_paged_v,
++                baseline = measure(baseline_method, plan, d_query, d_paged_k, d_paged_v,
 +                        d_contiguous_k, d_contiguous_v, d_output, stream);
-+                paged_result = measure(method::paged, plan, d_query, d_paged_k, d_paged_v,
++                candidate = measure(candidate_method, plan, d_query, d_paged_k, d_paged_v,
 +                        d_contiguous_k, d_contiguous_v, d_output, stream);
 +            } else {
-+                paged_result = measure(method::paged, plan, d_query, d_paged_k, d_paged_v,
++                candidate = measure(candidate_method, plan, d_query, d_paged_k, d_paged_v,
 +                        d_contiguous_k, d_contiguous_v, d_output, stream);
-+                contiguous = measure(method::contiguous, plan, d_query, d_paged_k, d_paged_v,
++                baseline = measure(baseline_method, plan, d_query, d_paged_k, d_paged_v,
 +                        d_contiguous_k, d_contiguous_v, d_output, stream);
 +            }
-+            std::printf("confirmatory,contiguous,%s,%u,%u,%s,%d,%d,%u,%.6f,%.6f,%.6f,%.9f,%zu\n",
++            std::printf("confirmatory,%s,%s,%u,%u,%s,%d,%d,%u,%.6f,%.6f,%.6f,%.9f,%zu\n",
++                    method_name(baseline_method),
 +                    selected.qwen7b_shape ? "qwen2.5-7b-shape" : "qwen2.5-0.5b",
 +                    selected.context, selected.batch, selected.fragmented ? "fragmented" : "identity",
-+                    trial, first_contiguous ? 0 : 1, seed, contiguous.enqueue_ms,
-+                    contiguous.gpu_ms, contiguous.end_to_end_ms, maximum_error, bytes);
-+            std::printf("confirmatory,paged,%s,%u,%u,%s,%d,%d,%u,%.6f,%.6f,%.6f,%.9f,%zu\n",
++                    trial, first_contiguous ? 0 : 1, seed, baseline.enqueue_ms,
++                    baseline.gpu_ms, baseline.end_to_end_ms, maximum_error, bytes);
++            std::printf("confirmatory,%s,%s,%u,%u,%s,%d,%d,%u,%.6f,%.6f,%.6f,%.9f,%zu\n",
++                    method_name(candidate_method),
 +                    selected.qwen7b_shape ? "qwen2.5-7b-shape" : "qwen2.5-0.5b",
 +                    selected.context, selected.batch, selected.fragmented ? "fragmented" : "identity",
-+                    trial, first_contiguous ? 1 : 0, seed, paged_result.enqueue_ms,
-+                    paged_result.gpu_ms, paged_result.end_to_end_ms, maximum_error, bytes);
++                    trial, first_contiguous ? 1 : 0, seed, candidate.enqueue_ms,
++                    candidate.gpu_ms, candidate.end_to_end_ms, maximum_error, bytes);
 +        } else {
 +            const measured result = measure(single_method, plan, d_query, d_paged_k, d_paged_v,
 +                    d_contiguous_k, d_contiguous_v, d_output, stream);
 +            std::printf("profile,%s,%s,%u,%u,%s,%d,0,%u,%.6f,%.6f,%.6f,%.9f,%zu\n",
-+                    single_method == method::paged ? "paged" : "contiguous",
++                    method_name(single_method),
 +                    selected.qwen7b_shape ? "qwen2.5-7b-shape" : "qwen2.5-0.5b",
 +                    selected.context, selected.batch,
 +                    selected.fragmented ? "fragmented" : "identity", trial, seed,
@@ -3552,7 +3978,9 @@ index 0000000..0d28c8e
 +    regime selected{ 0, 0, false, false };
 +    int repetitions = 10;
 +    uint32_t seed_base = 20260807u;
-+    method single_method = method::paged;
++    bool compare_k1_k2 = false;
++    method k2_method = method::paged_k2;
++    method single_method = method::paged_k1;
 +    for (int i = 1; i < argc; ++i) {
 +        if (std::strcmp(argv[i], "--profile") == 0) profile = true;
 +        else if (std::strcmp(argv[i], "--context") == 0 && i + 1 < argc)
@@ -3574,8 +4002,31 @@ index 0000000..0d28c8e
 +            else if (std::strcmp(value, "identity") != 0) return 2;
 +        } else if (std::strcmp(argv[i], "--method") == 0 && i + 1 < argc) {
 +            const char * value = argv[++i];
-+            if (std::strcmp(value, "paired") == 0) paired = true;
-+            else if (std::strcmp(value, "paged") == 0) { paired = false; single_method = method::paged; }
++            if (std::strcmp(value, "paired") == 0) {
++                paired = true;
++                compare_k1_k2 = false;
++            } else if (std::strcmp(value, "k1-k2") == 0) {
++                paired = true;
++                compare_k1_k2 = true;
++                k2_method = method::paged_k2;
++            } else if (std::strcmp(value, "k1-k2-t4") == 0) {
++                paired = true;
++                compare_k1_k2 = true;
++                k2_method = method::paged_k2_t4;
++            } else if (std::strcmp(value, "k1-k2-full") == 0) {
++                paired = true;
++                compare_k1_k2 = true;
++                k2_method = method::paged_k2_full;
++            } else if (std::strcmp(value, "paged") == 0 ||
++                    std::strcmp(value, "paged-k1") == 0) {
++                paired = false; single_method = method::paged_k1;
++            } else if (std::strcmp(value, "paged-k2") == 0) {
++                paired = false; single_method = method::paged_k2;
++            } else if (std::strcmp(value, "paged-k2-t4") == 0) {
++                paired = false; single_method = method::paged_k2_t4;
++            } else if (std::strcmp(value, "paged-k2-full") == 0) {
++                paired = false; single_method = method::paged_k2_full;
++            }
 +            else if (std::strcmp(value, "contiguous") == 0) {
 +                paired = false; single_method = method::contiguous;
 +            } else return 2;
@@ -3585,7 +4036,8 @@ index 0000000..0d28c8e
 +    std::puts("phase,method,shape,context,batch,layout,trial,order_in_pair,random_seed,host_enqueue_ms,gpu_ms,end_to_end_ms,max_abs_error,logical_kv_bytes");
 +    if (selected.context != 0 || selected.batch != 0) {
 +        if (selected.context == 0 || selected.batch == 0) return 2;
-+        run_regime(selected, repetitions, profile, paired, single_method, seed_base);
++        run_regime(selected, repetitions, profile, paired, compare_k1_k2, k2_method,
++                single_method, seed_base);
 +        return 0;
 +    }
 +    if (profile) return 2;
@@ -3594,7 +4046,8 @@ index 0000000..0d28c8e
 +            for (uint32_t batch : { 1u, 4u }) {
 +                for (bool fragmented : { false, true }) {
 +                    run_regime({ context, batch, fragmented, qwen7b_shape }, repetitions,
-+                            false, true, method::paged, seed_base);
++                            false, true, false, method::paged_k2,
++                            method::paged_k1, seed_base);
 +                }
 +            }
 +        }
@@ -3602,10 +4055,10 @@ index 0000000..0d28c8e
 +    return 0;
 +}
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
-index 00d90fc..a4e3b6f 100644
+index 00d90fc..50cfcf8 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
-@@ -6601,6 +6601,83 @@ struct test_flash_attn_ext : public test_case {
+@@ -6601,6 +6601,102 @@ struct test_flash_attn_ext : public test_case {
      }
  };
  
@@ -3614,8 +4067,13 @@ index 00d90fc..a4e3b6f 100644
 +// operator contract, so a CUDA implementation that ignores block_table cannot
 +// match the CPU oracle.
 +struct test_flash_attn_ext_paged : public test_case {
++    const int context;
++
++    explicit test_flash_attn_ext_paged(int context) : context(context) {}
++
 +    std::string vars() override {
-+        return "hsk=64,nh=14,nkv=2,kv=17,context=17,page=16";
++        return "hsk=64,nh=14,nkv=2,kv=64,context=" +
++                std::to_string(context) + ",page=16";
 +    }
 +
 +    double max_nmse_err() override {
@@ -3624,9 +4082,10 @@ index 00d90fc..a4e3b6f 100644
 +
 +    ggml_tensor * build_graph(ggml_context * ctx) override {
 +        ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, 64, 1, 14, 1);
-+        ggml_tensor * k = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, 64, 48, 2, 1);
-+        ggml_tensor * v = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, 64, 48, 2, 1);
-+        ggml_tensor * block_table = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2);
++        ggml_tensor * k = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, 64, 64, 2, 1);
++        ggml_tensor * v = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, 64, 64, 2, 1);
++        ggml_tensor * block_table = ggml_new_tensor_1d(
++                ctx, GGML_TYPE_I32, (context + 15) / 16);
 +        ggml_tensor * context_lengths = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
 +        ggml_set_name(q, "q");
 +        ggml_set_name(k, "k");
@@ -3643,24 +4102,34 @@ index 00d90fc..a4e3b6f 100644
 +        for (ggml_tensor * tensor = ggml_get_first_tensor(ctx); tensor != nullptr;
 +                tensor = ggml_get_next_tensor(ctx, tensor)) {
 +            if (strcmp(tensor->name, "block_table") == 0) {
-+                const int32_t values[] = {32, 0};
-+                ggml_backend_tensor_set(tensor, values, 0, sizeof(values));
++                const int32_t values[] = {32, 0, 48};
++                ggml_backend_tensor_set(tensor, values, 0,
++                        ggml_nelements(tensor) * sizeof(values[0]));
 +            } else if (strcmp(tensor->name, "context_lengths") == 0) {
-+                const int32_t value = 17;
++                const int32_t value = context;
 +                ggml_backend_tensor_set(tensor, &value, 0, sizeof(value));
 +            } else if (strcmp(tensor->name, "q") == 0) {
-+                std::vector<float> values(ggml_nelements(tensor), 1.0f);
++                std::vector<float> values(ggml_nelements(tensor));
++                for (size_t index = 0; index < values.size(); ++index) {
++                    const int dim = (int) (index % 64);
++                    const int head = (int) (index / 64);
++                    values[index] = 0.013f * (head + 1) - 0.0007f * dim +
++                            0.00001f * (int) ((index * 17 + 11) % 29);
++                }
 +                ggml_backend_tensor_set(tensor, values.data(), 0, values.size() * sizeof(values[0]));
 +            } else if (strcmp(tensor->name, "k") == 0) {
 +                std::vector<ggml_fp16_t> values(ggml_nelements(tensor),
 +                                                ggml_fp32_to_fp16(-50.0f));
 +                for (int head = 0; head < 2; ++head) {
-+                    for (int token = 0; token < 17; ++token) {
-+                        const int physical = token < 16 ? 32 + token : token - 16;
++                    for (int token = 0; token < context; ++token) {
++                        const int logical_page = token / 16;
++                        const int page_base[] = {32, 0, 48};
++                        const int physical = page_base[logical_page] + token % 16;
 +                        for (int dim = 0; dim < 64; ++dim) {
-+                            const size_t index = dim + 64 * physical + 64 * 48 * head;
++                            const size_t index = dim + 64 * physical + 64 * 64 * head;
 +                            values[index] = ggml_fp32_to_fp16(
-+                                    0.01f * (token + 1) + 0.001f * head + 0.00001f * dim);
++                                    0.01f * (token + 1) + 0.001f * head +
++                                    0.00001f * dim + 0.000003f * ((token * 13 + dim) % 7));
 +                        }
 +                    }
 +                }
@@ -3669,12 +4138,15 @@ index 00d90fc..a4e3b6f 100644
 +                std::vector<ggml_fp16_t> values(ggml_nelements(tensor),
 +                                                ggml_fp32_to_fp16(-1000.0f));
 +                for (int head = 0; head < 2; ++head) {
-+                    for (int token = 0; token < 17; ++token) {
-+                        const int physical = token < 16 ? 32 + token : token - 16;
++                    for (int token = 0; token < context; ++token) {
++                        const int logical_page = token / 16;
++                        const int page_base[] = {32, 0, 48};
++                        const int physical = page_base[logical_page] + token % 16;
 +                        for (int dim = 0; dim < 64; ++dim) {
-+                            const size_t index = dim + 64 * physical + 64 * 48 * head;
++                            const size_t index = dim + 64 * physical + 64 * 64 * head;
 +                            values[index] = ggml_fp32_to_fp16(
-+                                    static_cast<float>(token + 100 * head) + 0.001f * dim);
++                                    static_cast<float>(token + 100 * head) + 0.001f * dim +
++                                    0.0001f * ((token * 5 + dim * 3) % 11));
 +                        }
 +                    }
 +                }
@@ -3689,11 +4161,16 @@ index 00d90fc..a4e3b6f 100644
  // GGML_OP_CROSS_ENTROPY_LOSS
  struct test_cross_entropy_loss : public test_case {
      const ggml_type type;
-@@ -9109,6 +9186,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+@@ -9109,6 +9205,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
      test_cases.emplace_back(new test_flash_attn_ext(128, 64, 4, {1, 1}, 128, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q1_0, GGML_TYPE_Q4_0));
      test_cases.emplace_back(new test_flash_attn_ext(64, 128, 4, {1, 1}, 128, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q1_0));
      test_cases.emplace_back(new test_flash_attn_ext(128, 64, 4, {1, 1}, 64, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q1_0, GGML_TYPE_F16));
-+    test_cases.emplace_back(new test_flash_attn_ext_paged());
++    // Page and dispatch boundaries for the production Paged operator:
++    // one-page, first two-page action, interior two-page cases, maximum K2
++    // capability, and the first context that must use the complete K1 path.
++    for (int context : {1, 15, 16, 17, 18, 31, 32, 33}) {
++        test_cases.emplace_back(new test_flash_attn_ext_paged(context));
++    }
  
      test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {   10, 5, 4, 3}));
      test_cases.emplace_back(new test_cross_entropy_loss     (GGML_TYPE_F32, {30000, 1, 1, 1}));
@@ -5526,10 +6003,10 @@ index 0000000..1a944de
 +}
 diff --git a/tests/test-paged-decode-cuda.cu b/tests/test-paged-decode-cuda.cu
 new file mode 100644
-index 0000000..d26a09c
+index 0000000..c1f78cb
 --- /dev/null
 +++ b/tests/test-paged-decode-cuda.cu
-@@ -0,0 +1,391 @@
+@@ -0,0 +1,419 @@
 +#ifdef NDEBUG
 +#undef NDEBUG
 +#endif
@@ -5696,6 +6173,12 @@ index 0000000..d26a09c
 +    check(cudaMemcpy(output.data(), device_output, output.size() * sizeof(float),
 +            cudaMemcpyDeviceToHost), "read output");
 +    for (float value : output) assert(std::fabs(value - 9.0f) < 1e-5f);
++    check(llama_paged_decode_launch_paged_k2(
++            plan, device_query, device_k, device_v, device_output, nullptr), "launch paged K2");
++    check(cudaDeviceSynchronize(), "wait paged K2");
++    check(cudaMemcpy(output.data(), device_output, output.size() * sizeof(float),
++            cudaMemcpyDeviceToHost), "read K2 output");
++    for (float value : output) assert(std::fabs(value - 9.0f) < 1e-5f);
 +
 +    cudaFree(device_output);
 +    cudaFree(device_v);
@@ -5787,6 +6270,20 @@ index 0000000..d26a09c
 +    check(cudaMemcpy(observed.data(), device_output, query_elements * sizeof(float),
 +            cudaMemcpyDeviceToHost), "read randomized paged");
 +    require_close(expected, observed, seed, "paged");
++    check(llama_paged_decode_launch_paged_k2(plan, device_query, device_paged_k,
++            device_paged_v, device_output, nullptr), "launch randomized paged K2");
++    check(cudaDeviceSynchronize(), "wait randomized paged K2");
++    check(cudaMemcpy(observed.data(), device_output, query_elements * sizeof(float),
++            cudaMemcpyDeviceToHost), "read randomized paged K2");
++    require_close(expected, observed, seed, "paged-k2");
++    for (uint32_t tile : { 4u, 7u }) {
++        check(llama_paged_decode_launch_paged_k2_tile(plan, device_query, device_paged_k,
++                device_paged_v, device_output, nullptr, tile), "launch K2 tile ablation");
++        check(cudaDeviceSynchronize(), "wait K2 tile ablation");
++        check(cudaMemcpy(observed.data(), device_output, query_elements * sizeof(float),
++                cudaMemcpyDeviceToHost), "read K2 tile ablation");
++        require_close(expected, observed, seed, tile == 4 ? "paged-k2-t4" : "paged-k2-full");
++    }
 +    check(llama_paged_decode_launch_contiguous(plan, device_query, device_contiguous_k,
 +            device_contiguous_v, device_output, nullptr), "launch contiguous");
 +    check(cudaDeviceSynchronize(), "wait contiguous");
@@ -5869,6 +6366,12 @@ index 0000000..d26a09c
 +                cudaMemcpyDeviceToHost), "read tail output");
 +        const float expected = ((float) context + 1.0f) / 2.0f;
 +        for (float value : output) assert(std::fabs(value - expected) < 1e-5f);
++        check(llama_paged_decode_launch_paged_k2(
++                plan, d_query, d_k, d_v, d_output, nullptr), "launch K2 tail case");
++        check(cudaDeviceSynchronize(), "wait K2 tail case");
++        check(cudaMemcpy(output.data(), d_output, query_elements * sizeof(float),
++                cudaMemcpyDeviceToHost), "read K2 tail output");
++        for (float value : output) assert(std::fabs(value - expected) < 1e-5f);
 +        llama_paged_decode_plan_destroy(plan);
 +    }
 +    cudaFree(d_output);
@@ -5910,6 +6413,8 @@ index 0000000..d26a09c
 +            cudaErrorInvalidValue);
 +    assert(llama_paged_decode_launch_paged(
 +            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr) == cudaErrorInvalidValue);
++    assert(llama_paged_decode_launch_paged_k2_tile(
++            plan, nullptr, nullptr, nullptr, nullptr, nullptr, 3) == cudaErrorInvalidValue);
 +}
 +
 +} // namespace
@@ -7237,7 +7742,7 @@ index 0000000..771def3
 +    checkpoint_restore_result restore_checkpoint(const std::string & payload);
 +};
 diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
-index 986b2f1..5d5976e 100644
+index 986b2f1..d06edf2 100644
 --- a/tools/server/server-context.cpp
 +++ b/tools/server/server-context.cpp
 @@ -4,6 +4,14 @@
@@ -7703,7 +8208,7 @@ index 986b2f1..5d5976e 100644
 +        capabilities.direct = request.direct_legal;
 +        capabilities.remap = params_base.kv_block_runtime && donor_prefix > resident_prefix;
 +        capabilities.paged = params_base.kv_paged_decode && resident_prefix > 0 &&
-+                resident_prefix <= 17 && params_base.kv_block_size == 16;
++                resident_prefix <= 32 && params_base.kv_block_size == 16;
 +        capabilities.device_swap = prefix_matches(target.cuda_swapped_tokens);
 +        capabilities.host_swap = target.store_swap_handle != 0 &&
 +                prefix_matches(target.store_swapped_tokens);

@@ -2,6 +2,8 @@
 
 > 最终交付入口：[最终成果说明](docs/final-outcome.md) · [图文总结报告](docs/final-illustrated-report.md) · [机器可读成果](results/final-outcome.json) · `scripts/verify_final_outcome.ps1`。该成果可作为单机应用项目和有边界的独立科研型项目，不冒充已发表论文，也不把 K2 对 K1 的 kernel 改善写成 Paged 对 Direct 的整体加速。
 
+> Paged 性能不再由单一硬编码 prompt 决定：H9 使用独立冻结的六类 prompt 语料、30 组随机化匹配进程块和360个 workload-arm 观测，并按实际token/page分层。总体中位数显示改善，但 block-workload 回退分布P95与最差workload门禁失败，因此默认仍关闭；独立进程块不冒充共享热状态 Trial Pair。模型/vendor-diff 哈希是实验后的审计修正，不冒充运行前绑定。详见 [`h9-objective-paged-v2.0.0`](results/research/h9-objective-paged-v2.0.0/report.md)。
+
 CacheFlow Runtime 是一个直接重构 llama.cpp 推理热路径的单机 LLM Serving / AI Infra 项目。它不是 Python 包装层，也不把 `vendor/` 中的上游源码算作个人工作量：个人实现以固定上游 `acd79d603` 为基线，通过可重放 patch 进入真实 `llama-server -> llama_decode -> KV memory -> CUDA` 调用链。
 
 当前 fork 相对固定上游涉及 69 个文件，新增 11,030 行、删除 99 行 C/C++/CUDA；最终以可重放 patch 的 `git diff --stat` 为准。外层 Python 仅负责固定实验、故障注入和报告。

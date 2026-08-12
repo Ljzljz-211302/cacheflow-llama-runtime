@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import unittest
 from pathlib import Path
 
@@ -27,6 +28,9 @@ def rows(protocol, corpus):
                 "contents": [","] * 4,
                 "paged_calls": 4 if action == "paged" else 0,
                 "paged_fallbacks": 0,
+                "action_decisions": 4,
+                "action_reason_decisions": 4,
+                "action_observations": 4,
             })
     return result
 
@@ -64,11 +68,49 @@ class ObjectivePagedBenchmarkTests(unittest.TestCase):
         protocol, corpus = load_definition(
             ROOT, ROOT / "config/production_paged_objective_protocol_v2.json"
         )
-        evidence = rows(protocol, corpus)
-        summary = analyze(protocol, corpus, evidence)
+        amended = copy.deepcopy(protocol)
+        amended["matched_process_blocks"] = protocol["paired_trials"]
+        evidence = rows(amended, corpus)
+        summary = analyze(amended, corpus, evidence)
         self.assertTrue(summary["page_coverage_passed"])
         self.assertIn("primary_p95_limit_percent", summary)
         self.assertIn("worst_workload_median_regression_percent", summary)
+        self.assertEqual(summary["matched_process_blocks"], 30)
+
+    def test_repository_v2_retains_negative_tail_result(self):
+        summary = json.loads(
+            (ROOT / "results/research/h9-objective-paged-v2.0.0/summary.json").read_text(encoding="utf-8")
+        )
+        self.assertFalse(summary["promotion_passed"])
+        self.assertTrue(summary["page_coverage_passed"])
+        self.assertGreater(summary["primary_matched_block_regression_percent"]["p95"], 20.0)
+        self.assertGreater(summary["worst_workload_median_regression_percent"], 5.0)
+
+    def test_analysis_rejects_misrouted_direct_arm(self):
+        protocol, corpus = load_definition(
+            ROOT, ROOT / "config/production_paged_objective_protocol_v2.json"
+        )
+        evidence = rows(protocol, corpus)
+        direct = next(row for row in evidence if row["action"] == "direct")
+        direct["paged_calls"] = 1
+        with self.assertRaisesRegex(ValueError, "Direct row entered"):
+            analyze(protocol, corpus, evidence)
+
+    def test_v2_binds_model_and_vendor_overlay(self):
+        protocol, _ = load_definition(
+            ROOT, ROOT / "config/production_paged_objective_protocol_v2.json"
+        )
+        amendment = json.loads(
+            (ROOT / "config/production_paged_objective_validation_amendment_v2.json").read_text(encoding="utf-8")
+        )
+        protocol_path = ROOT / amendment["original_protocol_file"]
+        self.assertEqual(hashlib.sha256(protocol_path.read_bytes()).hexdigest(), amendment["original_protocol_sha256"])
+        self.assertTrue(amendment["terminology"]["not_a_trial_pair"])
+        binding = amendment["post_run_evidence_binding"]
+        self.assertEqual(len(binding["model_sha256"]), 64)
+        overlay = ROOT / binding["vendor_overlay_file"]
+        self.assertEqual(hashlib.sha256(overlay.read_bytes()).hexdigest(), binding["vendor_overlay_sha256"])
+        self.assertEqual(len(binding["vendor_diff_sha256"]), 64)
 
     def test_service_and_model_paged_capability_share_context_32_boundary(self):
         service = (ROOT / "vendor/llama.cpp/tools/server/server-context.cpp").read_text(encoding="utf-8")

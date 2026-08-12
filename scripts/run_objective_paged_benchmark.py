@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import random
@@ -32,17 +33,55 @@ def prompt_sha256(prompt: str) -> str:
     return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
 
+def vendor_diff_sha256() -> str:
+    diff = subprocess.check_output(
+        ["git", "-C", "vendor/llama.cpp", "diff", "--binary", "HEAD"], cwd=ROOT,
+    ).replace(b"\r\n", b"\n")
+    return hashlib.sha256(diff).hexdigest()
+
+
+def validation_amendment(root: Path, protocol_path: Path) -> dict | None:
+    path = root / "config/production_paged_objective_validation_amendment_v2.json"
+    if protocol_path.resolve() != (root / "config/production_paged_objective_protocol_v2.json").resolve():
+        return None
+    amendment = json.loads(path.read_text(encoding="utf-8"))
+    if amendment["original_protocol_sha256"] != file_sha256(protocol_path):
+        raise AssertionError("validation amendment does not bind the original protocol")
+    return amendment
+
+
+def analysis_protocol(protocol: dict, amendment: dict | None) -> dict:
+    if not amendment:
+        return protocol
+    amended = copy.deepcopy(protocol)
+    amended["matched_process_blocks"] = int(protocol["paired_trials"])
+    return amended
+
+
 def render_report(summary: dict, corpus: dict) -> str:
-    primary = summary["primary_paired_regression_percent"]
-    interval = summary["primary_pair_cluster_bootstrap_95_percent"]
+    matched_blocks = "matched_process_blocks" in summary
+    primary = summary["primary_matched_block_regression_percent" if matched_blocks else "primary_paired_regression_percent"]
+    interval = summary["primary_block_cluster_bootstrap_95_percent" if matched_blocks else "primary_pair_cluster_bootstrap_95_percent"]
+    design = (f"{summary['matched_process_blocks']} randomized matched-process blocks × Direct/Paged × every workload"
+              if matched_blocks else f"{summary['paired_trials']} process pairs × Direct/Paged × every workload")
+    primary_label = "matched-block" if matched_blocks else "paired"
+    bootstrap_label = "Process-block cluster" if matched_blocks else "Pair-cluster"
+    conclusion = (
+        "Positive values mean Paged is slower. Blocks randomize independent process order; they are not shared-hot-state Trial Pairs. The P95 gate is the tail of block-workload regressions, not request-latency P95."
+        if matched_blocks else
+        "Positive values mean Paged is slower. Results are stratified rather than inferred from one synthetic prompt."
+    )
     rows = []
     for workload_id, result in summary["per_workload"].items():
-        effect = result["paired_regression_percent"]
+        effect = result["matched_block_regression_percent" if matched_blocks else "paired_regression_percent"]
         rows.append(
             f"| {workload_id} | {result['category']} | {result['actual_context_tokens']} | "
             f"{result['actual_page_count']} | {effect['median']:+.2f}% | {effect['p95']:+.2f}% |"
         )
     decision = "PASS" if summary["promotion_passed"] else "FAIL"
+    provenance_lines = []
+    if "provenance_limitation" in summary:
+        provenance_lines = [f"- Provenance boundary: {summary['provenance_limitation']}"]
     gate_lines = [
         f"- Preregistered upper bound: +{summary['promotion_limit_percent']:.2f}% → **{decision}**"
     ]
@@ -56,14 +95,15 @@ def render_report(summary: dict, corpus: dict) -> str:
     return "\n".join([
         "# Objective Paged-vs-Direct prompt-matrix report", "",
         f"- Frozen corpus: `{corpus['corpus_version']}`; {summary['workload_count']} workloads",
-        f"- Design: {summary['paired_trials']} process pairs × Direct/Paged × every workload",
+        f"- Design: {design}",
         f"- Raw workload-arm observations: {summary['observations']}",
-        f"- Primary median paired regression: {primary['median']:+.2f}%",
-        f"- Pair-cluster bootstrap 95% interval: [{interval[0]:+.2f}%, {interval[1]:+.2f}%]",
+        *provenance_lines,
+        f"- Primary median {primary_label} regression: {primary['median']:+.2f}%",
+        f"- {bootstrap_label} bootstrap 95% interval: [{interval[0]:+.2f}%, {interval[1]:+.2f}%]",
         *gate_lines, "",
         "| Workload | Category | Actual tokens | Pages | Median regression | P95 regression |",
         "|---|---|---:|---:|---:|---:|", *rows, "",
-        "Positive values mean Paged is slower. Results are stratified rather than inferred from one synthetic prompt.", "",
+        conclusion, "",
     ])
 
 
@@ -73,7 +113,8 @@ def render_chart(summary: dict) -> str:
     zero_x, scale = 540, 5.0
     bars = []
     for index, (name, result) in enumerate(items):
-        value = float(result["paired_regression_percent"]["median"])
+        key = "matched_block_regression_percent" if "matched_process_blocks" in summary else "paired_regression_percent"
+        value = float(result[key]["median"])
         y = 85 + index * 55
         x = zero_x if value >= 0 else zero_x + value * scale
         bar_width = max(1.0, abs(value) * scale)
@@ -83,11 +124,13 @@ def render_chart(summary: dict) -> str:
             f'<rect x="{x:.1f}" y="{y}" width="{bar_width:.1f}" height="24" fill="{color}"/>'
             f'<text x="{zero_x + value * scale + (8 if value >= 0 else -8):.1f}" y="{y + 17}" text-anchor="{"start" if value >= 0 else "end"}">{value:+.2f}%</text>'
         )
-    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><style>text{{font-family:Segoe UI,Arial,sans-serif;fill:#172033;font-size:14px}}.title{{font-size:20px;font-weight:700}}</style><rect width="100%" height="100%" fill="#f8fafc"/><text x="20" y="32" class="title">Paged vs Direct by frozen prompt workload</text><text x="20" y="55">Median paired regression; negative is faster, positive is slower</text><line x1="{zero_x}" y1="70" x2="{zero_x}" y2="{height - 20}" stroke="#64748b" stroke-width="2"/>{''.join(bars)}</svg>'''
+    estimator = "matched-block" if "matched_process_blocks" in summary else "paired"
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><style>text{{font-family:Segoe UI,Arial,sans-serif;fill:#172033;font-size:14px}}.title{{font-size:20px;font-weight:700}}</style><rect width="100%" height="100%" fill="#f8fafc"/><text x="20" y="32" class="title">Paged vs Direct by frozen prompt workload</text><text x="20" y="55">Median {estimator} regression; negative is faster, positive is slower</text><line x1="{zero_x}" y1="70" x2="{zero_x}" y2="{height - 20}" stroke="#64748b" stroke-width="2"/>{''.join(bars)}</svg>'''
 
 
 def validate_artifact(root: Path, protocol_path: Path, output: Path) -> dict:
     protocol, corpus = load_definition(root, protocol_path)
+    amendment = validation_amendment(root, protocol_path)
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     actual_files = {
         str(path.relative_to(output).as_posix()): file_sha256(path)
@@ -101,14 +144,55 @@ def validate_artifact(root: Path, protocol_path: Path, output: Path) -> dict:
     if manifest["corpus_sha256"] != file_sha256(corpus_path):
         raise AssertionError("objective artifact corpus hash differs")
     rows = json.loads((output / "trials.json").read_text(encoding="utf-8"))
-    expected = analyze(protocol, corpus, rows)
+    expected = analyze(analysis_protocol(protocol, amendment), corpus, rows)
     summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
-    binding = protocol.get("artifact_binding")
-    if binding and (
-        summary.get("server_sha256") != binding["server_sha256"]
-        or summary.get("vendor_revision") != binding["vendor_revision"]
-    ):
+    binding = dict(protocol.get("artifact_binding") or {})
+    if amendment:
+        binding.update(amendment["post_run_evidence_binding"])
+    binding_fields = tuple(field for field in (
+        "server_sha256", "model_sha256", "vendor_revision", "vendor_diff_sha256",
+    ) if field in binding)
+    if binding and any(summary.get(field) != binding[field] for field in binding_fields):
         raise AssertionError("objective artifact binary/source binding differs")
+    if binding and "vendor_overlay_file" in binding and file_sha256(root / binding["vendor_overlay_file"]) != binding["vendor_overlay_sha256"]:
+        raise AssertionError("objective vendor overlay file differs from protocol")
+    if amendment:
+        validation_path = output / "validation-binding.json"
+        execution_path = output / "execution-start-binding.json"
+        if validation_path.is_file() == execution_path.is_file():
+            raise AssertionError("objective artifact must contain exactly one binding mode")
+        expected_evidence = {
+            field: binding[field] for field in (
+                "server_sha256", "model_sha256", "vendor_revision", "vendor_diff_sha256",
+            )
+        }
+        if validation_path.is_file():
+            validation_binding = json.loads(validation_path.read_text(encoding="utf-8"))
+            expected_validation_binding = {
+            "binding_kind": "post_run_validation",
+            "created_at_utc": amendment["created_at_utc"],
+            "original_protocol_sha256": amendment["original_protocol_sha256"],
+            "limitation": amendment["limitation"],
+            "evidence": expected_evidence,
+            }
+            if validation_binding != expected_validation_binding:
+                raise AssertionError("objective post-run validation binding differs")
+            if summary.get("binding_kind") != "post_run_validation":
+                raise AssertionError("objective post-run binding kind differs")
+            if summary.get("provenance_limitation") != amendment["limitation"]:
+                raise AssertionError("objective provenance limitation was rewritten")
+        else:
+            execution_binding = json.loads(execution_path.read_text(encoding="utf-8"))
+            expected_execution_binding = {
+                **expected_evidence, "protocol_sha256": file_sha256(protocol_path),
+            }
+            if execution_binding != expected_execution_binding:
+                raise AssertionError("objective execution-start binding differs")
+            if summary.get("binding_kind") != "execution_start" or "provenance_limitation" in summary:
+                raise AssertionError("objective contemporaneous binding was mislabeled")
+        amendment_path = root / "config/production_paged_objective_validation_amendment_v2.json"
+        if summary.get("validation_amendment_sha256") != file_sha256(amendment_path):
+            raise AssertionError("objective validation amendment hash differs")
     for field, value in expected.items():
         if summary.get(field) != value:
             raise AssertionError(f"objective summary field is not derived from raw rows: {field}")
@@ -245,23 +329,45 @@ def main() -> None:
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
     if args.validate_only:
-        print(json.dumps(validate_artifact(ROOT, args.protocol, args.output), ensure_ascii=False))
+        summary = validate_artifact(ROOT, args.protocol, args.output)
+        print(json.dumps({
+            "validated": str(args.output),
+            "promotion_passed": summary["promotion_passed"],
+        }, ensure_ascii=False))
         return
     protocol, corpus = load_definition(ROOT, args.protocol)
+    amendment = validation_amendment(ROOT, args.protocol)
     if (args.output / "manifest.json").exists():
         raise FileExistsError("completed objective artifact is immutable; use --validate-only")
     if device_identity()["name"] != protocol["device"]["name"]:
         raise RuntimeError("objective benchmark device differs from protocol")
-    binding = protocol.get("artifact_binding")
-    if binding and (
-        file_sha256(args.server) != binding["server_sha256"]
-        or git_output("-C", "vendor/llama.cpp", "rev-parse", "HEAD") != binding["vendor_revision"]
-    ):
+    binding = dict(protocol.get("artifact_binding") or {})
+    if amendment:
+        binding.update(amendment["post_run_evidence_binding"])
+    available_binding = {
+        "server_sha256": file_sha256(args.server),
+        "model_sha256": file_sha256(args.model),
+        "vendor_revision": git_output("-C", "vendor/llama.cpp", "rev-parse", "HEAD"),
+        "vendor_diff_sha256": vendor_diff_sha256(),
+    }
+    observed_binding = {field: available_binding[field] for field in binding if field in available_binding}
+    expected_binding = {field: binding[field] for field in observed_binding}
+    overlay_differs = "vendor_overlay_file" in binding and (
+        file_sha256(ROOT / binding["vendor_overlay_file"]) != binding["vendor_overlay_sha256"]
+    )
+    if observed_binding != expected_binding or overlay_differs:
         raise RuntimeError("objective benchmark binary/source binding differs from protocol")
     clean = not bool(git_output("status", "--porcelain", "--untracked-files=no"))
     if not clean:
         raise RuntimeError("objective benchmark requires a clean tracked worktree")
     args.output.mkdir(parents=True, exist_ok=True)
+    run_binding_path = args.output / "execution-start-binding.json"
+    run_binding = {**observed_binding, "protocol_sha256": file_sha256(args.protocol)}
+    if run_binding_path.exists():
+        if json.loads(run_binding_path.read_text(encoding="utf-8")) != run_binding:
+            raise RuntimeError("completed arms belong to a different execution binding")
+    else:
+        run_binding_path.write_text(json.dumps(run_binding, indent=2) + "\n", encoding="utf-8")
     rows = []
     for pair, order, action in arm_plan(protocol):
         completed = load_completed_arm(protocol, corpus, args.output, pair, order, action)
@@ -269,14 +375,20 @@ def main() -> None:
             protocol, corpus, args.server, args.model, args.output, pair, order, action, args.port
         ))
         print(json.dumps({"pair": pair, "order": order, "action": action}, ensure_ascii=False), flush=True)
-    summary = analyze(protocol, corpus, rows)
+    summary = analyze(analysis_protocol(protocol, amendment), corpus, rows)
     summary.update({
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_revision": git_output("rev-parse", "HEAD"),
-        "vendor_revision": git_output("-C", "vendor/llama.cpp", "rev-parse", "HEAD"),
-        "server_sha256": file_sha256(args.server), "model_sha256": file_sha256(args.model),
-        "device": device_identity(), "worktree_clean_before_run": clean,
+        **observed_binding,
+        "device": device_identity(), "outer_tracked_worktree_clean_before_run": clean,
     })
+    if amendment:
+        summary.update({
+            "validation_amendment_sha256": file_sha256(
+                ROOT / "config/production_paged_objective_validation_amendment_v2.json"
+            ),
+            "binding_kind": "execution_start",
+        })
     (args.output / "trials.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (args.output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (args.output / "report.md").write_text(render_report(summary, corpus), encoding="utf-8")

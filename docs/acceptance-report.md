@@ -12,6 +12,8 @@
 
 最终可交付定性、正负结果边界及全部证据哈希统一见 [`final-outcome.md`](final-outcome.md) 与 [`results/final-outcome.json`](../results/final-outcome.json)。该入口由正式工件生成，并纳入快速验收的漂移检查。
 
+Paged-vs-Direct 已增加 H9 客观输入矩阵：prompt 从独立冻结语料读取，覆盖六类内容、30组随机化匹配进程块、360个workload-arm观测，实际上下文17–20 token且全部跨页。总体匹配块中位回退为-7.96%（Paged点估计更快），进程块 cluster bootstrap 95%区间为[-17.07%,-0.40%]；但 block-workload 回退分布P95为158.62%，最差workload中位回退44.66%，违反20%/5%门槛，故正式结论仍为不晋级。两个 arm 使用独立进程，因此不称为共享热状态 Trial Pair。原始 v2.0.0 协议/哈希保持不动，模型与 vendor-diff 哈希仅作为实验后验证修正，不冒充运行前绑定。v1因五类自然输入实际只有一页且缺少分布尾部门禁，仅保留为协议诊断；旧H7单prompt结果不再代表输入分布。
+
 2026-08-08 在外层提交 `bf6f8b1`、vendor提交 `130bd22` 上，唯一严格入口 `scripts/verify.ps1 -Full` 曾原生以0退出。随后Standards复审指出当时的Williams设计没有覆盖真实执行流的row/backend边界，长驻结果也缺少从逐wave原始证据独立重算的验证器。当前提交已改为16-trial联合 `backend×mode` Williams设计、trial washout和可篡改检测的长驻验证器，定向实验及131项快速测试通过；在新的完整Full再次以0退出前，本段不把旧Full冒充当前HEAD验收。阈值未放宽，Full产生的非正式易波动输出不替换已提交的正式研究 evidence。
 
 “存在代码”“单元测试通过”和“生产路径通过”是三个不同层级。本报告只把有生产 smoke 或真实模型证据的条目标为生产接入。
