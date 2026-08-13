@@ -296,8 +296,14 @@ def finalize_artifact(protocol_path: Path, output: Path) -> dict[str, Any]:
         json.loads(path.read_text(encoding="utf-8"))
         for path in output.glob("raw/block-*/batch-*-context-*.json")
     ]
-    summary = analyze(protocol, rows)
     (output / "trials.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return write_derived_artifact(protocol_path, output, protocol, rows)
+
+
+def write_derived_artifact(
+        protocol_path: Path, output: Path, protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Write deterministic derived files after the caller establishes input trust."""
+    summary = analyze(protocol, rows)
     (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (output / "report.md").write_text(render_report(summary), encoding="utf-8")
     (output / "comparison.svg").write_text(render_chart(summary), encoding="utf-8")
@@ -308,23 +314,33 @@ def finalize_artifact(protocol_path: Path, output: Path) -> dict[str, Any]:
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return summary
+
+
+DERIVED_FILES = {"summary.json", "report.md", "comparison.svg", "manifest.json"}
+
+
+def verify_rederivation_inputs(output: Path) -> None:
+    """Require every pre-existing non-derived byte to match the old manifest."""
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    recorded = manifest["files"]
+    current_immutable = {
+        name: digest for name, digest in artifact_hashes(output).items()
+        if name not in DERIVED_FILES
+    }
+    recorded_immutable = {
+        name: digest for name, digest in recorded.items()
+        if name not in DERIVED_FILES
+    }
+    if current_immutable != recorded_immutable:
+        raise AssertionError("batched performance immutable evidence differs before rederivation")
 
 
 def rederive_artifact(protocol_path: Path, output: Path) -> dict[str, Any]:
     """Regenerate only deterministic derived files after an analyzer correction."""
+    verify_rederivation_inputs(output)
     protocol, _ = load_inputs(protocol_path)
     rows = json.loads((output / "trials.json").read_text(encoding="utf-8"))
-    summary = analyze(protocol, rows)
-    (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    (output / "report.md").write_text(render_report(summary), encoding="utf-8")
-    (output / "comparison.svg").write_text(render_chart(summary), encoding="utf-8")
-    manifest = {
-        "schema_version": 1, "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "protocol_sha256": sha256(protocol_path), "analysis_revision": git("rev-parse", "HEAD"),
-        "files": artifact_hashes(output),
-    }
-    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    return summary
+    return write_derived_artifact(protocol_path, output, protocol, rows)
 
 
 def main() -> None:

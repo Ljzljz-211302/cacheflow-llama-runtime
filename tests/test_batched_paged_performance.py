@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 import unittest
+import hashlib
+import json
+import tempfile
+from pathlib import Path
+import sys
 
 from llama_lab.batched_paged_performance import analyze, experiment_plan
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from run_batched_paged_performance import verify_rederivation_inputs  # noqa: E402
 
 
 class BatchedPagedPerformanceTest(unittest.TestCase):
@@ -111,6 +120,23 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
         summary = analyze(self.protocol(), rows)
         cell = summary["per_cell"]["block-1-batch-2-context-128"]
         self.assertEqual(cell["realized_sequences_per_graph"], 1.0)
+
+    def test_rederivation_rejects_modified_raw_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / "raw").mkdir()
+            (output / "raw/evidence.json").write_text("original", encoding="utf-8")
+            (output / "summary.json").write_text("old summary", encoding="utf-8")
+            files = {
+                str(path.relative_to(output)).replace("\\", "/"):
+                    hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in output.rglob("*") if path.is_file()
+            }
+            (output / "manifest.json").write_text(json.dumps({"files": files}), encoding="utf-8")
+            verify_rederivation_inputs(output)
+            (output / "raw/evidence.json").write_text("tampered", encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "immutable evidence"):
+                verify_rederivation_inputs(output)
 
 
 if __name__ == "__main__":
