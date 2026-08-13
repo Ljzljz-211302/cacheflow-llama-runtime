@@ -42,7 +42,7 @@ _Avoid_: PagedAttention（KV Remap 仍然发生了显式搬运）。
 
 ## Paged Decode Attention
 
-Decode Attention 直接通过 Block Table 读取离散 KV Block、完成在线 softmax 与输出归约的执行方法，不先构造完整连续 KV。首个研究实现只承诺 Qwen2.5、FP16 KV、GQA、单 token decode、单 GPU，并保留正确性回退。
+Decode Attention 直接通过 Block Table 读取离散 KV Block、完成在线 softmax 与输出归约的执行方法，不先构造完整连续 KV。“单 token decode”指每个活跃序列本轮各产生一个 query token，不等于整个 ubatch 只能有一个序列；生产布局、CPU reference 与 CUDA K1–K4 均具有 sequence 维，已验证 batch 1/2/4/8。当前仍只承诺 Qwen2.5-0.5B、FP16 KV、GQA7、单 GPU，并保留正确性回退。
 
 _Avoid_: 泛指所有分页 KV 管理；宣称支持 prefill、任意模型或多 GPU。
 

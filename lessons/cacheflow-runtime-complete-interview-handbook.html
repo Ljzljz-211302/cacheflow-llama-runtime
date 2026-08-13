@@ -367,18 +367,19 @@ final output = o / l</div>
 <p><strong>K3</strong>先用 <code>half2</code> 把两个 FP16 元素作为一个向量访问，减少标量访存和指令。<strong>K4</strong>进一步按真实模型几何重排：一个 256-thread CTA 包含 8 个 warp，其中 7 个 warp 分别负责同一 GQA 组的 7 个 Query Head，第 8 个 warp 协助 K/V 搬运；整组只加载一次 K/V。设备读取真实 context 后，短一些的序列使用 64-token partition，长一些的使用 128-token partition；host 不同步，CUDA Graph 不因每次长度变化而重建。</p>
 <div class="diagram">旧 K2：1 CTA = 2 query heads；每 KV head 约加载 4 次
 K4：    1 CTA = 完整 7-query-head GQA group；每 KV head 加载 1 次
-grid：  KV-head group × effective partition（当前生产能力仍是单 sequence）</div>
+grid：  sequence × KV-head group × effective partition</div>
 <p>24 个 production CPU/CUDA oracle case 覆盖 1、页边界、tile 边界、partition 边界直到 2048 token，多页时反转物理页序，全部通过。H13 使用 18 个来源绑定真实文档 Prompt、12 个严格平衡进程块、432 个 workload-arm 单元和 3456 个测量请求，把主中位回退降至 <strong>+3.98%</strong>，95% CI 为 <strong>[+2.50%, +5.38%]</strong>。这证明重构显著缩小差距；但 CI 上界仍高于 +5% 门，所以不能说 Paged 已严格占优。</p>
 
-<h3>6.7 为什么 batch=1 只是正确性下界，不是完整架构</h3>
-<p>用单 sequence 首先验证页表、GQA、causal mask 和 online softmax是合理的；错误在于若算子接口本身只有一个 <code>page_table</code> 和一个 <code>context_length</code>，batch=1 就不再是测试条件，而变成架构限制。通用多序列 Paged Decode 应把 batch=1 设计为下式在 <code>N=1</code> 时的退化情况：</p>
+<h3>6.7 怎样从 batch=1 正确性原型演进为多序列生产路径</h3>
+<p>用单 sequence 首先验证页表、GQA、causal mask 和 online softmax 是合理的；旧设计的问题是算子接口只有一个 <code>page_table</code> 和一个 <code>context_length</code>，于是 batch=1 从测试条件变成了架构限制。现在的生产布局把它改为二维行主序 <code>block_table[sequence][logical_block]</code> 和 <code>context_lengths[sequence]</code>，batch=1 只是下式在 <code>N=1</code> 时的退化情况：</p>
 <div class="diagram">grid = sequence × KV-head-group × partition
 
 per-sequence metadata:
-page_table_offsets[N]   page_counts[N]   context_lengths[N]
-query_offsets[N]        output_offsets[N] partition_offsets[N]</div>
-<p>混合长度 batch 中，每条 sequence 的有效 partition 数不同；merge 只能读取自己的 partial state。完成或取消的 sequence 下一轮可以离开 batch，但它的页只有在最后一个 GPU reader 完成后才能回收。CUDA Graph key 还必须表达 topology/capacity，或使用固定容量图加设备侧有效 mask，避免把旧 batch 的地址和形状错误复用。</p>
-<div class="callout danger"><strong>当前证据边界：</strong>项目的 Scheduler 是多 sequence iteration plan，但生产 K4 operator 仍是单 sequence、单 query token。不能用控制面的 continuous batching 能力替代算子层的 batch=2/4/8/16 正确性和性能证据。</div>
+block_table[N][max_blocks]   context_lengths[N]
+Q/output stride[N]           partial_state[N][head][partition]</div>
+<p>为什么这些维度必须同时改？只扩展 page table 而不扩展 Q/output stride，会让不同序列读到同一个 Query 或写坏彼此输出；只扩展主 kernel 而不扩展 scratch，merge 会混合两条请求的 online-softmax state；仍用第 0 条序列的 context 裁剪所有 table row，又会让较长序列静默少算。CPU reference 因此也必须按 query index 取自己的 table row 和长度，不能让 oracle 与 CUDA 共享同一个错误假设。</p>
+<p>服务端采用图级 all-or-nothing gate：ubatch 中每个 token 必须属于不同 sequence，且每条 sequence 都已有 Paged 决策；prefill、同一 sequence 多 token 或混合动作整图回退。这样避免一张 attention graph 内同时解释为两种 KV 布局。完成或取消的 sequence 下一轮可以离开 batch，但它的页只有在最后一个 GPU reader 完成后才能回收；graph reuse key 仍要包含 Paged topology。</p>
+<div class="callout"><strong>已完成与尚未证明：</strong>K1–K4 均通过 batch 1/2/4/8 的 production CPU/CUDA oracle，而且同时覆盖 unified <code>[D,B,H,1]</code> 与服务默认 non-unified <code>[D,1,H,B]</code>。真实 <code>llama-server -np 8</code> 用 8 个不同 resident prefix 形成一个 batch=8 graph；不能只看 graph admission counter，所以另从 CUDA backend 记录到 24 个逐层 Paged dispatch 和 192 个 sequence-layer dispatch。Direct/Paged 输出与 cache length 逐项一致，top-64 至少重叠 55、最大 logprob 误差 0.6900（门限 48/1.0），零 fallback。这证明功能与已声明数值边界，不证明 batch 性能已经优于 Direct；既有 H7/H13 性能结果仍是 batch 1。</div>
 
 <h3>6.8 大 batch 下 Paged 为什么可能更有利，也可能仍不赢</h3>
 <p>batch 增大会产生三种潜在收益：更多 CTA 填满 SM，使访存延迟更容易被其他 warp 隐藏；页表与 launch 固定开销被更多 sequence 摊薄；不同长度 sequence 的分页分配开始体现容量与碎片价值。但 Direct 同样会因 batch 增大提高 GPU 利用率，因此“batch 大”不是 Paged 必胜条件。</p>
@@ -512,7 +513,7 @@ query_offsets[N]        output_offsets[N] partition_offsets[N]</div>
 <div class="qa"><strong>Q7：Paged kernel 为什么最初一个 CTA 对应一个 Query head，后来又改掉？</strong><p>K1 让 D 个线程直接并行一个 head 的点积和 V 累积，结构简单，适合作为正确性基线；但 GQA7 下七个 Query Head 共用一个 KV Head，K1 会重复读七次 K/V。K2 只把重复次数降到约四次；K4 才用一个 256-thread CTA 覆盖完整 GQA 组，让七个计算 warp 共享一次 K/V 加载。最小正确性映射适合验证，不等于最终性能结构。</p></div>
 <div class="qa"><strong>Q8：online softmax 与普通 softmax 等价吗？</strong><p>代数上等价。每次最大值变大时，用 α=exp(old_max-new_max) 同步缩放旧分母与旧加权和，再加入新项 β。最终 o/l 就是对全部 score 做稳定 softmax 后的加权 V。</p></div>
 <div class="qa"><strong>Q9：为什么 Paged 已接生产却不默认选？</strong><p>生产接入和 24 个 oracle case 证明路径与正确性；默认 promotion 还要求性能和尾部风险门。K4/H13 已把旧 K2 的长上下文中位回退从 50.35% 降至 3.98%，但 95% CI 上界 5.38% 仍超过预注册 +5%，P95 回退也有 13.34%，所以保持 opt-in。功能完成、算法改善和生产晋级是三个不同结论。</p></div>
-<div class="qa"><strong>Q10：下一步如何优化 Paged？</strong><p>不再优先调 tile 常数，因为 H14 已否证 64-token tile。算子侧应复用 upstream vector attention 的成熟 QK/PV 主体，只把连续 K/V 地址生成抽象为 page-indirect accessor；系统侧应把接口扩展为 sequence-aware，并测试 batch 1/2/4/8/16、mixed length、动态加入/取消、峰值显存和碎片。只有这样才能同时评价执行成本和 Paged 的容量收益。</p></div>
+<div class="qa"><strong>Q10：下一步如何优化 Paged？</strong><p>sequence-aware 接口和 batch 1/2/4/8 正确性已经完成，下一步不再重复这一项，也不再优先调 tile 常数，因为 H14 已否证 64-token tile。算子侧应复用 upstream vector attention 的成熟 QK/PV 主体，只把连续 K/V 地址生成抽象为 page-indirect accessor；实验侧扩展到 batch 16、mixed length、动态加入/取消，并同时量峰值显存、碎片、吞吐、TTFT/TPOT 和拒绝率。只有这样才能评价 Paged 的容量收益及其是否足以覆盖页表寻址成本。</p></div>
 <div class="qa"><strong>Q11：Ridge 为什么比神经网络合适？</strong><p>特征只有九维、反馈少且在线决策要求微秒级、零分配和可解释回退。Ridge 的计算和状态固定，能增量更新并给出与 A⁻¹ 相关的不确定性。神经网络在当前数据规模会增加训练、校准和部署复杂度，收益没有证据。</p></div>
 <div class="qa"><strong>Q12：为什么按动作分别建模？</strong><p>不同动作的成本生成机制不同：Remap 更依赖 bytes/fragmentation，Recompute 更依赖 cached tokens/prefill cost，Swap 更依赖带宽和固定 I/O。一个共享线性模型容易把不同斜率混在一起。</p></div>
 <div class="qa"><strong>Q13：置信下界如何防止误切换？</strong><p>对成本最小化，可比较基线的保守低成本与候选的保守高成本，或等价比较收益的 lower bound。只有考虑 prediction radius 和 margin 后仍明确更优才启用；否则 uncertainty fallback。它不是形式化零风险证明，而是工程保守门控。</p></div>

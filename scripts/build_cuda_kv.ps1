@@ -51,8 +51,14 @@ if ($LASTEXITCODE -ne 0) { throw "CPU/CUDA KV correctness matrix failed" }
 if ($LASTEXITCODE -ne 0) { throw "vectorized CUDA KV remap correctness matrix failed" }
 & $pagedTestExe
 if ($LASTEXITCODE -ne 0) { throw "restricted paged decode differential tests failed" }
-& $backendOpsExe -b CUDA0 -o FLASH_ATTN_EXT -p "hsk=64,nh=14,nkv=2,kv=64"
-if ($LASTEXITCODE -ne 0) { throw "production paged Flash Attention backend-op differential test failed" }
+foreach ($variant in @("K1", "K2", "K3", "K4")) {
+    $env:LLAMA_CACHEFLOW_PAGED_KERNEL = $variant
+    & $backendOpsExe -b CUDA0 -o FLASH_ATTN_EXT -p "hsk=64,nh=14,nkv=2,kv=64"
+    if ($LASTEXITCODE -ne 0) {
+        throw "production paged Flash Attention $variant backend-op differential test failed"
+    }
+}
+Remove-Item Env:LLAMA_CACHEFLOW_PAGED_KERNEL -ErrorAction SilentlyContinue
 & $policyTestExe
 if ($LASTEXITCODE -ne 0) { throw "unified KV action policy tests failed" }
 & $layoutTestExe
@@ -81,6 +87,14 @@ if ($Sanitize) {
     if ($LASTEXITCODE -ne 0) {
         throw "vectorized KV remap Compute Sanitizer racecheck failed"
     }
+    & $sanitizer --tool memcheck --error-exitcode 99 $backendOpsExe -b CUDA0 -o FLASH_ATTN_EXT -p "batch=8"
+    if ($LASTEXITCODE -ne 0) {
+        throw "batched production Paged Flash Attention Compute Sanitizer memcheck failed"
+    }
+    & $sanitizer --tool racecheck --error-exitcode 99 $backendOpsExe -b CUDA0 -o FLASH_ATTN_EXT -p "batch=4"
+    if ($LASTEXITCODE -ne 0) {
+        throw "batched production Paged Flash Attention Compute Sanitizer racecheck failed"
+    }
 }
 
-Write-Host "CUDA KV correctness, real tensor swap, benchmarks, and server targets passed on sm_89."
+Write-Host "CUDA KV correctness (including Paged batch 1/2/4/8), real tensor swap, benchmarks, and server targets passed on sm_89."

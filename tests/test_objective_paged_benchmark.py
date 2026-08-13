@@ -150,7 +150,8 @@ class ObjectivePagedBenchmarkTests(unittest.TestCase):
         service = (ROOT / "vendor/llama.cpp/tools/server/server-context.cpp").read_text(encoding="utf-8")
         model = (ROOT / "vendor/llama.cpp/src/llama-context.cpp").read_text(encoding="utf-8")
         self.assertIn("resident_prefix <= 2048", service)
-        self.assertIn("layout.context_length <= 2048", model)
+        self.assertIn("layout.context_lengths.begin()", model)
+        self.assertIn("length <= 2048", model)
 
     def test_v3_is_source_bound_and_uses_long_context_primary(self):
         protocol, corpus = load_definition(

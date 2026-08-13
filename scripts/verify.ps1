@@ -91,6 +91,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "preempt/restore smoke failed" }
         powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_issue7_acceptance.ps1 -IncludeSanitizer
         if ($LASTEXITCODE -ne 0) { throw "Issue #7 production Paged acceptance journeys failed" }
+        python scripts\run_paged_batch_acceptance.py
+        if ($LASTEXITCODE -ne 0) { throw "multi-sequence production Paged batch acceptance failed" }
         python scripts\run_cuda_swap_server_smoke.py
         if ($LASTEXITCODE -ne 0) { throw "real CUDA server swap smoke failed" }
         python scripts\run_kv_store_server_smoke.py

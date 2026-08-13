@@ -62,7 +62,7 @@ flowchart LR
 
 ### Unified KV Action Policy
 
-服务现在用同一个 fail-closed 接口比较 Direct、真实 CUDA Remap、受限 opt-in Paged Decode、CUDA-managed Swap、事务型 host Swap 与 Recompute。Paged 只开放 Qwen2.5-0.5B、FP16 KV、page 16、D64、batch 1、context≤2048 的全 GPU 路径；短上下文 K2 的正式替换证据仍只覆盖 context17，而新增 H10 单独验证 64–2048 token 的正确性和 Paged/Direct 性能，不能混用两组结论。其他形状在 KV mutation 前回退。策略包含固定 H0、解析 A1、分桶查表 T1 与带置信边界/H0 fallback 的 L1，Prometheus 分开记录选择原因、实际动作、完整成本和失败次数。
+服务现在用同一个 fail-closed 接口比较 Direct、真实 CUDA Remap、受限 opt-in Paged Decode、CUDA-managed Swap、事务型 host Swap 与 Recompute。Paged 只开放 Qwen2.5-0.5B、FP16 KV、page 16、D64、每序列单 token、context≤2048 的全 GPU路径；布局、CPU reference 与 CUDA K1–K4 已加入独立 sequence 维，同时支持 unified `[D,B,H,1]` 与默认 non-unified `[D,1,H,B]`。每个 variant 的 30 个 CPU/CUDA case 覆盖 batch 1/2/4/8；真实 8 并发服务验收得到一个 batch=8 graph、24 个逐层 CUDA Paged dispatch/192 个 sequence-layer dispatch、零 fallback，Direct/Paged cache length 和输出逐项一致，top-64 最少重叠 55、最大 logprob 误差 0.6900（门限 48/1.0）。短上下文 K2 的正式替换证据仍只覆盖 context17，H10/H13 的 Direct/Paged 性能仍是 batch 1；功能批量化不冒充批量性能晋级。其他形状在 KV mutation 前回退。
 
 Issue #7 的 v1.1 正式生产服务实验从干净提交 `9182882` 运行 10 组 17-token 跨页 Direct/Paged AB/BA 配对：所有输出逐字一致，Paged 真实进入 10 次 production graph、0 fallback，NSYS 在一次机制 replay 中记录 24 个 `cacheflow_paged_decode_fattn_k1<64>` layer launch；但 Paged 的 client P95 为 29.210 ms，对 Direct 的 27.354 ms 回退 6.78%，配对差中位数 +2.705 ms，bootstrap 95% 区间 [-1.185, +12.019] ms。因此预注册 +5% promotion gate 仍失败，Paged 保持 opt-in 且不会由生产策略默认选择。v1.0 因请求未跨物理页而移入 `results/research/superseded/`。该结论只覆盖本机 Qwen2.5-0.5B、batch 1、17-token context，不外推长上下文或大模型。
 
