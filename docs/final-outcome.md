@@ -50,3 +50,11 @@
 ```
 
 `verify_final_outcome.ps1` 不重新挑选实验结果，而是校验本页、机器可读结论与正式工件是否一致。完整 GPU 重跑使用 `verify.ps1 -Full`。
+
+
+## H19 原生批处理客观结论
+
+真实服务已经解除 batch=1 限制，并在非 unified KV 布局下验证 batch 1/2/4/8。正式矩阵包含 144 个 action-cell 和 1080 次输出比较；batch 8 的设备端计数证明每个测量 wave 实际执行 24 个逐层 CUDA kernel、覆盖 24×8 个 sequence-layer。
+但 batch 8 吞吐中位变化为 -3.22%（95% 区间 [-4.90%, -0.12%），P95 wave 延迟回退 16.00%，最差 cell 中位延迟回退 50.49%。输出 token 一致 1052/1080，另有 48 行概率证据不完整，因此性能与正确性门均未通过，Paged 继续保持 opt-in。
+- H19 正式报告：[`results/research/h19-production-batched-paged-v5.0.0/report.md`](../results/research/h19-production-batched-paged-v5.0.0/report.md)
+- H19 批量性能图：[`results/research/h19-production-batched-paged-v5.0.0/comparison.svg`](../results/research/h19-production-batched-paged-v5.0.0/comparison.svg)

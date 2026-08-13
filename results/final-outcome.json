@@ -179,6 +179,76 @@
       },
       "promotion_passed": false,
       "decision": "K4 reduced the long-context regression but missed the upper-CI gate; Paged remains opt-in"
+    },
+    "batched_paged_vs_direct": {
+      "protocol_version": "5.0.0",
+      "observations": 144,
+      "primary_batch_size": 8,
+      "primary_throughput_gain_percent": -3.2175951592467666,
+      "primary_throughput_gain_bootstrap_95_percent": [
+        -4.896079686613753,
+        -0.12197293915962026
+      ],
+      "primary_p95_wave_latency_regression_percent": 16.002083693395242,
+      "worst_cell_median_wave_latency_regression_percent": 50.486653645833336,
+      "throughput_by_batch": {
+        "1": {
+          "throughput_gain_percent": {
+            "median": -6.664519023385767,
+            "p95": 79.95634292465587,
+            "minimum": -34.985054804843315,
+            "maximum": 88.83707238021397
+          },
+          "block_cluster_bootstrap_95_percent": [
+            -18.675255772155396,
+            32.28014055141598
+          ]
+        },
+        "2": {
+          "throughput_gain_percent": {
+            "median": -6.043206636505993,
+            "p95": 22.333076491459256,
+            "minimum": -30.227880229731717,
+            "maximum": 23.24282420845798
+          },
+          "block_cluster_bootstrap_95_percent": [
+            -12.030781809226083,
+            1.791026812265506
+          ]
+        },
+        "4": {
+          "throughput_gain_percent": {
+            "median": -2.8409527439955506,
+            "p95": 14.790310156885893,
+            "minimum": -19.776367583167843,
+            "maximum": 16.19698402511196
+          },
+          "block_cluster_bootstrap_95_percent": [
+            -12.599808326199401,
+            4.946177132558893
+          ]
+        },
+        "8": {
+          "throughput_gain_percent": {
+            "median": -3.2175951592467666,
+            "p95": 9.4196611316445,
+            "minimum": -24.719608968369556,
+            "maximum": 10.642218562857186
+          },
+          "block_cluster_bootstrap_95_percent": [
+            -4.896079686613753,
+            -0.12197293915962026
+          ]
+        }
+      },
+      "output_token_matches": 1052,
+      "output_token_comparisons": 1080,
+      "probability_rows_compared": 1032,
+      "incomplete_probability_rows": 48,
+      "correctness_passed": false,
+      "primary_cuda_execution_verified": true,
+      "promotion_passed": false,
+      "decision": "negative batch-8 result: actual CUDA batching is verified, but throughput, latency, and correctness gates fail"
     }
   },
   "claim_boundaries": [
@@ -188,7 +258,8 @@
     "The application journey proves an exercised local workflow, not external adoption.",
     "The artifact is an independent research project, not a peer-reviewed publication.",
     "The objective prompt matrix supersedes single-prompt interpretation and keeps Paged disabled because the block-workload regression-tail and worst-workload gates fail; its independent-process blocks are not shared-hot-state Trial Pairs.",
-    "The source-bound 64-2048 token matrix found no Paged-over-Direct crossover; Direct and Paged share the same allocator in this implementation, so it cannot claim a memory-fragmentation advantage from this A/B."
+    "The source-bound 64-2048 token matrix found no Paged-over-Direct crossover; Direct and Paged share the same allocator in this implementation, so it cannot claim a memory-fragmentation advantage from this A/B.",
+    "Native batch sizes 1/2/4/8 are supported and device-counted, but the formal batch-8 result is negative and does not establish a throughput advantage over Direct."
   ],
   "evidence": {
     "upstream": {
@@ -298,6 +369,34 @@
     "long_paged_chart": {
       "path": "results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/comparison.svg",
       "sha256": "ad823e7eacc08e3f4b094c53ffffc16c44f0fc332d611408d9225cf75ecaf010"
+    },
+    "batched_paged_protocol": {
+      "path": "config/batched_paged_performance_protocol_v5.json",
+      "sha256": "802afbd624b4ea23a20f39db3345ec887bcc98f6472d5b71b70edc67ce761411"
+    },
+    "batched_paged_corpus": {
+      "path": "config/batched_paged_workloads_v1.json",
+      "sha256": "7820572ebc14422eaaee32bc8f0fdb7e16b132497b9cf40a1dc66a9334488bf7"
+    },
+    "batched_paged_manifest": {
+      "path": "results/research/h19-production-batched-paged-v5.0.0/manifest.json",
+      "sha256": "6307e1490f1cf900c67c353fa4c68ee4f39ab44aad4b5908be2f20d561b91c39"
+    },
+    "batched_paged_trials": {
+      "path": "results/research/h19-production-batched-paged-v5.0.0/trials.json",
+      "sha256": "e29a7ee9dea61628bd48aae5c379f09b0d1aac8b5c3ac5771272030f40a0aaf9"
+    },
+    "batched_paged": {
+      "path": "results/research/h19-production-batched-paged-v5.0.0/summary.json",
+      "sha256": "339fd16eb00acf57674dd44b58275f0fd1d7c777b099609ff989a66b1e664007"
+    },
+    "batched_paged_report": {
+      "path": "results/research/h19-production-batched-paged-v5.0.0/report.md",
+      "sha256": "23473b65c8cc30af6b29f323eba4388e5a1efedabe5b30655aab13a602ce2a77"
+    },
+    "batched_paged_chart": {
+      "path": "results/research/h19-production-batched-paged-v5.0.0/comparison.svg",
+      "sha256": "50484d3d8d9a14ba1b2843e960e873e2d9461cd320e0dd1d33f84721b37bcf85"
     }
   }
 }

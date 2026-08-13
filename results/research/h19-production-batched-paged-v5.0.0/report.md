@@ -3,7 +3,8 @@
 - Promotion: **FAIL**
 - Batch-8 throughput gain median: -3.22%
 - Matched-process-block bootstrap 95% interval: [-4.90%, -0.12%]
-- Batch-8 P95 batched-wave latency regression: +36.67%
+- Batch-8 raw batched-wave P95 Direct/Paged: 131.459/152.495 ms
+- Batch-8 raw batched-wave P95 latency regression: +16.00%
 - Worst cell median batched-wave latency regression: +50.49%
 
 - Exact output-token matches: 1052/1080

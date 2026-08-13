@@ -46,6 +46,14 @@
 
 ![长上下文Paged/Direct结果](../results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/comparison.svg)
 
+### H19：真实批处理不是“计数器看起来像执行”
+
+批处理改造同时覆盖 unified `[D,B,H,1]` 与真实服务默认的 non-unified `[D,1,H,B]`。CPU oracle 用展平后的 sequence row 选择 block table；CUDA 根据 batch 所在维度选择 Q、输出和 K/V stream stride。执行证据不再使用 graph admission 计数，而是由每层 Paged CUDA kernel 的 block 0/thread 0 在设备端原子累加，所以 CUDA Graph replay 也不会漏计。
+
+正式 H19 固定 batch 1/2/4/8、context 128/512/1024、6 个平衡匹配进程块，共 144 个 action-cell、1080 次输出比较。主 batch 8 每个测量 wave 均实现一个 8-sequence graph、24 个逐层 kernel 和 192 个 sequence-layer 执行，0 fallback。结果仍为负：吞吐中位变化 -3.22%，cluster bootstrap 95% 区间 [-4.90%, -0.12%]；P95 wave 延迟回退 16.00%，最差 cell 中位回退 50.49%。输出 token 一致 1052/1080，且 48 行缺少完整概率证据，因此不晋级。
+
+![原生批处理 Paged/Direct 客观结果](../results/research/h19-production-batched-paged-v5.0.0/comparison.svg)
+
 ## 5. 应用结果与最终边界
 
 应用旅程已覆盖 UI、SSE、并发、取消、429 背压、重启恢复和本地知识检索，并记录 456 个缓存 prompt token、6 次自研 CUDA KV launch、5603330 个向量化 remap 字节。它能作为可运行应用项目和有实验链的 AI Infra 研究项目交付。
