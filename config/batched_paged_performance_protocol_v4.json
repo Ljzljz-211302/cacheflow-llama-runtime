@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "protocol_version": "4.0.0",
+  "preregistered_at_utc": "2026-08-13T08:12:00Z",
+  "supersedes": "v3 is retained as invalid because the process-wide RAM prompt cache split four secondary batch-4 cells; v4 disables that confounder while retaining the same workload and performance gates",
+  "claim": "cache-isolated-device-verified-controlled-batched-paged-vs-direct-service-performance",
+  "random_seed": 20260813,
+  "matched_process_blocks": 6,
+  "arm_order": "balanced seeded Direct/Paged process order inside matched process blocks",
+  "workload_file": "config/batched_paged_workloads_v1.json",
+  "workload_sha256": "7820572ebc14422eaaee32bc8f0fdb7e16b132497b9cf40a1dc66a9334488bf7",
+  "artifact_binding": {
+    "outer_revision": "9e80b279201182821d6b6ec9d28cdb1fe5c2a2b1",
+    "vendor_revision": "221d7c4ad99924c7daa79277fe81042f6ad14b97",
+    "vendor_diff_sha256": "c2a48bcc5623301f1f5f7c80c5e53b75da9ef16b6a7d0c17142971c279d865e7",
+    "model_sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+    "runtime_sha256": {
+      "llama-server.exe": "e8b5e16ad3332c647fb94973df7f5e16e01b71e3d3aebc75f3f3129edb4fe55c",
+      "llama-server-impl.dll": "1881de8564998973f4e0d9aa1690ab8e61a11b23be2f089e500d16fff8b105a7",
+      "llama.dll": "99bfda5fce2dd17cbc1a24e816b3d3cd1c80b5375ae05e28d8b8e99e1b78baa0",
+      "ggml.dll": "5c3f3414be6768113b65dc5b092dde1c94f739a4afc93c5d720359942afdc8d3",
+      "ggml-base.dll": "d975c02fc899db61556684f53402683652466fb46bbaf7d664e3ed2de92f18da",
+      "ggml-cpu.dll": "bb2977333429fe14b7bdc9291cf5f735be96ae04f14d4423fd411ea9d87055b5",
+      "ggml-cuda.dll": "216d79ce0710e967c4dc6f344a4b5adc5d83a051d11c25df714c30879eabc839"
+    }
+  },
+  "device": {"name": "NVIDIA GeForce RTX 4050 Laptop GPU", "compute_capability": "8.9"},
+  "service": {
+    "context_size": 10240,
+    "parallel_slots": 8,
+    "threads": 8,
+    "gpu_layers": 99,
+    "flash_attention": true,
+    "kv_block_size_tokens": 16,
+    "paged_kernel_variant": "K4",
+    "kv_unified": false,
+    "process_prompt_cache_mib": 0,
+    "slot_prompt_cache": true
+  },
+  "matrix": {"batch_sizes": [1, 2, 4, 8], "context_tokens": [128, 512, 1024]},
+  "request": {"predicted_tokens": 1, "temperature": 0, "cache_prompt": true, "top_probabilities": 64},
+  "measurement": {
+    "warm_waves_per_cell": 1,
+    "waves_per_cell": 4,
+    "wave_definition": "One native /completion call carrying an array of B frozen prompts; process-wide RAM prompt cache disabled; cell invalid unless every measured wave forms one Paged graph, executes 24 device-counted Paged layer kernels, and executes 24*B sequence-layer pairs",
+    "execution_counter": "one device atomic increment from block 0/thread 0 of each Paged attention kernel, including CUDA Graph replay",
+    "client_metrics": ["wave throughput requests/s", "batched-wave latency median/p95"],
+    "server_metrics": ["Paged graph calls/sequences/fallback", "device-counted actual CUDA kernel executions/sequences"],
+    "memory_metric": "system-wide device memory.used sampled at 50 ms; descriptive only because both arms share the allocator"
+  },
+  "statistics": {
+    "unit": "matched process block",
+    "effect": "100 * (Paged requests/s / Direct requests/s - 1)",
+    "bootstrap_resamples": 10000,
+    "confidence": "matched-process-block cluster bootstrap 95% interval"
+  },
+  "acceptance": {
+    "primary_batch_size": 8,
+    "minimum_throughput_gain_lower_95_percent": 0.0,
+    "maximum_p95_latency_regression_percent": 5.0,
+    "maximum_any_cell_median_latency_regression_percent": 10.0,
+    "exact_output_token_match": true,
+    "minimum_top64_overlap": 48,
+    "maximum_common_logprob_error": 1.0,
+    "zero_fallback": true,
+    "outcome_based_deletion": "forbidden"
+  },
+  "claim_boundary": "Passing supports a conditional native-batched-request batch-8 service-throughput advantage on this model/device/matrix with the process-wide RAM prompt cache disabled. It does not establish independent-arrival scheduler batching, allocator capacity, fragmentation, arbitrary models, multi-GPU, prefill, or universal Paged superiority."
+}

@@ -134,6 +134,7 @@ def collect_arm(
         "-c", str(service["context_size"]), "-np", str(service["parallel_slots"]),
         "-b", "512", "-ub", "512", "-t", str(service["threads"]), "-ngl", str(service["gpu_layers"]),
         "--flash-attn", "on", "--no-warmup", "--metrics", "--slots", "--no-cache-idle-slots",
+        "--cache-ram", "0",
         "--slot-save-path", str(slot_state.resolve()),
         "--kv-block-runtime", "--kv-block-size", str(service["kv_block_size_tokens"]),
         "--kv-paged-decode", "--kv-action-policy", "analytical", "--kv-action-override", action, "-lv", "4",
@@ -282,10 +283,10 @@ def validate_artifact(protocol_path: Path, output: Path, server: Path, model: Pa
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--protocol", type=Path, default=ROOT / "config/batched_paged_performance_protocol_v3.json")
+    parser.add_argument("--protocol", type=Path, default=ROOT / "config/batched_paged_performance_protocol_v4.json")
     parser.add_argument("--server", type=Path, default=ROOT / "build/patched-cuda-ninja3/bin/llama-server.exe")
     parser.add_argument("--model", type=Path, default=ROOT / "models/qwen2.5-0.5b-instruct-q4_k_m.gguf")
-    parser.add_argument("--output", type=Path, default=ROOT / "results/research/h17-device-counted-batched-paged-v3.0.0")
+    parser.add_argument("--output", type=Path, default=ROOT / "results/research/h18-isolated-batched-paged-v4.0.0")
     parser.add_argument("--port", type=int, default=8350)
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
