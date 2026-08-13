@@ -216,6 +216,7 @@ def render_report(summary: dict[str, Any]) -> str:
         f"- Worst cell median batched-wave latency regression: {summary['worst_cell_median_wave_latency_regression_percent']:+.2f}%", "",
         f"- Exact output-token matches: {summary['correctness']['output_token_matches']}/{summary['correctness']['output_token_comparisons']}",
         f"- Top-64 minimum overlap / maximum common logprob error: {summary['correctness']['minimum_top64_overlap']} / {summary['correctness']['maximum_common_logprob_error']:.6f}", "",
+        f"- Probability rows compared / incomplete: {summary['correctness']['probability_rows_compared']} / {summary['correctness']['incomplete_probability_rows']}", "",
         "## Throughput by batch", "", "| Batch | Median gain | 95% interval |", "|---:|---:|---:|",
     ]
     for batch, row in summary["throughput_by_batch"].items():

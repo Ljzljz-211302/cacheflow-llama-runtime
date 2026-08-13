@@ -113,6 +113,8 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
     output_comparisons = 0
     global_minimum_overlap = 64
     global_maximum_error = 0.0
+    probability_comparisons = 0
+    incomplete_probability_rows = 0
     per_cell = {}
     for block in range(1, int(protocol["matched_process_blocks"]) + 1):
         for batch in map(int, protocol["matrix"]["batch_sizes"]):
@@ -131,6 +133,10 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
                     direct_by_id = {int(item["id"]): float(item["logprob"]) for item in direct_probs}
                     paged_by_id = {int(item["id"]): float(item["logprob"]) for item in paged_probs}
                     common = direct_by_id.keys() & paged_by_id.keys()
+                    if not direct_by_id or not paged_by_id:
+                        incomplete_probability_rows += 1
+                        continue
+                    probability_comparisons += 1
                     minimum_overlap = min(minimum_overlap, len(common))
                     if common:
                         maximum_error = max(maximum_error, max(
@@ -177,6 +183,7 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
     gates = protocol["acceptance"]
     correctness_passed = (
         output_matches == output_comparisons
+        and incomplete_probability_rows == 0
         and global_minimum_overlap >= int(gates["minimum_top64_overlap"])
         and global_maximum_error <= float(gates["maximum_common_logprob_error"])
     )
@@ -197,6 +204,8 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
             "output_token_comparisons": output_comparisons,
             "minimum_top64_overlap": global_minimum_overlap,
             "maximum_common_logprob_error": global_maximum_error,
+            "probability_rows_compared": probability_comparisons,
+            "incomplete_probability_rows": incomplete_probability_rows,
             "passed": correctness_passed,
         },
         "per_cell": per_cell,
