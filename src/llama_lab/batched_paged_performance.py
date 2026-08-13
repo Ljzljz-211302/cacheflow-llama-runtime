@@ -80,6 +80,8 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
             raise ValueError("batched performance cell has incomplete measurements")
         if len(row["output_token_ids"]) != waves * batch or len(row["cache_tokens"]) != waves * batch:
             raise ValueError("batched performance cell has incomplete response evidence")
+        if len(row["top_logprobs"]) != waves * batch:
+            raise ValueError("batched performance cell has incomplete probability evidence")
         if any(float(value) <= 0 for value in row["wave_elapsed_ms"] + row["request_elapsed_ms"]):
             raise ValueError("batched performance timings must be positive")
         if any(int(value) != key[3] for value in row["cache_tokens"]):
@@ -111,6 +113,20 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
                 paged = keyed[(block, "paged", batch, context)]
                 if direct["output_token_ids"] != paged["output_token_ids"]:
                     raise ValueError("Direct and Paged output token IDs differ")
+                minimum_overlap = 64
+                maximum_error = 0.0
+                for direct_probs, paged_probs in zip(direct["top_logprobs"], paged["top_logprobs"]):
+                    direct_by_id = {int(item["id"]): float(item["logprob"]) for item in direct_probs}
+                    paged_by_id = {int(item["id"]): float(item["logprob"]) for item in paged_probs}
+                    common = direct_by_id.keys() & paged_by_id.keys()
+                    minimum_overlap = min(minimum_overlap, len(common))
+                    if common:
+                        maximum_error = max(maximum_error, max(
+                            abs(direct_by_id[token] - paged_by_id[token]) for token in common
+                        ))
+                if (minimum_overlap < int(protocol["acceptance"]["minimum_top64_overlap"]) or
+                        maximum_error > float(protocol["acceptance"]["maximum_common_logprob_error"])):
+                    raise ValueError("Direct and Paged probability distribution differs")
                 direct_throughput = batch * waves * 1000.0 / sum(map(float, direct["wave_elapsed_ms"]))
                 paged_throughput = batch * waves * 1000.0 / sum(map(float, paged["wave_elapsed_ms"]))
                 gain = (paged_throughput / direct_throughput - 1.0) * 100.0
@@ -125,6 +141,8 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
                     "median_request_latency_regression_percent": latency,
                     "direct_peak_gpu_memory_mib": direct["peak_gpu_memory_mib"],
                     "paged_peak_gpu_memory_mib": paged["peak_gpu_memory_mib"],
+                    "minimum_top64_overlap": minimum_overlap,
+                    "maximum_common_logprob_error": maximum_error,
                 }
 
     primary_batch = int(protocol["acceptance"]["primary_batch_size"])

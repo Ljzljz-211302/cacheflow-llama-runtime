@@ -19,6 +19,8 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
                 "minimum_throughput_gain_lower_95_percent": 0.0,
                 "maximum_p95_latency_regression_percent": 5.0,
                 "maximum_any_cell_median_latency_regression_percent": 10.0,
+                "minimum_top64_overlap": 48,
+                "maximum_common_logprob_error": 1.0,
             },
         }
 
@@ -32,6 +34,9 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
                         "context_tokens": 128, "wave_elapsed_ms": [elapsed, elapsed],
                         "request_elapsed_ms": [elapsed] * (batch * 2),
                         "output_token_ids": [[7]] * (batch * 2),
+                        "top_logprobs": [[
+                            {"id": token, "logprob": -float(token)} for token in range(64)
+                        ]] * (batch * 2),
                         "cache_tokens": [128] * (batch * 2),
                         "paged_calls": 0 if action == "direct" else 2,
                         "paged_sequences": 0 if action == "direct" else batch * 2,
@@ -58,6 +63,19 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
         tampered[-1]["cuda_sequences"] = 1
         with self.assertRaisesRegex(ValueError, "CUDA dispatch"):
             analyze(self.protocol(), tampered)
+
+    def test_analyzer_rejects_distribution_divergence_even_when_top1_matches(self) -> None:
+        rows = self.rows()
+        for row in rows:
+            row["top_logprobs"] = [[
+                {"id": token, "logprob": -float(token)} for token in range(64)
+            ]] * len(row["output_token_ids"])
+        paged = next(row for row in rows if row["action"] == "paged")
+        paged["top_logprobs"] = [[
+            {"id": token, "logprob": -float(token)} for token in range(17, 81)
+        ]] * len(paged["output_token_ids"])
+        with self.assertRaisesRegex(ValueError, "probability distribution"):
+            analyze(self.protocol(), rows)
 
     def test_analyzer_retains_negative_result(self) -> None:
         summary = analyze(self.protocol(), self.rows(paged_ms=12.0))
