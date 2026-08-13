@@ -214,6 +214,8 @@ def render_report(summary: dict[str, Any]) -> str:
         f"- Matched-process-block bootstrap 95% interval: [{interval[0]:+.2f}%, {interval[1]:+.2f}%]",
         f"- Batch-{summary['primary_batch_size']} P95 batched-wave latency regression: {summary['primary_p95_wave_latency_regression_percent']:+.2f}%",
         f"- Worst cell median batched-wave latency regression: {summary['worst_cell_median_wave_latency_regression_percent']:+.2f}%", "",
+        f"- Exact output-token matches: {summary['correctness']['output_token_matches']}/{summary['correctness']['output_token_comparisons']}",
+        f"- Top-64 minimum overlap / maximum common logprob error: {summary['correctness']['minimum_top64_overlap']} / {summary['correctness']['maximum_common_logprob_error']:.6f}", "",
         "## Throughput by batch", "", "| Batch | Median gain | 95% interval |", "|---:|---:|---:|",
     ]
     for batch, row in summary["throughput_by_batch"].items():
@@ -257,7 +259,9 @@ def validate_artifact(protocol_path: Path, output: Path, server: Path, model: Pa
     observed = binding(protocol_path, server, model)
     verify_binding(protocol, observed)
     run_binding = json.loads((output / "execution-start-binding.json").read_text(encoding="utf-8"))
-    if run_binding != observed:
+    verify_binding(protocol, run_binding)
+    if any(run_binding[field] != observed[field] for field in (
+            "protocol_sha256", "vendor_revision", "vendor_diff_sha256", "model_sha256", "runtime_sha256")):
         raise AssertionError("batched performance execution binding differs")
     rows = json.loads((output / "trials.json").read_text(encoding="utf-8"))
     raw_rows = [
@@ -281,6 +285,26 @@ def validate_artifact(protocol_path: Path, output: Path, server: Path, model: Pa
     return summary
 
 
+def finalize_artifact(protocol_path: Path, output: Path) -> dict[str, Any]:
+    protocol, _ = load_inputs(protocol_path)
+    rows = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in output.glob("raw/block-*/batch-*-context-*.json")
+    ]
+    summary = analyze(protocol, rows)
+    (output / "trials.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (output / "report.md").write_text(render_report(summary), encoding="utf-8")
+    (output / "comparison.svg").write_text(render_chart(summary), encoding="utf-8")
+    manifest = {
+        "schema_version": 1, "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "protocol_sha256": sha256(protocol_path), "analysis_revision": git("rev-parse", "HEAD"),
+        "files": artifact_hashes(output),
+    }
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return summary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--protocol", type=Path, default=ROOT / "config/batched_paged_performance_protocol_v5.json")
@@ -289,10 +313,18 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=ROOT / "results/research/h19-production-batched-paged-v5.0.0")
     parser.add_argument("--port", type=int, default=8350)
     parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--finalize-existing", action="store_true")
     args = parser.parse_args()
     if args.validate_only:
         summary = validate_artifact(args.protocol, args.output, args.server, args.model)
         print(json.dumps({"validated": str(args.output), "promotion_passed": summary["promotion_passed"]}))
+        return
+    if args.finalize_existing:
+        if (args.output / "manifest.json").exists():
+            raise FileExistsError("completed batched performance artifact is immutable")
+        summary = finalize_artifact(args.protocol, args.output)
+        validate_artifact(args.protocol, args.output, args.server, args.model)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
     protocol, corpus = load_inputs(args.protocol)
     if args.output.exists():
@@ -309,16 +341,7 @@ def main() -> None:
             arms.append(identity)
     for block, order, action in arms:
         rows.extend(collect_arm(protocol, corpus, args.server, args.model, args.output, block, order, action, args.port))
-    summary = analyze(protocol, rows)
-    (args.output / "trials.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    (args.output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    (args.output / "report.md").write_text(render_report(summary), encoding="utf-8")
-    (args.output / "comparison.svg").write_text(render_chart(summary), encoding="utf-8")
-    manifest = {
-        "schema_version": 1, "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "protocol_sha256": sha256(args.protocol), "files": artifact_hashes(args.output),
-    }
-    (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    summary = finalize_artifact(args.protocol, args.output)
     validate_artifact(args.protocol, args.output, args.server, args.model)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

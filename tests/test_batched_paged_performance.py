@@ -73,8 +73,18 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
         paged["top_logprobs"] = [[
             {"id": token, "logprob": -float(token)} for token in range(17, 81)
         ]] * len(paged["output_token_ids"])
-        with self.assertRaisesRegex(ValueError, "probability distribution"):
-            analyze(self.protocol(), rows)
+        summary = analyze(self.protocol(), rows)
+        self.assertFalse(summary["correctness"]["passed"])
+        self.assertFalse(summary["promotion_passed"])
+
+    def test_top1_mismatch_is_a_retained_negative_result(self) -> None:
+        rows = self.rows()
+        paged = next(row for row in rows if row["action"] == "paged")
+        paged["output_token_ids"][0] = [8]
+        summary = analyze(self.protocol(), rows)
+        self.assertEqual(summary["correctness"]["output_token_matches"],
+                         summary["correctness"]["output_token_comparisons"] - 1)
+        self.assertFalse(summary["promotion_passed"])
 
     def test_analyzer_retains_negative_result(self) -> None:
         summary = analyze(self.protocol(), self.rows(paged_ms=12.0))

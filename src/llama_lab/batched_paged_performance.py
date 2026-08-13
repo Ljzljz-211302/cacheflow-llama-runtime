@@ -109,14 +109,22 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
         for batch in protocol["matrix"]["batch_sizes"]
     }
     latency_regressions: list[float] = []
+    output_matches = 0
+    output_comparisons = 0
+    global_minimum_overlap = 64
+    global_maximum_error = 0.0
     per_cell = {}
     for block in range(1, int(protocol["matched_process_blocks"]) + 1):
         for batch in map(int, protocol["matrix"]["batch_sizes"]):
             for context in map(int, protocol["matrix"]["context_tokens"]):
                 direct = keyed[(block, "direct", batch, context)]
                 paged = keyed[(block, "paged", batch, context)]
-                if direct["output_token_ids"] != paged["output_token_ids"]:
-                    raise ValueError("Direct and Paged output token IDs differ")
+                cell_matches = sum(
+                    direct_token == paged_token for direct_token, paged_token in
+                    zip(direct["output_token_ids"], paged["output_token_ids"])
+                )
+                output_matches += cell_matches
+                output_comparisons += len(direct["output_token_ids"])
                 minimum_overlap = 64
                 maximum_error = 0.0
                 for direct_probs, paged_probs in zip(direct["top_logprobs"], paged["top_logprobs"]):
@@ -128,9 +136,8 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
                         maximum_error = max(maximum_error, max(
                             abs(direct_by_id[token] - paged_by_id[token]) for token in common
                         ))
-                if (minimum_overlap < int(protocol["acceptance"]["minimum_top64_overlap"]) or
-                        maximum_error > float(protocol["acceptance"]["maximum_common_logprob_error"])):
-                    raise ValueError("Direct and Paged probability distribution differs")
+                global_minimum_overlap = min(global_minimum_overlap, minimum_overlap)
+                global_maximum_error = max(global_maximum_error, maximum_error)
                 direct_throughput = batch * waves * 1000.0 / sum(map(float, direct["wave_elapsed_ms"]))
                 paged_throughput = batch * waves * 1000.0 / sum(map(float, paged["wave_elapsed_ms"]))
                 gain = (paged_throughput / direct_throughput - 1.0) * 100.0
@@ -147,6 +154,8 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
                     "paged_peak_gpu_memory_mib": paged["peak_gpu_memory_mib"],
                     "minimum_top64_overlap": minimum_overlap,
                     "maximum_common_logprob_error": maximum_error,
+                    "output_token_matches": cell_matches,
+                    "output_token_comparisons": len(direct["output_token_ids"]),
                     "paged_graph_calls": paged["paged_calls"],
                     "realized_sequences_per_graph": paged["paged_sequences"] / paged["paged_calls"],
                 }
@@ -166,6 +175,11 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
             "block_cluster_bootstrap_95_percent": _cluster_interval(block_effects, protocol),
         }
     gates = protocol["acceptance"]
+    correctness_passed = (
+        output_matches == output_comparisons
+        and global_minimum_overlap >= int(gates["minimum_top64_overlap"])
+        and global_maximum_error <= float(gates["maximum_common_logprob_error"])
+    )
     worst_latency = max(latency_regressions)
     primary_p95_latency = _percentile(primary_latency, 0.95)
     return {
@@ -178,9 +192,17 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
         "primary_p95_wave_latency_regression_percent": primary_p95_latency,
         "worst_cell_median_wave_latency_regression_percent": worst_latency,
         "throughput_by_batch": by_batch,
+        "correctness": {
+            "output_token_matches": output_matches,
+            "output_token_comparisons": output_comparisons,
+            "minimum_top64_overlap": global_minimum_overlap,
+            "maximum_common_logprob_error": global_maximum_error,
+            "passed": correctness_passed,
+        },
         "per_cell": per_cell,
         "promotion_passed": (
-            primary_interval[0] > float(gates["minimum_throughput_gain_lower_95_percent"])
+            correctness_passed
+            and primary_interval[0] > float(gates["minimum_throughput_gain_lower_95_percent"])
             and primary_p95_latency <= float(gates["maximum_p95_latency_regression_percent"])
             and worst_latency <= float(gates["maximum_any_cell_median_latency_regression_percent"])
         ),
