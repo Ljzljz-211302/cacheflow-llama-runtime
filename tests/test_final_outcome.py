@@ -34,6 +34,12 @@ class FinalOutcomeTests(unittest.TestCase):
         self.assertEqual(long_context["maximum_context_tokens"], 2048)
         self.assertEqual(long_context["primary_metric"], "server_prompt_ms")
         self.assertEqual(long_context["observations"], 432)
+        batched = outcome["research_results"]["batched_paged_vs_direct"]
+        self.assertFalse(batched["promotion_passed"])
+        self.assertEqual(batched["primary_batch_size"], 8)
+        self.assertEqual(batched["observations"], 144)
+        self.assertEqual(batched["output_token_comparisons"], 1080)
+        self.assertTrue(batched["primary_cuda_execution_verified"])
 
     def test_validator_rejects_rewriting_negative_paged_result(self):
         outcome = build_final_outcome(ROOT)
@@ -54,6 +60,13 @@ class FinalOutcomeTests(unittest.TestCase):
         tampered = copy.deepcopy(outcome)
         tampered["application_result"]["interactive_browser_qa_passed"] = False
         with self.assertRaisesRegex(ValueError, "interactive browser QA has not passed"):
+            validate_final_outcome(tampered)
+
+    def test_validator_rejects_rewriting_batched_paged_result(self):
+        outcome = build_final_outcome(ROOT)
+        tampered = copy.deepcopy(outcome)
+        tampered["research_results"]["batched_paged_vs_direct"]["promotion_passed"] = True
+        with self.assertRaisesRegex(ValueError, "batched Paged evidence boundary was rewritten"):
             validate_final_outcome(tampered)
 
     def test_default_paged_state_is_bound_to_production_launcher(self):

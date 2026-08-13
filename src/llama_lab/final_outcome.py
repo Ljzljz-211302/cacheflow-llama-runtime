@@ -36,6 +36,13 @@ SOURCE_PATHS = {
     "long_paged": "results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/summary.json",
     "long_paged_report": "results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/report.md",
     "long_paged_chart": "results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/comparison.svg",
+    "batched_paged_protocol": "config/batched_paged_performance_protocol_v5.json",
+    "batched_paged_corpus": "config/batched_paged_workloads_v1.json",
+    "batched_paged_manifest": "results/research/h19-production-batched-paged-v5.0.0/manifest.json",
+    "batched_paged_trials": "results/research/h19-production-batched-paged-v5.0.0/trials.json",
+    "batched_paged": "results/research/h19-production-batched-paged-v5.0.0/summary.json",
+    "batched_paged_report": "results/research/h19-production-batched-paged-v5.0.0/report.md",
+    "batched_paged_chart": "results/research/h19-production-batched-paged-v5.0.0/comparison.svg",
 }
 
 
@@ -147,6 +154,7 @@ def build_final_outcome(root: Path) -> dict[str, Any]:
     json_sources = {
         "upstream", "application", "browser_qa", "remap", "policy", "paged_direct",
         "k2", "k2_mechanism", "k2_trials", "objective_paged", "long_paged",
+        "batched_paged", "batched_paged_trials",
     }
     source = {name: _load(root, SOURCE_PATHS[name]) for name in json_sources}
     upstream = source["upstream"]
@@ -161,6 +169,8 @@ def build_final_outcome(root: Path) -> dict[str, Any]:
     k2_trials = source["k2_trials"]
     objective_paged = source["objective_paged"]
     long_paged = source["long_paged"]
+    batched_paged = source["batched_paged"]
+    batched_paged_trials = source["batched_paged_trials"]
     production_launcher = (root / SOURCE_PATHS["production_launcher"]).read_text(encoding="utf-8")
     default_paged_enabled = '"--kv-paged-decode"' in production_launcher
     d3 = policy["analysis"]["models"]["D3"]
@@ -188,6 +198,8 @@ def build_final_outcome(root: Path) -> dict[str, Any]:
         and long_paged["page_coverage_passed"]
         and max(row["actual_context_tokens"] for row in long_paged["per_workload"].values()) == 2048
         and not long_paged["promotion_passed"]
+        and len(batched_paged_trials) == batched_paged["observations"] == 144
+        and not batched_paged["promotion_passed"]
     )
 
     outcome = {
@@ -316,6 +328,32 @@ def build_final_outcome(root: Path) -> dict[str, Any]:
                 "promotion_passed": long_paged["promotion_passed"],
                 "decision": "K4 reduced the long-context regression but missed the upper-CI gate; Paged remains opt-in",
             },
+            "batched_paged_vs_direct": {
+                "protocol_version": batched_paged["protocol_version"],
+                "observations": batched_paged["observations"],
+                "primary_batch_size": batched_paged["primary_batch_size"],
+                "primary_throughput_gain_percent": batched_paged["primary_throughput_gain_percent"]["median"],
+                "primary_throughput_gain_bootstrap_95_percent": batched_paged["primary_block_cluster_bootstrap_95_percent"],
+                "primary_p95_wave_latency_regression_percent": batched_paged["primary_p95_wave_latency_regression_percent"],
+                "worst_cell_median_wave_latency_regression_percent": batched_paged["worst_cell_median_wave_latency_regression_percent"],
+                "throughput_by_batch": batched_paged["throughput_by_batch"],
+                "output_token_matches": batched_paged["correctness"]["output_token_matches"],
+                "output_token_comparisons": batched_paged["correctness"]["output_token_comparisons"],
+                "probability_rows_compared": batched_paged["correctness"]["probability_rows_compared"],
+                "incomplete_probability_rows": batched_paged["correctness"]["incomplete_probability_rows"],
+                "correctness_passed": batched_paged["correctness"]["passed"],
+                "primary_cuda_execution_verified": all(
+                    row["paged_calls"] == 4.0
+                    and row["paged_sequences"] == 32.0
+                    and row["paged_fallbacks"] == 0.0
+                    and row["cuda_dispatches"] == 96.0
+                    and row["cuda_sequences"] == 768.0
+                    for row in batched_paged_trials
+                    if row["action"] == "paged" and row["batch_size"] == 8
+                ),
+                "promotion_passed": batched_paged["promotion_passed"],
+                "decision": "negative batch-8 result: actual CUDA batching is verified, but throughput, latency, and correctness gates fail",
+            },
         },
         "claim_boundaries": [
             "K2 is qualified only against K1 inside the restricted Paged path.",
@@ -325,6 +363,7 @@ def build_final_outcome(root: Path) -> dict[str, Any]:
             "The artifact is an independent research project, not a peer-reviewed publication.",
             "The objective prompt matrix supersedes single-prompt interpretation and keeps Paged disabled because the block-workload regression-tail and worst-workload gates fail; its independent-process blocks are not shared-hot-state Trial Pairs.",
             "The source-bound 64-2048 token matrix found no Paged-over-Direct crossover; Direct and Paged share the same allocator in this implementation, so it cannot claim a memory-fragmentation advantage from this A/B.",
+            "Native batch sizes 1/2/4/8 are supported and device-counted, but the formal batch-8 result is negative and does not establish a throughput advantage over Direct.",
         ],
         "evidence": {
             name: {"path": path, "sha256": _sha256(root / path)}
@@ -378,6 +417,15 @@ def validate_final_outcome(outcome: dict[str, Any]) -> None:
             long_paged["primary_metric"] != "server_prompt_ms" or
             long_paged["promotion_passed"]):
         raise ValueError("long-context Paged evidence boundary was rewritten")
+    batched = outcome["research_results"]["batched_paged_vs_direct"]
+    if (batched["protocol_version"] != "5.0.0" or
+            batched["observations"] != 144 or
+            batched["primary_batch_size"] != 8 or
+            batched["output_token_comparisons"] != 1080 or
+            not batched["primary_cuda_execution_verified"] or
+            batched["correctness_passed"] or
+            batched["promotion_passed"]):
+        raise ValueError("batched Paged evidence boundary was rewritten")
 
 
 def render_final_outcome(outcome: dict[str, Any]) -> str:
@@ -389,6 +437,7 @@ def render_final_outcome(outcome: dict[str, Any]) -> str:
     k2 = outcome["research_results"]["k2_vs_k1"]
     objective = outcome["research_results"]["objective_paged_vs_direct"]
     long_paged = outcome["research_results"]["long_context_paged_vs_direct"]
+    batched = outcome["research_results"]["batched_paged_vs_direct"]
     measured_responses = k2["measured_responses_by_variant"]["k1"]
     kernel_launches = k2["kernel_launches_by_variant"]["k1"]
     remap_values = remap["median_improvement_percent_by_blocks"]
@@ -447,6 +496,16 @@ def render_final_outcome(outcome: dict[str, Any]) -> str:
         "`verify_final_outcome.ps1` 不重新挑选实验结果，而是校验本页、机器可读结论与正式工件是否一致。完整 GPU 重跑使用 `verify.ps1 -Full`。",
         "",
     ]
+    lines.extend([
+        "",
+        "## H19 原生批处理客观结论",
+        "",
+        f"真实服务已经解除 batch=1 限制，并在非 unified KV 布局下验证 batch 1/2/4/8。正式矩阵包含 {batched['observations']} 个 action-cell 和 {batched['output_token_comparisons']} 次输出比较；batch 8 的设备端计数证明每个测量 wave 实际执行 24 个逐层 CUDA kernel、覆盖 24×8 个 sequence-layer。",
+        f"但 batch 8 吞吐中位变化为 {batched['primary_throughput_gain_percent']:.2f}%（95% 区间 [{batched['primary_throughput_gain_bootstrap_95_percent'][0]:.2f}%, {batched['primary_throughput_gain_bootstrap_95_percent'][1]:.2f}%），P95 wave 延迟回退 {batched['primary_p95_wave_latency_regression_percent']:.2f}%，最差 cell 中位延迟回退 {batched['worst_cell_median_wave_latency_regression_percent']:.2f}%。输出 token 一致 {batched['output_token_matches']}/{batched['output_token_comparisons']}，另有 {batched['incomplete_probability_rows']} 行概率证据不完整，因此性能与正确性门均未通过，Paged 继续保持 opt-in。",
+        "- H19 正式报告：[`results/research/h19-production-batched-paged-v5.0.0/report.md`](../results/research/h19-production-batched-paged-v5.0.0/report.md)",
+        "- H19 批量性能图：[`results/research/h19-production-batched-paged-v5.0.0/comparison.svg`](../results/research/h19-production-batched-paged-v5.0.0/comparison.svg)",
+        "",
+    ])
     return "\n".join(lines)
 
 
@@ -488,6 +547,7 @@ def render_illustrated_report(outcome: dict[str, Any]) -> str:
     k2 = outcome["research_results"]["k2_vs_k1"]
     objective = outcome["research_results"]["objective_paged_vs_direct"]
     long_paged = outcome["research_results"]["long_context_paged_vs_direct"]
+    batched = outcome["research_results"]["batched_paged_vs_direct"]
     return rf'''# CacheFlow Runtime 图文总结报告
 
 ## 1. 成果是什么
@@ -535,6 +595,14 @@ def render_illustrated_report(outcome: dict[str, Any]) -> str:
 ![客观Prompt矩阵分层结果](../results/research/h9-objective-paged-v2.0.0/comparison.svg)
 
 ![长上下文Paged/Direct结果](../results/research/h13-balanced-adaptive-gqa-paged-v7.0.0/comparison.svg)
+
+### H19：真实批处理不是“计数器看起来像执行”
+
+批处理改造同时覆盖 unified `[D,B,H,1]` 与真实服务默认的 non-unified `[D,1,H,B]`。CPU oracle 用展平后的 sequence row 选择 block table；CUDA 根据 batch 所在维度选择 Q、输出和 K/V stream stride。执行证据不再使用 graph admission 计数，而是由每层 Paged CUDA kernel 的 block 0/thread 0 在设备端原子累加，所以 CUDA Graph replay 也不会漏计。
+
+正式 H19 固定 batch 1/2/4/8、context 128/512/1024、6 个平衡匹配进程块，共 {batched['observations']} 个 action-cell、{batched['output_token_comparisons']} 次输出比较。主 batch 8 每个测量 wave 均实现一个 8-sequence graph、24 个逐层 kernel 和 192 个 sequence-layer 执行，0 fallback。结果仍为负：吞吐中位变化 {batched['primary_throughput_gain_percent']:.2f}%，cluster bootstrap 95% 区间 [{batched['primary_throughput_gain_bootstrap_95_percent'][0]:.2f}%, {batched['primary_throughput_gain_bootstrap_95_percent'][1]:.2f}%]；P95 wave 延迟回退 {batched['primary_p95_wave_latency_regression_percent']:.2f}%，最差 cell 中位回退 {batched['worst_cell_median_wave_latency_regression_percent']:.2f}%。输出 token 一致 {batched['output_token_matches']}/{batched['output_token_comparisons']}，且 {batched['incomplete_probability_rows']} 行缺少完整概率证据，因此不晋级。
+
+![原生批处理 Paged/Direct 客观结果](../results/research/h19-production-batched-paged-v5.0.0/comparison.svg)
 
 ## 5. 应用结果与最终边界
 

@@ -91,6 +91,18 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
         self.assertFalse(summary["promotion_passed"])
         self.assertLess(summary["primary_throughput_gain_percent"]["median"], 0)
 
+    def test_primary_p95_is_computed_from_raw_wave_samples(self) -> None:
+        rows = self.rows()
+        primary_paged = [
+            row for row in rows
+            if row["action"] == "paged" and row["batch_size"] == 8
+        ]
+        primary_paged[0]["wave_elapsed_ms"] = [8.0, 80.0]
+        summary = analyze(self.protocol(), rows)
+        self.assertAlmostEqual(summary["primary_direct_wave_latency_p95_ms"], 10.0)
+        self.assertAlmostEqual(summary["primary_paged_wave_latency_p95_ms"], 69.2)
+        self.assertAlmostEqual(summary["primary_p95_wave_latency_regression_percent"], 592.0)
+
     def test_secondary_scheduler_fragmentation_is_reported_not_mislabeled(self) -> None:
         rows = self.rows()
         paged_batch_two = next(row for row in rows if row["action"] == "paged" and row["batch_size"] == 2)

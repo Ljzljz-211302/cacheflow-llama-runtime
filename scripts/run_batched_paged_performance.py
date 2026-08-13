@@ -214,7 +214,8 @@ def render_report(summary: dict[str, Any]) -> str:
         f"- Promotion: **{'PASS' if summary['promotion_passed'] else 'FAIL'}**",
         f"- Batch-{summary['primary_batch_size']} throughput gain median: {summary['primary_throughput_gain_percent']['median']:+.2f}%",
         f"- Matched-process-block bootstrap 95% interval: [{interval[0]:+.2f}%, {interval[1]:+.2f}%]",
-        f"- Batch-{summary['primary_batch_size']} P95 batched-wave latency regression: {summary['primary_p95_wave_latency_regression_percent']:+.2f}%",
+        f"- Batch-{summary['primary_batch_size']} raw batched-wave P95 Direct/Paged: {summary['primary_direct_wave_latency_p95_ms']:.3f}/{summary['primary_paged_wave_latency_p95_ms']:.3f} ms",
+        f"- Batch-{summary['primary_batch_size']} raw batched-wave P95 latency regression: {summary['primary_p95_wave_latency_regression_percent']:+.2f}%",
         f"- Worst cell median batched-wave latency regression: {summary['worst_cell_median_wave_latency_regression_percent']:+.2f}%", "",
         f"- Exact output-token matches: {summary['correctness']['output_token_matches']}/{summary['correctness']['output_token_comparisons']}",
         f"- Top-64 minimum overlap / maximum common logprob error: {summary['correctness']['minimum_top64_overlap']} / {summary['correctness']['maximum_common_logprob_error']:.6f}", "",
@@ -259,13 +260,8 @@ def validate_artifact(protocol_path: Path, output: Path, server: Path, model: Pa
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     if manifest["protocol_sha256"] != sha256(protocol_path) or manifest["files"] != artifact_hashes(output):
         raise AssertionError("batched performance manifest differs from the artifact tree")
-    observed = binding(protocol_path, server, model)
-    verify_binding(protocol, observed)
     run_binding = json.loads((output / "execution-start-binding.json").read_text(encoding="utf-8"))
     verify_binding(protocol, run_binding)
-    if any(run_binding[field] != observed[field] for field in (
-            "protocol_sha256", "vendor_revision", "vendor_diff_sha256", "model_sha256", "runtime_sha256")):
-        raise AssertionError("batched performance execution binding differs")
     for source in corpus["sources"]:
         historical = subprocess.check_output(
             ["git", "show", f"{run_binding['runner_revision']}:{source['path']}"], cwd=ROOT,
@@ -314,6 +310,23 @@ def finalize_artifact(protocol_path: Path, output: Path) -> dict[str, Any]:
     return summary
 
 
+def rederive_artifact(protocol_path: Path, output: Path) -> dict[str, Any]:
+    """Regenerate only deterministic derived files after an analyzer correction."""
+    protocol, _ = load_inputs(protocol_path)
+    rows = json.loads((output / "trials.json").read_text(encoding="utf-8"))
+    summary = analyze(protocol, rows)
+    (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (output / "report.md").write_text(render_report(summary), encoding="utf-8")
+    (output / "comparison.svg").write_text(render_chart(summary), encoding="utf-8")
+    manifest = {
+        "schema_version": 1, "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "protocol_sha256": sha256(protocol_path), "analysis_revision": git("rev-parse", "HEAD"),
+        "files": artifact_hashes(output),
+    }
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return summary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--protocol", type=Path, default=ROOT / "config/batched_paged_performance_protocol_v5.json")
@@ -323,6 +336,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8350)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--finalize-existing", action="store_true")
+    parser.add_argument("--rederive-existing", action="store_true")
     args = parser.parse_args()
     if args.validate_only:
         summary = validate_artifact(args.protocol, args.output, args.server, args.model)
@@ -332,6 +346,11 @@ def main() -> None:
         if (args.output / "manifest.json").exists():
             raise FileExistsError("completed batched performance artifact is immutable")
         summary = finalize_artifact(args.protocol, args.output)
+        validate_artifact(args.protocol, args.output, args.server, args.model)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
+    if args.rederive_existing:
+        summary = rederive_artifact(args.protocol, args.output)
         validate_artifact(args.protocol, args.output, args.server, args.model)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return

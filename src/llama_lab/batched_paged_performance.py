@@ -169,9 +169,17 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
     primary_batch = int(protocol["acceptance"]["primary_batch_size"])
     primary_effects = [value for values in effects_by_batch[primary_batch].values() for value in values]
     primary_interval = _cluster_interval(effects_by_batch[primary_batch], protocol)
-    primary_latency = [
-        row["median_wave_latency_regression_percent"] for key, row in per_cell.items()
-        if f"batch-{primary_batch}-" in key
+    primary_direct_waves = [
+        float(value)
+        for block in range(1, int(protocol["matched_process_blocks"]) + 1)
+        for context in map(int, protocol["matrix"]["context_tokens"])
+        for value in keyed[(block, "direct", primary_batch, context)]["wave_elapsed_ms"]
+    ]
+    primary_paged_waves = [
+        float(value)
+        for block in range(1, int(protocol["matched_process_blocks"]) + 1)
+        for context in map(int, protocol["matrix"]["context_tokens"])
+        for value in keyed[(block, "paged", primary_batch, context)]["wave_elapsed_ms"]
     ]
     by_batch = {}
     for batch, block_effects in effects_by_batch.items():
@@ -188,7 +196,9 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
         and global_maximum_error <= float(gates["maximum_common_logprob_error"])
     )
     worst_latency = max(latency_regressions)
-    primary_p95_latency = _percentile(primary_latency, 0.95)
+    primary_direct_p95 = _percentile(primary_direct_waves, 0.95)
+    primary_paged_p95 = _percentile(primary_paged_waves, 0.95)
+    primary_p95_latency = (primary_paged_p95 / primary_direct_p95 - 1.0) * 100.0
     return {
         "schema_version": 1,
         "protocol_version": protocol["protocol_version"],
@@ -196,6 +206,8 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
         "primary_batch_size": primary_batch,
         "primary_throughput_gain_percent": _summary(primary_effects),
         "primary_block_cluster_bootstrap_95_percent": primary_interval,
+        "primary_direct_wave_latency_p95_ms": primary_direct_p95,
+        "primary_paged_wave_latency_p95_ms": primary_paged_p95,
         "primary_p95_wave_latency_regression_percent": primary_p95_latency,
         "worst_cell_median_wave_latency_regression_percent": worst_latency,
         "throughput_by_batch": by_batch,

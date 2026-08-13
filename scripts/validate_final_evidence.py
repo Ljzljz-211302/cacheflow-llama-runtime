@@ -43,7 +43,13 @@ def main() -> None:
         "--output", str(ROOT / "results/research/h8-k2-production-v2.10.0"),
         "--validate-only",
     ], cwd=ROOT, check=True)
-    print("Final H1/H4/H7/H8/H9/H10/H13/H14 evidence closure passed.")
+    subprocess.run([
+        sys.executable, str(ROOT / "scripts/run_batched_paged_performance.py"),
+        "--protocol", str(ROOT / "config/batched_paged_performance_protocol_v5.json"),
+        "--output", str(ROOT / "results/research/h19-production-batched-paged-v5.0.0"),
+        "--validate-only",
+    ], cwd=ROOT, check=True)
+    print("Final H1/H4/H7/H8/H9/H10/H13/H14/H19 evidence closure passed.")
 
 
 if __name__ == "__main__":
