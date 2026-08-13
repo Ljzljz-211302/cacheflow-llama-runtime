@@ -54,7 +54,9 @@ def binding(protocol_path: Path, server: Path, model: Path) -> dict[str, Any]:
     }
 
 
-def load_inputs(protocol_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+def load_inputs(
+    protocol_path: Path, *, validate_live_sources: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
     corpus_path = ROOT / protocol["workload_file"]
     if sha256(corpus_path) != protocol["workload_sha256"]:
@@ -64,7 +66,7 @@ def load_inputs(protocol_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         raise ValueError("batched workload contexts differ from the protocol")
     if int(corpus["streams_per_context"]) < max(map(int, protocol["matrix"]["batch_sizes"])):
         raise ValueError("batched workload has too few independent prompt streams")
-    for source in corpus["sources"]:
+    for source in corpus["sources"] if validate_live_sources else ():
         if sha256(ROOT / source["path"]) != source["sha256"]:
             raise ValueError(f"batched workload source changed: {source['path']}")
     return protocol, corpus
@@ -253,7 +255,7 @@ def artifact_hashes(output: Path) -> dict[str, str]:
 
 
 def validate_artifact(protocol_path: Path, output: Path, server: Path, model: Path) -> dict[str, Any]:
-    protocol, _ = load_inputs(protocol_path)
+    protocol, corpus = load_inputs(protocol_path)
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     if manifest["protocol_sha256"] != sha256(protocol_path) or manifest["files"] != artifact_hashes(output):
         raise AssertionError("batched performance manifest differs from the artifact tree")
@@ -264,6 +266,12 @@ def validate_artifact(protocol_path: Path, output: Path, server: Path, model: Pa
     if any(run_binding[field] != observed[field] for field in (
             "protocol_sha256", "vendor_revision", "vendor_diff_sha256", "model_sha256", "runtime_sha256")):
         raise AssertionError("batched performance execution binding differs")
+    for source in corpus["sources"]:
+        historical = subprocess.check_output(
+            ["git", "show", f"{run_binding['runner_revision']}:{source['path']}"], cwd=ROOT,
+        )
+        if hashlib.sha256(historical).hexdigest() != source["sha256"]:
+            raise AssertionError(f"batched historical workload source differs: {source['path']}")
     rows = json.loads((output / "trials.json").read_text(encoding="utf-8"))
     raw_rows = [
         json.loads(path.read_text(encoding="utf-8"))
@@ -327,7 +335,7 @@ def main() -> None:
         validate_artifact(args.protocol, args.output, args.server, args.model)
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return
-    protocol, corpus = load_inputs(args.protocol)
+    protocol, corpus = load_inputs(args.protocol, validate_live_sources=True)
     if args.output.exists():
         raise FileExistsError("batched performance artifact is immutable")
     observed = binding(args.protocol, args.server, args.model)
