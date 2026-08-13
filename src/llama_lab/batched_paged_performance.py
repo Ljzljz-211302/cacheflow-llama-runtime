@@ -90,9 +90,13 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
             raise ValueError("action counters differ from the requested workload")
         if key[1] == "paged":
             dispatches = 24 * waves
-            if (float(row["paged_calls"]) != waves or float(row["paged_sequences"]) != waves * batch or
-                    float(row["cuda_dispatches"]) != dispatches or
-                    float(row["cuda_sequences"]) != dispatches * batch):
+            calls = float(row["paged_calls"])
+            exact_batches = set(map(int, protocol["measurement"].get("require_exact_graph_batch_sizes", [])))
+            if (float(row["paged_sequences"]) != waves * batch or
+                    float(row["cuda_sequences"]) != dispatches * batch or
+                    float(row["cuda_dispatches"]) != calls * 24 or
+                    calls < waves or calls > waves * batch or
+                    (batch in exact_batches and calls != waves)):
                 raise ValueError("Paged cell lacks full CUDA dispatch evidence")
         elif any(float(row[field]) != 0 for field in ("paged_calls", "paged_sequences", "cuda_dispatches", "cuda_sequences")):
             raise ValueError("Direct cell entered Paged CUDA dispatch")
@@ -143,6 +147,8 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
                     "paged_peak_gpu_memory_mib": paged["peak_gpu_memory_mib"],
                     "minimum_top64_overlap": minimum_overlap,
                     "maximum_common_logprob_error": maximum_error,
+                    "paged_graph_calls": paged["paged_calls"],
+                    "realized_sequences_per_graph": paged["paged_sequences"] / paged["paged_calls"],
                 }
 
     primary_batch = int(protocol["acceptance"]["primary_batch_size"])

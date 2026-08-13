@@ -11,8 +11,8 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
             "protocol_version": "1.0.0",
             "random_seed": 17,
             "matched_process_blocks": 2,
-            "matrix": {"batch_sizes": [1, 8], "context_tokens": [128]},
-            "measurement": {"waves_per_cell": 2},
+            "matrix": {"batch_sizes": [1, 2, 8], "context_tokens": [128]},
+            "measurement": {"waves_per_cell": 2, "require_exact_graph_batch_sizes": [8]},
             "statistics": {"bootstrap_resamples": 1000},
             "acceptance": {
                 "primary_batch_size": 8,
@@ -27,7 +27,7 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
     def rows(self, paged_ms: float = 8.0) -> list[dict]:
         rows = []
         for block in (1, 2):
-            for batch in (1, 8):
+            for batch in (1, 2, 8):
                 for action, elapsed in (("direct", 10.0), ("paged", paged_ms)):
                     rows.append({
                         "block": block, "action": action, "batch_size": batch,
@@ -49,10 +49,10 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
 
     def test_plan_is_balanced_and_covers_full_matrix(self) -> None:
         plan = experiment_plan(self.protocol())
-        self.assertEqual(len(plan), 8)
+        self.assertEqual(len(plan), 12)
         self.assertEqual({row["action"] for row in plan}, {"direct", "paged"})
-        self.assertEqual({(row["batch_size"], row["context_tokens"]) for row in plan}, {(1, 128), (8, 128)})
-        self.assertNotEqual(plan[0]["action"], plan[4]["action"])
+        self.assertEqual({(row["batch_size"], row["context_tokens"]) for row in plan}, {(1, 128), (2, 128), (8, 128)})
+        self.assertNotEqual(plan[0]["action"], plan[6]["action"])
 
     def test_analyzer_requires_real_cuda_batch_and_promotes_clear_win(self) -> None:
         summary = analyze(self.protocol(), self.rows())
@@ -80,6 +80,15 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
         summary = analyze(self.protocol(), self.rows(paged_ms=12.0))
         self.assertFalse(summary["promotion_passed"])
         self.assertLess(summary["primary_throughput_gain_percent"]["median"], 0)
+
+    def test_secondary_scheduler_fragmentation_is_reported_not_mislabeled(self) -> None:
+        rows = self.rows()
+        paged_batch_two = next(row for row in rows if row["action"] == "paged" and row["batch_size"] == 2)
+        paged_batch_two["paged_calls"] = 4
+        paged_batch_two["cuda_dispatches"] = 96
+        summary = analyze(self.protocol(), rows)
+        cell = summary["per_cell"]["block-1-batch-2-context-128"]
+        self.assertEqual(cell["realized_sequences_per_graph"], 1.0)
 
 
 if __name__ == "__main__":
