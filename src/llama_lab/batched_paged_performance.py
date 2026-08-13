@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+import math
+import random
+import statistics
+from typing import Any
+
+
+def _percentile(values: list[float], probability: float) -> float:
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * probability
+    lower, upper = math.floor(position), math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
+
+
+def _summary(values: list[float]) -> dict[str, float]:
+    return {
+        "median": statistics.median(values),
+        "p95": _percentile(values, 0.95),
+        "minimum": min(values),
+        "maximum": max(values),
+    }
+
+
+def experiment_plan(protocol: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the frozen matched-process execution order and complete matrix."""
+    blocks = int(protocol["matched_process_blocks"])
+    generator = random.Random(int(protocol["random_seed"]))
+    first = ["direct"] * (blocks // 2) + ["paged"] * (blocks // 2)
+    if blocks % 2:
+        first.append(generator.choice(("direct", "paged")))
+    generator.shuffle(first)
+    plan = []
+    for block, first_action in enumerate(first, 1):
+        actions = (first_action, "paged" if first_action == "direct" else "direct")
+        cells = [
+            (int(batch), int(context))
+            for batch in protocol["matrix"]["batch_sizes"]
+            for context in protocol["matrix"]["context_tokens"]
+        ]
+        generator.shuffle(cells)
+        for order, action in enumerate(actions, 1):
+            for batch, context in cells:
+                plan.append({
+                    "block": block, "order_in_block": order, "action": action,
+                    "batch_size": batch, "context_tokens": context,
+                })
+    return plan
+
+
+def _cluster_interval(effects: dict[int, list[float]], protocol: dict[str, Any]) -> list[float]:
+    generator = random.Random(int(protocol["random_seed"]))
+    blocks = sorted(effects)
+    estimates = []
+    for _ in range(int(protocol["statistics"]["bootstrap_resamples"])):
+        sampled = generator.choices(blocks, k=len(blocks))
+        estimates.append(statistics.median(value for block in sampled for value in effects[block]))
+    return [_percentile(estimates, 0.025), _percentile(estimates, 0.975)]
+
+
+def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    expected = {
+        (block, action, int(batch), int(context))
+        for block in range(1, int(protocol["matched_process_blocks"]) + 1)
+        for action in ("direct", "paged")
+        for batch in protocol["matrix"]["batch_sizes"]
+        for context in protocol["matrix"]["context_tokens"]
+    }
+    keyed: dict[tuple[int, str, int, int], dict[str, Any]] = {}
+    waves = int(protocol["measurement"]["waves_per_cell"])
+    for row in rows:
+        key = (int(row["block"]), str(row["action"]), int(row["batch_size"]), int(row["context_tokens"]))
+        if key not in expected or key in keyed:
+            raise ValueError("batched performance artifact contains an unexpected or duplicate cell")
+        batch = key[2]
+        if len(row["wave_elapsed_ms"]) != waves or len(row["request_elapsed_ms"]) != waves * batch:
+            raise ValueError("batched performance cell has incomplete measurements")
+        if len(row["output_token_ids"]) != waves * batch or len(row["cache_tokens"]) != waves * batch:
+            raise ValueError("batched performance cell has incomplete response evidence")
+        if any(float(value) <= 0 for value in row["wave_elapsed_ms"] + row["request_elapsed_ms"]):
+            raise ValueError("batched performance timings must be positive")
+        if any(int(value) != key[3] for value in row["cache_tokens"]):
+            raise ValueError("runtime tokenizer context differs from the frozen cell")
+        if float(row["action_decisions"]) != waves * batch or float(row["paged_fallbacks"]) != 0:
+            raise ValueError("action counters differ from the requested workload")
+        if key[1] == "paged":
+            dispatches = 24 * waves
+            if (float(row["paged_calls"]) != waves or float(row["paged_sequences"]) != waves * batch or
+                    float(row["cuda_dispatches"]) != dispatches or
+                    float(row["cuda_sequences"]) != dispatches * batch):
+                raise ValueError("Paged cell lacks full CUDA dispatch evidence")
+        elif any(float(row[field]) != 0 for field in ("paged_calls", "paged_sequences", "cuda_dispatches", "cuda_sequences")):
+            raise ValueError("Direct cell entered Paged CUDA dispatch")
+        keyed[key] = row
+    if set(keyed) != expected:
+        raise ValueError("batched performance artifact does not cover the frozen matrix")
+
+    effects_by_batch: dict[int, dict[int, list[float]]] = {
+        int(batch): {block: [] for block in range(1, int(protocol["matched_process_blocks"]) + 1)}
+        for batch in protocol["matrix"]["batch_sizes"]
+    }
+    latency_regressions: list[float] = []
+    per_cell = {}
+    for block in range(1, int(protocol["matched_process_blocks"]) + 1):
+        for batch in map(int, protocol["matrix"]["batch_sizes"]):
+            for context in map(int, protocol["matrix"]["context_tokens"]):
+                direct = keyed[(block, "direct", batch, context)]
+                paged = keyed[(block, "paged", batch, context)]
+                if direct["output_token_ids"] != paged["output_token_ids"]:
+                    raise ValueError("Direct and Paged output token IDs differ")
+                direct_throughput = batch * waves * 1000.0 / sum(map(float, direct["wave_elapsed_ms"]))
+                paged_throughput = batch * waves * 1000.0 / sum(map(float, paged["wave_elapsed_ms"]))
+                gain = (paged_throughput / direct_throughput - 1.0) * 100.0
+                latency = (
+                    statistics.median(map(float, paged["request_elapsed_ms"])) /
+                    statistics.median(map(float, direct["request_elapsed_ms"])) - 1.0
+                ) * 100.0
+                effects_by_batch[batch][block].append(gain)
+                latency_regressions.append(latency)
+                per_cell[f"block-{block}-batch-{batch}-context-{context}"] = {
+                    "throughput_gain_percent": gain,
+                    "median_request_latency_regression_percent": latency,
+                    "direct_peak_gpu_memory_mib": direct["peak_gpu_memory_mib"],
+                    "paged_peak_gpu_memory_mib": paged["peak_gpu_memory_mib"],
+                }
+
+    primary_batch = int(protocol["acceptance"]["primary_batch_size"])
+    primary_effects = [value for values in effects_by_batch[primary_batch].values() for value in values]
+    primary_interval = _cluster_interval(effects_by_batch[primary_batch], protocol)
+    primary_latency = [
+        row["median_request_latency_regression_percent"] for key, row in per_cell.items()
+        if f"batch-{primary_batch}-" in key
+    ]
+    by_batch = {}
+    for batch, block_effects in effects_by_batch.items():
+        values = [value for effects in block_effects.values() for value in effects]
+        by_batch[str(batch)] = {
+            "throughput_gain_percent": _summary(values),
+            "block_cluster_bootstrap_95_percent": _cluster_interval(block_effects, protocol),
+        }
+    gates = protocol["acceptance"]
+    worst_latency = max(latency_regressions)
+    primary_p95_latency = _percentile(primary_latency, 0.95)
+    return {
+        "schema_version": 1,
+        "protocol_version": protocol["protocol_version"],
+        "observations": len(rows),
+        "primary_batch_size": primary_batch,
+        "primary_throughput_gain_percent": _summary(primary_effects),
+        "primary_block_cluster_bootstrap_95_percent": primary_interval,
+        "primary_p95_latency_regression_percent": primary_p95_latency,
+        "worst_cell_median_latency_regression_percent": worst_latency,
+        "throughput_by_batch": by_batch,
+        "per_cell": per_cell,
+        "promotion_passed": (
+            primary_interval[0] > float(gates["minimum_throughput_gain_lower_95_percent"])
+            and primary_p95_latency <= float(gates["maximum_p95_latency_regression_percent"])
+            and worst_latency <= float(gates["maximum_any_cell_median_latency_regression_percent"])
+        ),
+    }
