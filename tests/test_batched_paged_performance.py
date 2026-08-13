@@ -32,7 +32,6 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
                     rows.append({
                         "block": block, "action": action, "batch_size": batch,
                         "context_tokens": 128, "wave_elapsed_ms": [elapsed, elapsed],
-                        "request_elapsed_ms": [elapsed] * (batch * 2),
                         "output_token_ids": [[7]] * (batch * 2),
                         "top_logprobs": [[
                             {"id": token, "logprob": -float(token)} for token in range(64)

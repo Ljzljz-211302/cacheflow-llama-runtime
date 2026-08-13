@@ -76,13 +76,13 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
         if key not in expected or key in keyed:
             raise ValueError("batched performance artifact contains an unexpected or duplicate cell")
         batch = key[2]
-        if len(row["wave_elapsed_ms"]) != waves or len(row["request_elapsed_ms"]) != waves * batch:
+        if len(row["wave_elapsed_ms"]) != waves:
             raise ValueError("batched performance cell has incomplete measurements")
         if len(row["output_token_ids"]) != waves * batch or len(row["cache_tokens"]) != waves * batch:
             raise ValueError("batched performance cell has incomplete response evidence")
         if len(row["top_logprobs"]) != waves * batch:
             raise ValueError("batched performance cell has incomplete probability evidence")
-        if any(float(value) <= 0 for value in row["wave_elapsed_ms"] + row["request_elapsed_ms"]):
+        if any(float(value) <= 0 for value in row["wave_elapsed_ms"]):
             raise ValueError("batched performance timings must be positive")
         if any(int(value) != key[3] for value in row["cache_tokens"]):
             raise ValueError("runtime tokenizer context differs from the frozen cell")
@@ -131,14 +131,14 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
                 paged_throughput = batch * waves * 1000.0 / sum(map(float, paged["wave_elapsed_ms"]))
                 gain = (paged_throughput / direct_throughput - 1.0) * 100.0
                 latency = (
-                    statistics.median(map(float, paged["request_elapsed_ms"])) /
-                    statistics.median(map(float, direct["request_elapsed_ms"])) - 1.0
+                    statistics.median(map(float, paged["wave_elapsed_ms"])) /
+                    statistics.median(map(float, direct["wave_elapsed_ms"])) - 1.0
                 ) * 100.0
                 effects_by_batch[batch][block].append(gain)
                 latency_regressions.append(latency)
                 per_cell[f"block-{block}-batch-{batch}-context-{context}"] = {
                     "throughput_gain_percent": gain,
-                    "median_request_latency_regression_percent": latency,
+                    "median_wave_latency_regression_percent": latency,
                     "direct_peak_gpu_memory_mib": direct["peak_gpu_memory_mib"],
                     "paged_peak_gpu_memory_mib": paged["peak_gpu_memory_mib"],
                     "minimum_top64_overlap": minimum_overlap,
@@ -149,7 +149,7 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
     primary_effects = [value for values in effects_by_batch[primary_batch].values() for value in values]
     primary_interval = _cluster_interval(effects_by_batch[primary_batch], protocol)
     primary_latency = [
-        row["median_request_latency_regression_percent"] for key, row in per_cell.items()
+        row["median_wave_latency_regression_percent"] for key, row in per_cell.items()
         if f"batch-{primary_batch}-" in key
     ]
     by_batch = {}
@@ -169,8 +169,8 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
         "primary_batch_size": primary_batch,
         "primary_throughput_gain_percent": _summary(primary_effects),
         "primary_block_cluster_bootstrap_95_percent": primary_interval,
-        "primary_p95_latency_regression_percent": primary_p95_latency,
-        "worst_cell_median_latency_regression_percent": worst_latency,
+        "primary_p95_wave_latency_regression_percent": primary_p95_latency,
+        "worst_cell_median_wave_latency_regression_percent": worst_latency,
         "throughput_by_batch": by_batch,
         "per_cell": per_cell,
         "promotion_passed": (

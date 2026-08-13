@@ -5,10 +5,8 @@ import hashlib
 import json
 import subprocess
 import sys
-import threading
 import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -91,25 +89,21 @@ def erase_slots(port: int, count: int) -> None:
                 raise AssertionError(f"failed to erase slot {slot}")
 
 
-def issue_wave(base_url: str, payloads: list[dict[str, Any]]) -> tuple[float, list[float], list[dict[str, Any]]]:
-    barrier = threading.Barrier(len(payloads) + 1)
-
-    def issue(payload: dict[str, Any]) -> tuple[float, dict[str, Any]]:
-        barrier.wait()
-        started = time.perf_counter_ns()
-        status, response = request_json(f"{base_url}/completion", payload)
-        elapsed = (time.perf_counter_ns() - started) / 1.e6
-        if status != 200 or "error" in response or len(response.get("tokens", [])) != 1:
-            raise AssertionError(f"batched request failed: {status} {response}")
-        return elapsed, response
-
-    with ThreadPoolExecutor(max_workers=len(payloads)) as pool:
-        futures = [pool.submit(issue, payload) for payload in payloads]
-        started = time.perf_counter_ns()
-        barrier.wait()
-        completed = [future.result() for future in futures]
-        wave_elapsed = (time.perf_counter_ns() - started) / 1.e6
-    return wave_elapsed, [row[0] for row in completed], [row[1] for row in completed]
+def issue_wave(base_url: str, payloads: list[dict[str, Any]]) -> tuple[float, list[dict[str, Any]]]:
+    common = {key: value for key, value in payloads[0].items() if key not in ("prompt", "seed")}
+    batched_payload = {
+        **common,
+        "prompt": [payload["prompt"] for payload in payloads],
+        "seed": int(payloads[0]["seed"]),
+    }
+    started = time.perf_counter_ns()
+    status, body = request_json(f"{base_url}/completion", batched_payload)
+    elapsed = (time.perf_counter_ns() - started) / 1.e6
+    responses = body if isinstance(body, list) else [body]
+    if (status != 200 or len(responses) != len(payloads) or any(
+            "error" in response or len(response.get("tokens", [])) != 1 for response in responses)):
+        raise AssertionError(f"controlled batched request failed: {status} {body}")
+    return elapsed, responses
 
 
 def metric_delta(before: str, after: str, name: str) -> float:
@@ -174,12 +168,11 @@ def collect_arm(
                 for _ in range(int(protocol["measurement"]["warm_waves_per_cell"])):
                     issue_wave(base_url, payloads)
                 before = get_text(f"{base_url}/metrics")
-                wave_times, request_times, responses = [], [], []
+                wave_times, responses = [], []
                 with GpuMemorySampler(interval_seconds=0.05) as memory:
                     for _ in range(int(protocol["measurement"]["waves_per_cell"])):
-                        wave, elapsed, wave_responses = issue_wave(base_url, payloads)
+                        wave, wave_responses = issue_wave(base_url, payloads)
                         wave_times.append(wave)
-                        request_times.extend(elapsed)
                         responses.extend(wave_responses)
                 after = get_text(f"{base_url}/metrics")
                 normalized = [normalize_response(response) for response in responses]
@@ -187,7 +180,7 @@ def collect_arm(
                     "block": block, "order_in_block": order, "action": action,
                     "batch_size": batch, "context_tokens": context,
                     "prompt_sha256": [prompt["prompt_sha256"] for prompt in prompt_rows],
-                    "wave_elapsed_ms": wave_times, "request_elapsed_ms": request_times,
+                    "wave_elapsed_ms": wave_times,
                     "output_token_ids": [item[0] for item in normalized],
                     "cache_tokens": [item[1] for item in normalized],
                     "top_logprobs": [item[2] for item in normalized],
@@ -218,8 +211,8 @@ def render_report(summary: dict[str, Any]) -> str:
         f"- Promotion: **{'PASS' if summary['promotion_passed'] else 'FAIL'}**",
         f"- Batch-{summary['primary_batch_size']} throughput gain median: {summary['primary_throughput_gain_percent']['median']:+.2f}%",
         f"- Matched-process-block bootstrap 95% interval: [{interval[0]:+.2f}%, {interval[1]:+.2f}%]",
-        f"- Batch-{summary['primary_batch_size']} P95 request-latency regression: {summary['primary_p95_latency_regression_percent']:+.2f}%",
-        f"- Worst cell median request-latency regression: {summary['worst_cell_median_latency_regression_percent']:+.2f}%", "",
+        f"- Batch-{summary['primary_batch_size']} P95 batched-wave latency regression: {summary['primary_p95_wave_latency_regression_percent']:+.2f}%",
+        f"- Worst cell median batched-wave latency regression: {summary['worst_cell_median_wave_latency_regression_percent']:+.2f}%", "",
         "## Throughput by batch", "", "| Batch | Median gain | 95% interval |", "|---:|---:|---:|",
     ]
     for batch, row in summary["throughput_by_batch"].items():
@@ -289,10 +282,10 @@ def validate_artifact(protocol_path: Path, output: Path, server: Path, model: Pa
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--protocol", type=Path, default=ROOT / "config/batched_paged_performance_protocol_v1.json")
+    parser.add_argument("--protocol", type=Path, default=ROOT / "config/batched_paged_performance_protocol_v2.json")
     parser.add_argument("--server", type=Path, default=ROOT / "build/patched-cuda-ninja3/bin/llama-server.exe")
     parser.add_argument("--model", type=Path, default=ROOT / "models/qwen2.5-0.5b-instruct-q4_k_m.gguf")
-    parser.add_argument("--output", type=Path, default=ROOT / "results/research/h15-batched-paged-v1.0.0")
+    parser.add_argument("--output", type=Path, default=ROOT / "results/research/h16-controlled-batched-paged-v2.0.0")
     parser.add_argument("--port", type=int, default=8350)
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
