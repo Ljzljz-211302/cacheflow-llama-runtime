@@ -282,10 +282,10 @@ def validate_artifact(protocol_path: Path, output: Path, server: Path, model: Pa
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--protocol", type=Path, default=ROOT / "config/batched_paged_performance_protocol_v2.json")
+    parser.add_argument("--protocol", type=Path, default=ROOT / "config/batched_paged_performance_protocol_v3.json")
     parser.add_argument("--server", type=Path, default=ROOT / "build/patched-cuda-ninja3/bin/llama-server.exe")
     parser.add_argument("--model", type=Path, default=ROOT / "models/qwen2.5-0.5b-instruct-q4_k_m.gguf")
-    parser.add_argument("--output", type=Path, default=ROOT / "results/research/h16-controlled-batched-paged-v2.0.0")
+    parser.add_argument("--output", type=Path, default=ROOT / "results/research/h17-device-counted-batched-paged-v3.0.0")
     parser.add_argument("--port", type=int, default=8350)
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
