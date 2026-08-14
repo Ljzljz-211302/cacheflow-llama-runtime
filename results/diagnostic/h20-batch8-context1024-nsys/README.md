@@ -2,6 +2,8 @@
 
 These captures are diagnostic evidence, not a preregistered performance result. They were used to locate the H19 regression before the H20 protocol was frozen. The formal acceptance result is `results/research/h20-paged-hybrid-batch8-v6.1.0`.
 
+The measurement worktree contained one pre-existing vendor overlay. Its exact 374-byte diff is archived at `patches/h20-vendor-overlay.patch`; SHA-256 `c2a48bcc5623301f1f5f7c80c5e53b75da9ef16b6a7d0c17142971c279d865e7` matches the frozen protocol and execution-start binding. It is a compile-compatibility alias, not part of the H20 routing intervention.
+
 All runs use Qwen2.5-0.5B on the same RTX 4050 Laptop GPU and native batch 8. SQLite rows are the exported NSYS trace; `.nsys-rep` is retained as the raw profiler capture. Kernel timing is profiler-perturbed and supports mechanism selection only.
 
 | Capture | Target kernel | Launches in selected decode range | Grid X | Mean duration |
