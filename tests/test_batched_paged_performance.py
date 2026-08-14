@@ -151,6 +151,8 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
             summary["per_cell"]["block-1-batch-8-context-128"]["execution_route"],
             "upstream-contiguous-fastpath",
         )
+        self.assertEqual(summary["execution_evidence"]["custom_cuda_dispatches"], 0)
+        self.assertEqual(summary["execution_evidence"]["contiguous_fastpath_sequences"], 44)
         tampered = self.rows(paged_ms=10.0)
         for row in tampered:
             row["paged_contiguous_fastpath_calls"] = 0

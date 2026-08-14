@@ -220,6 +220,7 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
     primary_direct_p95 = _percentile(primary_direct_waves, 0.95)
     primary_paged_p95 = _percentile(primary_paged_waves, 0.95)
     primary_p95_latency = (primary_paged_p95 / primary_direct_p95 - 1.0) * 100.0
+    paged_rows = [row for key, row in keyed.items() if key[1] == "paged"]
     return {
         "schema_version": 1,
         "protocol_version": protocol["protocol_version"],
@@ -232,6 +233,17 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
         "primary_p95_wave_latency_regression_percent": primary_p95_latency,
         "worst_cell_median_wave_latency_regression_percent": worst_latency,
         "throughput_by_batch": by_batch,
+        "execution_evidence": {
+            "mode": execution_mode,
+            "contiguous_fastpath_calls": sum(
+                float(row.get("paged_contiguous_fastpath_calls", 0)) for row in paged_rows
+            ),
+            "contiguous_fastpath_sequences": sum(
+                float(row.get("paged_contiguous_fastpath_sequences", 0)) for row in paged_rows
+            ),
+            "custom_paged_graph_calls": sum(float(row["paged_calls"]) for row in paged_rows),
+            "custom_cuda_dispatches": sum(float(row["cuda_dispatches"]) for row in paged_rows),
+        },
         "correctness": {
             "output_token_matches": output_matches,
             "output_token_comparisons": output_comparisons,
