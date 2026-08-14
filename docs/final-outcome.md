@@ -58,3 +58,10 @@
 但 batch 8 吞吐中位变化为 -3.22%（95% 区间 [-4.90%, -0.12%），P95 wave 延迟回退 16.00%，最差 cell 中位延迟回退 50.49%。输出 token 一致 1052/1080，另有 48 行概率证据不完整，因此性能与正确性门均未通过，Paged 继续保持 opt-in。
 - H19 正式报告：[`results/research/h19-production-batched-paged-v5.0.0/report.md`](../results/research/h19-production-batched-paged-v5.0.0/report.md)
 - H19 批量性能图：[`results/research/h19-production-batched-paged-v5.0.0/comparison.svg`](../results/research/h19-production-batched-paged-v5.0.0/comparison.svg)
+
+## H20 布局感知混合路由正结果
+
+H19 的根因不是 batch API 不可用，而是连续物理布局仍被强制送入较慢的自研 K4 算术核。H20 将页表构建器扩展为同时判断逻辑页是否物理连续：连续时复用 upstream Direct/MMA attention，只有碎片页才进入 custom K4。两条路径仍共享同一个 Paged capability、block table 生命周期和 fail-closed 边界，不是在 API 外绕过功能。
+正式 v6.1 固定 batch 8、context 128/512/1024、6 个平衡匹配进程块，共 36 个 action-cell、1728 次输出与 top-64 分布比较。生产计数证明 216 次连续布局 fast-path、1728 条序列，custom Paged graph/CUDA dispatch 均为 0。吞吐中位变化 +1.54%，cluster bootstrap 95% 区间 [-2.06%, +3.86%]；Direct/Paged P95 为 142.532/141.449 ms，即变化 -0.76%。全部输出一致，正式非劣门通过。该结果不证明碎片页 K4 优于 Direct，也不证明容量或碎片收益。
+- H20 正式报告：[`results/research/h20-paged-hybrid-batch8-v6.1.0/report.md`](../results/research/h20-paged-hybrid-batch8-v6.1.0/report.md)
+- H20 混合路由性能图：[`results/research/h20-paged-hybrid-batch8-v6.1.0/comparison.svg`](../results/research/h20-paged-hybrid-batch8-v6.1.0/comparison.svg)

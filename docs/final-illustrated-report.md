@@ -39,6 +39,7 @@
 - **K2-vs-K1 正结果**：30 组同进程配对、每臂 480 条测量响应和 600 次 Paged graph entry、0 fallback。请求 median/P95 仅回退 0.55%/1.52%，median 回退 bootstrap 95% 上界 2.86%；相同 480 次 kernel 总时长从 8.174 ms 降至 4.051 ms，降低 50.44%。
 - **H9 客观矩阵负结果**：6类冻结输入、30组随机化匹配进程块、360个 workload-arm 观测均实际跨页。总体中位数显示 Paged 改善 7.96%，但 block-workload 回退分布P95为 158.62%，最差workload中位回退 44.66%，分别超过20%和5%门槛，因此不能晋级。
 - **H10→H13 长上下文根因修复**：H10 的旧 split-K2 主中位回退为 50.35%。K4 用整组 GQA7 复用、`half2` K/V 访问和设备端自适应 partition 重构算子；H13 以 18 个来源绑定 workload、12 个严格平衡的匹配进程块和 432 个 workload-arm 观测覆盖 64–2048 token，合计 3456 个测量请求，输出逐项一致、Paged graph 覆盖完整且 0 fallback。512–2048 token 主区间的 `server_prompt_ms` 中位回退降至 3.98%，cluster bootstrap 95% 区间 [2.50%, 5.38%]，P95 回退 13.34%；算法改进有明确幅度，但置信上界仍未通过 +5% 晋级门。
+- **H20 布局感知混合路由正结果**：连续物理页不再强制执行较慢的 custom K4，而是复用 upstream attention；碎片页仍保留页表寻址 K4。batch 8、128/512/1024 token、6 个平衡匹配进程块中，吞吐中位变化 +1.54%，95% 区间 [-2.06%, +3.86%]，P95 wave 延迟变化 -0.76%，1728/1728 输出一致，正式非劣门通过。
 
 ![K2/K1 正式对比图](../results/research/h8-k2-production-v2.10.0/k2-production-comparison.svg)
 
@@ -54,11 +55,19 @@
 
 ![原生批处理 Paged/Direct 客观结果](../results/research/h19-production-batched-paged-v5.0.0/comparison.svg)
 
+### H20：从强制自研算术核改为布局感知混合执行
+
+NSYS 根因分析显示，H19 的 K4 主 kernel 平均约 40.54 μs，而 upstream Flash Attention 约 26.08 μs；额外 merge 约 1.62 μs，因此问题主要是算术核效率，不是 host 包装。仅把 1024-token partition 从 64 调到 128 虽将 grid 和 scratch 减半，却没有改善主 kernel 时间；实验性 Tensor Core K5 也慢于 K4，因此均未冒充成果。
+
+最终修复把“分页生命周期”与“必须运行自研分页算术核”解耦。block-table builder 检测所有活跃逻辑页的物理基址是否按 page size 连续；若连续，Paged 请求复用 upstream attention；若不连续，才使用 custom K4。H20 的 216 次 fast-path 调用覆盖 1728 条序列，且 custom graph/CUDA dispatch 为 0。吞吐点估计 +1.54%，95% 区间 [-2.06%, +3.86%]，只能称为“有界非劣”，不能称为严格占优；碎片布局 K4 的性能仍由 H19/H13 负结果约束。
+
+![布局感知混合路由结果](../results/research/h20-paged-hybrid-batch8-v6.1.0/comparison.svg)
+
 ## 5. 应用结果与最终边界
 
 应用旅程已覆盖 UI、SSE、并发、取消、429 背压、重启恢复和本地知识检索，并记录 456 个缓存 prompt token、6 次自研 CUDA KV launch、5603330 个向量化 remap 字节。它能作为可运行应用项目和有实验链的 AI Infra 研究项目交付。
 
-最终不能声称“Paged 全面优于 Direct”或“端到端加速 50.44%”。准确结论是：**短上下文受限 Paged 内部，K2 已以预注册实验替换 K1；长上下文 K4 已把旧 K2 的主中位回退从 50.35% 降至 3.98%，但 95% 区间上界 5.38% 仍未通过 +5% 门，因此 Paged 保持 opt-in。两臂复用同一底层分配器，本实验也不提供碎片率或容量优势证据。**
+最终不能声称“Paged 全面优于 Direct”或“端到端加速 50.44%”。准确结论是：**短上下文受限 Paged 内部，K2 已替换 K1；长上下文 custom K4 将旧 K2 回退显著降低但仍未晋级；生产混合路由在连续 batch-8 矩阵中通过有界非劣门，碎片布局仍 fail-closed 到经过 oracle 验证但性能未晋级的 K4。两臂复用同一底层分配器，本实验不提供碎片率或容量优势证据。**
 
 ## 6. 复现与审计
 

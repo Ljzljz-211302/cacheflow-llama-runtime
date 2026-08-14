@@ -421,6 +421,60 @@
         "No larger-model, multi-sequence batching, prefill, or universal Paged Attention claim"
       ],
       "negative_result_policy": "Keep the source-bound negative artifact and invalid v3 artifact, leave Paged disabled by default, and require a new preregistered run after any vectorized QK/PV or dispatch change."
+    },
+    {
+      "id": "H9-layout-aware-paged-hybrid",
+      "question": "Can production routing preserve Paged KV semantics without paying the custom fragmented-page arithmetic cost when the live physical pages are already contiguous?",
+      "hypothesis": "For native batch 8 at 128, 512, and 1024 tokens, a layout-aware hybrid route preserves output distributions and keeps the lower 95% throughput effect above -5%, raw-wave P95 regression within 5%, and every cell median regression within 15%.",
+      "status": "existing-evidence",
+      "independent_variables": [
+        "Direct versus Paged action in independent service processes",
+        "seeded and balanced arm order across six matched process blocks",
+        "three tokenizer-derived context lengths with eight distinct prompts per wave"
+      ],
+      "dependent_metrics": [
+        "batch-8 throughput and raw-wave latency",
+        "top token and top-64 log-probability agreement",
+        "contiguous fast-path calls and sequences",
+        "custom Paged graph and CUDA dispatch counts"
+      ],
+      "confounders": [
+        "Windows process and GPU scheduling noise",
+        "all measured layouts are physically contiguous",
+        "both arms share the same allocator and upstream attention implementation on the fast path",
+        "one model, one GPU, single-token decode, and no prefill or multi-GPU coverage"
+      ],
+      "baselines": ["upstream", "paged-decode-contiguous"],
+      "mechanism": "The block-table builder records whether every live logical page maps to adjacent physical page-size strides. Contiguous layouts retain the Paged action and KV lifecycle but reuse upstream attention arithmetic; fragmented layouts keep the independently oracle-validated custom K4 path. Separate counters make the two routes mutually auditable.",
+      "falsification": [
+        "The cluster-bootstrap lower 95% throughput effect is below -5%.",
+        "Raw-wave P95 regression exceeds 5% or any cell median regression exceeds 15%.",
+        "Any top-64 row is incomplete, overlap falls below 48, common-token log-probability error exceeds 1.0, or output comparison fails.",
+        "A contiguous-layout Paged arm records a custom Paged graph/CUDA dispatch, or fast-path calls/sequences do not exactly match the wave matrix."
+      ],
+      "evidence_sources": [
+        "config/batched_paged_hybrid_protocol_v6.json",
+        "config/batched_paged_workloads_v2.json",
+        "results/research/h20-paged-hybrid-batch8-v6.1.0/manifest.json",
+        "results/research/h20-paged-hybrid-batch8-v6.1.0/summary.json",
+        "results/research/h20-paged-hybrid-batch8-v6.1.0/trials.json",
+        "results/research/h20-paged-hybrid-batch8-v6.1.0/comparison.svg",
+        "docs/adr/0003-paged-hybrid-execution.md"
+      ],
+      "observed_results": [
+        "Six balanced matched process blocks produced 36 action cells and 1728 output/probability comparisons over batch 8 and contexts 128, 512, and 1024.",
+        "Median throughput changed by +1.54% with a matched-process-block cluster-bootstrap 95% interval of [-2.06%, +3.86%], passing the preregistered -5% noninferiority lower bound.",
+        "Direct/Paged raw-wave P95 was 142.532/141.449 ms, a -0.76% regression, and the worst cell median regression was +12.05%; both passed their preregistered gates.",
+        "All 1728 outputs matched, top-64 overlap was 64 with zero common-token log-probability error, and no probability row was incomplete.",
+        "The Paged arm recorded 216 contiguous fast-path calls and 1728 fast-path sequences with zero custom Paged graph calls and zero custom CUDA dispatches."
+      ],
+      "scope_limits": [
+        "Qwen2.5-0.5B, FP16 KV, page 16, native batch 8, single-token decode, contexts 128/512/1024",
+        "One RTX 4050 Laptop GPU on Windows",
+        "Noninferiority rather than strict superiority",
+        "No claim that fragmented-page K4 beats Direct and no allocator capacity or fragmentation claim"
+      ],
+      "negative_result_policy": "Keep H19 and H13 as the forced-custom/fragmented-path negative boundary. Do not use H20 to relabel K4 as faster than Direct or to claim memory-capacity benefits that were not measured."
     }
   ]
 }

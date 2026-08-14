@@ -40,6 +40,12 @@ class FinalOutcomeTests(unittest.TestCase):
         self.assertEqual(batched["observations"], 144)
         self.assertEqual(batched["output_token_comparisons"], 1080)
         self.assertTrue(batched["primary_cuda_execution_verified"])
+        hybrid = outcome["research_results"]["hybrid_paged_vs_direct"]
+        self.assertTrue(hybrid["promotion_passed"])
+        self.assertTrue(hybrid["correctness_passed"])
+        self.assertEqual(hybrid["output_token_comparisons"], 1728)
+        self.assertEqual(hybrid["execution_evidence"]["mode"], "contiguous_fastpath")
+        self.assertEqual(hybrid["execution_evidence"]["custom_cuda_dispatches"], 0.0)
 
     def test_validator_rejects_rewriting_negative_paged_result(self):
         outcome = build_final_outcome(ROOT)
@@ -67,6 +73,22 @@ class FinalOutcomeTests(unittest.TestCase):
         tampered = copy.deepcopy(outcome)
         tampered["research_results"]["batched_paged_vs_direct"]["promotion_passed"] = True
         with self.assertRaisesRegex(ValueError, "batched Paged evidence boundary was rewritten"):
+            validate_final_outcome(tampered)
+
+    def test_validator_rejects_rewriting_hybrid_execution_route(self):
+        outcome = build_final_outcome(ROOT)
+        tampered = copy.deepcopy(outcome)
+        tampered["research_results"]["hybrid_paged_vs_direct"]["execution_evidence"][
+            "custom_cuda_dispatches"
+        ] = 24.0
+        with self.assertRaisesRegex(ValueError, "hybrid Paged evidence boundary was rewritten"):
+            validate_final_outcome(tampered)
+
+    def test_validator_rejects_rewriting_hybrid_promotion(self):
+        outcome = build_final_outcome(ROOT)
+        tampered = copy.deepcopy(outcome)
+        tampered["research_results"]["hybrid_paged_vs_direct"]["promotion_passed"] = False
+        with self.assertRaisesRegex(ValueError, "hybrid Paged evidence boundary was rewritten"):
             validate_final_outcome(tampered)
 
     def test_default_paged_state_is_bound_to_production_launcher(self):
@@ -116,6 +138,7 @@ class FinalOutcomeTests(unittest.TestCase):
         report = render_final_outcome(build_final_outcome(ROOT))
         self.assertIn("Paged-vs-Direct 负结果", report)
         self.assertIn("K2-vs-K1 正结果", report)
+        self.assertIn("H20 布局感知混合路由正结果", report)
         self.assertIn("不是已发表论文", report)
 
     def test_illustrated_report_explains_innovation_data_and_results(self):
@@ -125,6 +148,7 @@ class FinalOutcomeTests(unittest.TestCase):
         self.assertIn("实验数据从哪里来、如何处理", report)
         self.assertIn("Paged-vs-Direct 负结果", report)
         self.assertIn("K2-vs-K1 正结果", report)
+        self.assertIn("H20 布局感知混合路由正结果", report)
         self.assertIn("final-system-flow.svg", report)
         self.assertIn("final-outcome-summary.svg", report)
         self.assertIn("<svg", render_summary_chart(outcome))
