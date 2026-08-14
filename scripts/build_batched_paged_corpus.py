@@ -43,6 +43,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:8340")
     parser.add_argument("--output", type=Path, default=ROOT / "config/batched_paged_workloads_v1.json")
+    parser.add_argument("--corpus-version", default="1.0.0")
     parser.add_argument("--launch-server", type=Path)
     parser.add_argument("--model", type=Path)
     args = parser.parse_args()
@@ -107,7 +108,7 @@ def main() -> None:
             workloads.append({"context_tokens": target, "prompts": prompts})
         payload = {
             "schema_version": 1,
-            "corpus_version": "1.0.0",
+            "corpus_version": args.corpus_version,
             "selection_rule": "Eight deterministic, evenly spaced source-bound token spans per context; exact tokenizer round-trip; no performance outcome consulted.",
             "sources": source_rows,
             "target_context_tokens": list(TARGETS),

@@ -1,0 +1,282 @@
+{
+  "schema_version": 1,
+  "corpus_version": "2.0.0",
+  "selection_rule": "Eight deterministic, evenly spaced source-bound token spans per context; exact tokenizer round-trip; no performance outcome consulted.",
+  "sources": [
+    {
+      "path": "docs/architecture.md",
+      "sha256": "e8c726cbf634609a73753465a1408c4c4bfa064c03adfcffaa009a93597110fb"
+    },
+    {
+      "path": "docs/interview-notes.md",
+      "sha256": "43846c2352618182a43e833f29c08a85a3df3bc5003c2c7a996f19c78a74a899"
+    },
+    {
+      "path": "docs/research/restricted-paged-decode-attention.md",
+      "sha256": "c1334406442bb54431b7823862cbd60662484599ecf4d7bd95bfc18a18b3beb9"
+    }
+  ],
+  "target_context_tokens": [
+    128,
+    512,
+    1024
+  ],
+  "streams_per_context": 8,
+  "workloads": [
+    {
+      "context_tokens": 128,
+      "prompts": [
+        {
+          "stream": 0,
+          "prompt": "CacheFlow Runtime 整体架构设计 状态：Implementation in progress；自动化测试通过不等于本设计全部验收通过 目标仓库：`D:\\llama` 上游基线：llama.cpp `acd79d603cb2e1c84c0886137b80f1ad649b6857` 主实现语言：C++17；Python 仅用于实验编排和结果分析 1. 文档目的 本项目不是在 llama.cpp 外增加一层 HTTP 包装，也不是为了代码行数",
+          "actual_prompt_tokens": 128,
+          "joined_source_token_span": [
+            0,
+            128
+          ],
+          "prompt_sha256": "fce4bb8f2af667b9a9bae9308951267df72ae6d03760c1187cbbea4c389d3099"
+        },
+        {
+          "stream": 1,
+          "prompt": " * dst_v, const BlockCopy * mapping, KvTensorLayout layout); template <typename scalar_t> __global__ void scatter_kv_blocks(...); template <typename scalar_t> __global__ void clone_shared_tail_block(...); // Copy-on-Write 实现要求： - 支持 FP16，并为当前 llama.cpp KV 类型保留模板扩展点； - 一个 Kernel Launch 处理一组非连续 Block Mapping，避免每个 Block 单独发起 `cudaMemcpyAsync`； - K/V 可采用同一 Grid 中的独立 Plane，具体布局由 `KvTensorLayout` 描述，不在",
+          "actual_prompt_tokens": 128,
+          "joined_source_token_span": [
+            4483,
+            4611
+          ],
+          "prompt_sha256": "64643bc21970af711e990cb8668faed431660ac8ee2ecf5daba6d97e9cd1b4c5"
+        },
+        {
+          "stream": 2,
+          "prompt": "低收益关闭 | | Windows WDDM Profiler 权限受限 | 无法采集 WPR sampled stacks | 保留失败记录；用生产 Engine Chrome/Perfetto trace 生成 phase flame chart，不伪装成 sampled CPU flame graph | | KV 物理布局因 Backend/模型变化 | Kernel 读写错误 | 显式 Layout 描述、CPU 对照、Capability 和 Sanitizer | | CUDA 异步生命周期错误 | UAF/数据竞争 | Event 持有 Block/Buffer lease，提交后统一回收 | | 指标测量扰动 | Benchmark 偏",
+          "actual_prompt_tokens": 128,
+          "joined_source_token_span": [
+            8965,
+            9093
+          ],
+          "prompt_sha256": "6d53ecb95393fa7559c5566ee32ca4da35eee6dedc99ab09817287ddbc2b912c"
+        },
+        {
+          "stream": 3,
+          "prompt": "模块 `server_kv_action_policy` 是 Engine 独占的深模块，公开面只有 `choose(ActionSnapshot) -> Decision`、`observe(Decision, Feedback)` 与 `snapshot()`。Scheduler 只提供不可变快照，不修改模型状态；Runtime 只执行 `Decision.action`。一次动作从“scheduler snapshot 已就绪”计时到“下一次有用 decode 已可运行”，所以复制、恢复、重算和其后的 decode 不能使用不同边界。 快照包含 cached/decode token、KV byte、page run/连续性、reuse distance/prob",
+          "actual_prompt_tokens": 128,
+          "joined_source_token_span": [
+            13448,
+            13576
+          ],
+          "prompt_sha256": "8afe932f8f6f1c8c7f68850e7336214ec6ecbd422a06e597110572c7c01f3c01"
+        },
+        {
+          "stream": 4,
+          "prompt": "提交状态：token 位置已前进但 K/V 未写完，reservation 已释放但 block 仍被引用，或者 HTTP 已发出不可撤销的 chunk。事务把决策与提交分开： prepare -> immutable plan -> execute(runtime callback) -> commit | +-- failure -> abort/rollback 这里不是数据库 ACID 的完整实现。它保证的是单 iteration 内的原子可见性和资源守恒；网络已经发送的数据仍不能回滚，因此 HTTP publish 必须位于成功提交之后。 Scheduler 算法 目标不是单独最大化当前 prefix hit，而是在 token budget",
+          "actual_prompt_tokens": 128,
+          "joined_source_token_span": [
+            17931,
+            18059
+          ],
+          "prompt_sha256": "5e6f1ca1b3d195f963360e28b5928108554bbf438ff9af8e3970da9bd532744c"
+        },
+        {
+          "stream": 5,
+          "prompt": "计算的小块，本项目固定为最多 32 token；**partition** 是由 8 个 tile 组成、可由一个 CTA 独立处理的 256-token 逻辑区间；**online softmax state** 是不保存全部 logits 也能继续合并的三元组 `(m,l,o)`，分别表示当前最大 logit、重标定后的指数和、未归一化的加权 V 向量。 原 K2 把整段上下文的 K/V 工作放进一个 CTA，shared memory 与串行工作都随",
+          "actual_prompt_tokens": 128,
+          "joined_source_token_span": [
+            22414,
+            22542
+          ],
+          "prompt_sha256": "4ead63961065b34b26f2d4780f77be8f12597c5a2245c8401deba60208eb02ad"
+        },
+        {
+          "stream": 6,
+          "prompt": " 0.5B：`14/2/64`；7B kernel shape：`28/4/128`；两者 `group_size=7` | | dtype | Q/K/V 为 IEEE FP16；output、QK、softmax state 和 PV 均用 FP32 | | paging | page size 固定 16 token；K/V 分离物理平面；页表索引为 `uint32/int32` | | position | Q 和 cached K 已在模型 attention 层中完成 RoPE；kernel 内 `pos",
+          "actual_prompt_tokens": 128,
+          "joined_source_token_span": [
+            26896,
+            27024
+          ],
+          "prompt_sha256": "afdb30a817268ce9d81ac244341d0651b0eb1a746f45c1da87fb2a716eb1dc46"
+        },
+        {
+          "stream": 7,
+          "prompt": " memory-bound、DRAM bandwidth、L2 hit、occupancy 和 roofline 主张。 | 观测 | 下一步 | 可以说什么 | |---|---|---| | K1 随 context 近线性增长，K2 在相同输出下稳定降低 kernel time，且 NCU 证实 DRAM bytes/sector 降低 | 保留 K2，继续检查 registers/occupancy | GQA 组内 KV reuse 在该 regime 有因果支持 | | K2 bytes 降但 kernel time 不降或回退 | 保留负结果，不接入 K2 | �",
+          "actual_prompt_tokens": 128,
+          "joined_source_token_span": [
+            31379,
+            31507
+          ],
+          "prompt_sha256": "d43a43113d48f0c435d6152ba6cda1a5777e096bed8607405f26b96ee14b83cd"
+        }
+      ]
+    },
+    {
+      "context_tokens": 512,
+      "prompts": [
+        {
+          "stream": 0,
+          "prompt": "CacheFlow Runtime 整体架构设计 状态：Implementation in progress；自动化测试通过不等于本设计全部验收通过 目标仓库：`D:\\llama` 上游基线：llama.cpp `acd79d603cb2e1c84c0886137b80f1ad649b6857` 主实现语言：C++17；Python 仅用于实验编排和结果分析 1. 文档目的 本项目不是在 llama.cpp 外增加一层 HTTP 包装，也不是为了代码行数机械重写整个上游仓库。目标是在保持 GGUF、模型实现和硬件 Backend 可用的前提下，重构推理运行时的核心热路径，并形成一个能够独立解释、测试和验证的 LLM Serving Runtime。 项目最终回答一个明确的问题： > 在显存和 KV Cache 容量有限的单机环境中，如何联合优化 Prefix 复用、Continuous Batching、Chunked Prefill、抢占恢复和 Speculative Decoding，使吞吐、TTFT、TPOT 与尾延迟取得可解释的平衡？ 本文冻结后续重构的模块划分、Interface、状态所有权、迁移顺序和验收标准。没有在本文中定义的外围功能，不得优先于推理热路径实施。 2. 项目定位 项目名称：**CacheFlow Runtime** 一句话定位： > 基于 llama.cpp fork 重构的缓存感知 LLM 推理运行时，贯通 Serving Scheduler、KV Runtime 与 CUDA KV Backend，核心实现 Token-level Continuous Batching、Paged Prefix KV、资源抢占和自适应 Speculative Decoding。 项目必须形成三层可演示的个人实现： 1. **Serving 层**：Token-level Scheduler、Admission、Preemption 和 SLO； 2. **Runtime 层**：Block Table、Prefix Sharing、COW、Swap 和 Speculation； 3. **GPU Backend 层**：CUDA KV Gather/Scatter/COW Kernel、Pinned Memory、Stream 和 Event。 只有前两层而没有 CUDA 时，项目仍属于 LLM Serving Infra，但不满足本项目最终面向“高性能推理引擎”的完整验收标准。 项目面向： - LLM Serving / AI Infra 面试； - C++ 推理引擎与系统优化面试； - 模型部署、",
+          "actual_prompt_tokens": 512,
+          "joined_source_token_span": [
+            0,
+            512
+          ],
+          "prompt_sha256": "e11c60de226d44ce69d7ebfc5b325c121476f8e859b0b6d060d8807fe348a23e"
+        },
+        {
+          "stream": 1,
+          "prompt": " * dst_v, const BlockCopy * mapping, KvTensorLayout layout); template <typename scalar_t> __global__ void scatter_kv_blocks(...); template <typename scalar_t> __global__ void clone_shared_tail_block(...); // Copy-on-Write 实现要求： - 支持 FP16，并为当前 llama.cpp KV 类型保留模板扩展点； - 一个 Kernel Launch 处理一组非连续 Block Mapping，避免每个 Block 单独发起 `cudaMemcpyAsync`； - K/V 可采用同一 Grid 中的独立 Plane，具体布局由 `KvTensorLayout` 描述，不在 Kernel 中写死模型结构； - Device-to-Host 使用 Pinned Memory Pool； - Copy、Swap Out、Swap In 使用独立 CUDA Stream，并用 Event 向 Engine 暴露依赖； - 禁止在调度主线程调用全局 `cudaDeviceSynchronize()`； - BackendEvent 完成前，源 Block 和目标 Block 都不得被回收或重新分配； - CUDA 错误必须转换为 Runtime Error，触发重计算或请求失败，不得留下半提交 Block Table； - CPU Reference 与 CUDA 输出逐元素相同； - 不支持 CUDA 的构建继续使用 CPU Adapter，功能正确但不宣称 GPU 性能收益。 性能目标不是击败单次大块连续 `cudaMemcpyAsync`，而是在真实的非连续 Block Mapping、Prefix COW 和多 Block Swap 场景中，减少 Launch 数、同步次数和尾延迟。 CUDA 子系统的依赖方向固定为： KvCacheManager -> KvBlockBackend Interface -> CpuKvBlockBackend -> PagedKvCudaBackend -> CUDA Runtime / GGML CUDA allocation Adapter `PagedKvCudaBackend` 不得反向依赖 Scheduler、HTTP 或 Request 类型。 9. 一次推理迭代的数据流 sequenceDiagram participant Q as RequestQueue participant E as InferenceEngine participant A as AdmissionController participant K as KvCacheManager participant B as KvBlockBackend participant S as InferenceScheduler participant P as SpeculationController participant R as LlamaRuntime Q->>E: new/cancel requests E->>A: evaluate waiting sequences A->>K: required blocks and prefix lookup K-->>A: admit/evict/preempt/queue A-->>E: admission decisions E->>S: scheduler snapshot + budget S->>P: draft decision candidates P-->>S: per-sequence draft length S--",
+          "actual_prompt_tokens": 512,
+          "joined_source_token_span": [
+            4483,
+            4995
+          ],
+          "prompt_sha256": "8c87c6ce4519b863e3b5b5e259e8537909ea98fe9343968945a30142c180d2e7"
+        },
+        {
+          "stream": 2,
+          "prompt": "低收益关闭 | | Windows WDDM Profiler 权限受限 | 无法采集 WPR sampled stacks | 保留失败记录；用生产 Engine Chrome/Perfetto trace 生成 phase flame chart，不伪装成 sampled CPU flame graph | | KV 物理布局因 Backend/模型变化 | Kernel 读写错误 | 显式 Layout 描述、CPU 对照、Capability 和 Sanitizer | | CUDA 异步生命周期错误 | UAF/数据竞争 | Event 持有 Block/Buffer lease，提交后统一回收 | | 指标测量扰动 | Benchmark 偏差 | 低开销计数、fresh process、多 Trial | | 全库重构范围失控 | 长期不可交付 | 按 Phase 替换，每阶段真实可运行 | 19. 架构决策摘要 1. 采用 llama.cpp fork，而不是外围 Wrapper 作为项目主体； 2. 保留成熟 Backend/模型实现，不做无价值逐行重写； 3. 重构重点是 Engine Loop、Scheduler、KV Memory、CUDA KV Backend 和 Speculation； 4. Scheduler 返回不可变计划，不直接修改 Runtime； 5. KV Block Manager 是 KV 状态唯一所有者； 6. Prefix 共享使用完整 Block，尾 Block 使用 COW； 7. Decode 优先，但通过 Aging 保证 Prefill 不饥饿； 8. Chunk 和 Draft 长度必须硬件/模型感知，固定参数仅作 Baseline； 9. 任何优化必须有上游兼容开关和真实模型 A/B； 10. 负结果属于设计输入，不从报告中删除。 11. CUDA 不是全部重写，但 Paged KV Gather/Scatter/COW/Swap 是本期强制个人实现； 12. CUDA 微基准与端到端收益必须同时成立，单独 Kernel 数字不能替代 Serving 指标。 20. 当前收口切片 核心实现切片已经进入生产路径，剩余工作不再新增横向功能，而是严格收口： 1. 从固定上游重新生成可重放 patch； 2. 同步 README、验收报告和面试深挖材料，删除所有过期状态； 3. 对 CPU/CUDA mixed workload 保留正负结果和 3 次 fresh-process 原始",
+          "actual_prompt_tokens": 512,
+          "joined_source_token_span": [
+            8965,
+            9477
+          ],
+          "prompt_sha256": "ea222a87b8f2513305c82a746f28a1156ed0736dc6629506f54907a554fdefda"
+        },
+        {
+          "stream": 3,
+          "prompt": "模块 `server_kv_action_policy` 是 Engine 独占的深模块，公开面只有 `choose(ActionSnapshot) -> Decision`、`observe(Decision, Feedback)` 与 `snapshot()`。Scheduler 只提供不可变快照，不修改模型状态；Runtime 只执行 `Decision.action`。一次动作从“scheduler snapshot 已就绪”计时到“下一次有用 decode 已可运行”，所以复制、恢复、重算和其后的 decode 不能使用不同边界。 快照包含 cached/decode token、KV byte、page run/连续性、reuse distance/probability、KV pressure、device/host bandwidth、launch、prefill/decode 估计和 Paged multiplier。系统先检查有限性与 capability/resource，再允许模型评分。非法、资源不足、冷启动、置信度不足或执行失败都 fail closed 到 H0；执行失败先作为原动作失败反馈，再产生只允许 Recompute 的新决策，不能把失败样本错误标成重算样本。 26.2 动作能力矩阵 | 动作 | 当前生产执行 | 完整反馈 | 选择边界 | |---|---|---|---| | Direct | 是 | 是 | KV 已驻留并直接进入下一次 decode | | CUDA-managed Swap | 是 | 是 | pinned-host snapshot 恢复后进入 decode | | Transactional host Swap | 是 | 是 | memory/file store 恢复后进入 decode | | Recompute | 是 | 是 | 重新 prefill 后进入 decode | | Remap | 是（真实跨 stream prefix adoption） | 是 | donor 已确定且 block runtime 可执行真实 CUDA 映射 | | Paged | 是（opt-in 受限 envelope） | 是 | Qwen2.5-0.5B、FP16 KV、D64、page 16、batch/query token 1、context ≤ 2048、全层 CUDA；v2.10 的 K2/K1 替换仅覆盖 context17，H10 另行覆盖 64–2048 的 Paged/Direct 负结果 | Remap 只有在真实 donor prefix 大于目标 slot 的 resident prefix 时才声明 capability；Paged 默认关闭，必须显式使用 `--kv-paged-decode`，任何 shape",
+          "actual_prompt_tokens": 512,
+          "joined_source_token_span": [
+            13448,
+            13960
+          ],
+          "prompt_sha256": "50599f9081483477bfa9290c9d78d2e7797ac1ce7f2cdcf3b6443c1582ef5963"
+        },
+        {
+          "stream": 4,
+          "prompt": "提交状态：token 位置已前进但 K/V 未写完，reservation 已释放但 block 仍被引用，或者 HTTP 已发出不可撤销的 chunk。事务把决策与提交分开： prepare -> immutable plan -> execute(runtime callback) -> commit | +-- failure -> abort/rollback 这里不是数据库 ACID 的完整实现。它保证的是单 iteration 内的原子可见性和资源守恒；网络已经发送的数据仍不能回滚，因此 HTTP publish 必须位于成功提交之后。 Scheduler 算法 目标不是单独最大化当前 prefix hit，而是在 token budget、KV capacity、deadline 和公平性下选择本轮动作。高层可写成： utility = reused_tokens - eviction_penalty * victim_recompute_tokens - deadline_risk + aging_bonus decode 通常优先，因为每延迟一轮都会直接增加 inter-token latency；prefill 用 aging 防止饥饿，并受本轮 chunk/token budget 限制。选择 slot 时对候选计算 LCP/复用与 victim 代价，当前 slot 数较小时是 O(S)；PrefixIndex 查找按 block token 哈希推进，近似 O(P/B)，其中 P 是 prompt token 数、B 是 block size。 追问“为什么不用最优全局调度”：精确求解需要未来到达、生成长度和回访概率，在线不可得且求解开销不适合每 token iteration。当前策略是可解释启发式，并通过 upstream 开关和 trial 验证。 Block Table、PrefixIndex、refcount 与 COW 每个 sequence 的逻辑 token 范围映射到物理 blocks。PrefixIndex 只发布已经写入且可共享的 exact token prefix，refcount 决定块何时回收。Reservation 在 admission 时预留最坏/计划容量，避免执行中才发现不足。 过去只共享完整块会浪费 1 到 B-1 个 token 的 prefix。本实现允许 exact partial tail 共享，但它不能原地 append：若 refcount > 1，先申请新块，复制有效 tail token，更新当前 sequence 的映射，再减少旧块 refcount。申请或复制失败时原映射保持不变。 COW 复杂度从复制整个 sequence 的 O(L) 降为 O(B)。当前 benchmark 中 64 blocks 整序列方案复制 12,582,912 B/",
+          "actual_prompt_tokens": 512,
+          "joined_source_token_span": [
+            17931,
+            18443
+          ],
+          "prompt_sha256": "663107ebe21fa880cf960041b242f6ba40803d1f6d11b6fa9148d5b29f7b8a3e"
+        },
+        {
+          "stream": 5,
+          "prompt": "计算的小块，本项目固定为最多 32 token；**partition** 是由 8 个 tile 组成、可由一个 CTA 独立处理的 256-token 逻辑区间；**online softmax state** 是不保存全部 logits 也能继续合并的三元组 `(m,l,o)`，分别表示当前最大 logit、重标定后的指数和、未归一化的加权 V 向量。 原 K2 把整段上下文的 K/V 工作放进一个 CTA，shared memory 与串行工作都随长度增长，所以能力门停在 32 token。长上下文版本让第一层 CUDA kernel 并行计算多个 partition 的 `(m,l,o)`，第二层 kernel 再按 \\[ \\begin{aligned} m' &= \\max(m,m_t),\\\\ l' &= e^{m-m'}l+e^{m_t-m'}l_t,\\\\ o' &= e^{m-m'}o+e^{m_t-m'}o_t \\end{aligned} \\] 合并，最后输出 `o/l`。这样不会错误地平均各分区已经归一化的输出，也把单 CTA 的最长扫描限制为 256 token。生产 CPU/CUDA oracle 用 24 个长度覆盖页、tile、partition 边界，反转所有多页用例的物理页顺序，验证到 2048 token。 性能输入不是硬编码的 `one`。构建器从架构文档、面试手册、Paged 研究文档读取正文，用真实 Qwen tokenizer 生成每个来源的 64/128/256/512/1024/2048-token prompt，共 18 个 workload，并绑定源文件、模型和二进制哈希。H10 用 10 个匹配进程块形成旧 K2 根因基线；最终 H13 使用严格平衡的 6 组 Direct-first / 6 组 Paged-first，共 432 个 workload-arm 单元和 3456 个测量请求；输出一致且 0 fallback。 主指标选服务端 `prompt_ms`，因为单 token completion 的 KV 动作与 attention graph 在 prompt 阶段执行。早期 v",
+          "actual_prompt_tokens": 512,
+          "joined_source_token_span": [
+            22414,
+            22926
+          ],
+          "prompt_sha256": "7406cd2785cc155432d77034546da80124630099745b64f9b6e443c28e04532b"
+        },
+        {
+          "stream": 6,
+          "prompt": " 0.5B：`14/2/64`；7B kernel shape：`28/4/128`；两者 `group_size=7` | | dtype | Q/K/V 为 IEEE FP16；output、QK、softmax state 和 PV 均用 FP32 | | paging | page size 固定 16 token；K/V 分离物理平面；页表索引为 `uint32/int32` | | position | Q 和 cached K 已在模型 attention 层中完成 RoPE；kernel 内 `pos_encoding=NONE` | | mask | 全历史 causal decode；无 ALiBi、sliding window、custom mask、logit soft-cap 或 attention sink | | scale | 精确传入 `1/sqrt(head_dim)` 的 FP32 值；不得重复做 Q/K quantization scale | | residency | Q/K/V、page table、length、output 均在同一 CUDA device；执行期间页表和页不可变 | | output | `[batch, query_heads, head_dim]` FP32；一次调用每个 request 恰有一个 output token | 两条 shape 必须分栏报告。`14/2/64/16` 是当前 0.5B 的模型忠实内核几何；`28/4/128/16` 只说明 7B 模型几何下的 kernel 行为，不能冒充本机已加载 7B 权重或完成端到端服务。 3.2 物理数据布局 原型以单个 attention layer 为调用边界，使用独立 K/V plane 和 physical-page-outer NHD；生产接入时 由现有全层 block backend 提供目标层的 plane 偏移，而不是在 kernel 内重新拥有 allocator： K, V: fp16 [capacity_pages][16][kv_heads][head_dim] Q: fp16 [batch][query_heads][head_dim] O: fp32 [batch][query_heads][head_dim] offset(page, token, kv_head, dim) = page * (16 * kv_heads * head_dim) + token * (kv_heads * head_dim) + kv_head * head_dim + dim 这是“physical page outermost、page 内 NHD”。它保留现有",
+          "actual_prompt_tokens": 512,
+          "joined_source_token_span": [
+            26896,
+            27408
+          ],
+          "prompt_sha256": "c8ec301b0e951f950286c67ee6ef0eea32a6030178af9ab9f0dba6d4db957f93"
+        },
+        {
+          "stream": 7,
+          "prompt": " memory-bound、DRAM bandwidth、L2 hit、occupancy 和 roofline 主张。 | 观测 | 下一步 | 可以说什么 | |---|---|---| | K1 随 context 近线性增长，K2 在相同输出下稳定降低 kernel time，且 NCU 证实 DRAM bytes/sector 降低 | 保留 K2，继续检查 registers/occupancy | GQA 组内 KV reuse 在该 regime 有因果支持 | | K2 bytes 降但 kernel time 不降或回退 | 保留负结果，不接入 K2 | 复用收益被并行度/归约/资源代价抵消 | | 长 context K1 明显变慢，K3 降低 event time且 merge launch 代价已包含 | 为长 context 设候选阈值，再做独立确认 | split-KV 在已测边界有效 | | K3 短 context 回退 | 必须保留，支持阈值策略 | split 并非普遍优化 | | random placement 比 identity 慢 | 只能称 placement-associated effect；有 NCU L2 指标后才讨论 cache mechanism | 页布局可能参与性能边界 | | paged kernel 快但 `remap+contiguous` 端到端更快 | Paged 不进入该 regime 的 action policy | 单 kernel 优势不足以支持动作选择 | 如果 NCU 不可用，仍可根据无 profiler paired latency、NSYS launch 数和人工控制的 intervention 决定 “下一个应实现 K2 还是 K3”，但结论必须写成受限关联/干预结果，不能补写硬件 counter 故事。 9. Issue #5 的严格交付门槛 - 非连续、reverse 和 random physical pages 上真实计算 attention output；源码路径中不存在先 gather 全量 K/V 到 contiguous buffer 的步骤。 - 第 7 节全部 differential/invalid/poison cases 通过，原始 seed/mapping/error 可审计；主 tolerance 固定 `atol=rtol=1e-3`。 - 所有不支持 shape/mode fail closed；若服务层启用 fallback，reason/cost/count 可见且不混入 fast path。 - 分别覆盖 D64/D128、边界/中/长 context、batch 1/4 和 identity/",
+          "actual_prompt_tokens": 512,
+          "joined_source_token_span": [
+            31379,
+            31891
+          ],
+          "prompt_sha256": "71474339c3ed2729145ec619a682cf9655cf6bb3b1c5259e78059125167c7885"
+        }
+      ]
+    },
+    {
+      "context_tokens": 1024,
+      "prompts": [
+        {
+          "stream": 0,
+          "prompt": "CacheFlow Runtime 整体架构设计 状态：Implementation in progress；自动化测试通过不等于本设计全部验收通过 目标仓库：`D:\\llama` 上游基线：llama.cpp `acd79d603cb2e1c84c0886137b80f1ad649b6857` 主实现语言：C++17；Python 仅用于实验编排和结果分析 1. 文档目的 本项目不是在 llama.cpp 外增加一层 HTTP 包装，也不是为了代码行数机械重写整个上游仓库。目标是在保持 GGUF、模型实现和硬件 Backend 可用的前提下，重构推理运行时的核心热路径，并形成一个能够独立解释、测试和验证的 LLM Serving Runtime。 项目最终回答一个明确的问题： > 在显存和 KV Cache 容量有限的单机环境中，如何联合优化 Prefix 复用、Continuous Batching、Chunked Prefill、抢占恢复和 Speculative Decoding，使吞吐、TTFT、TPOT 与尾延迟取得可解释的平衡？ 本文冻结后续重构的模块划分、Interface、状态所有权、迁移顺序和验收标准。没有在本文中定义的外围功能，不得优先于推理热路径实施。 2. 项目定位 项目名称：**CacheFlow Runtime** 一句话定位： > 基于 llama.cpp fork 重构的缓存感知 LLM 推理运行时，贯通 Serving Scheduler、KV Runtime 与 CUDA KV Backend，核心实现 Token-level Continuous Batching、Paged Prefix KV、资源抢占和自适应 Speculative Decoding。 项目必须形成三层可演示的个人实现： 1. **Serving 层**：Token-level Scheduler、Admission、Preemption 和 SLO； 2. **Runtime 层**：Block Table、Prefix Sharing、COW、Swap 和 Speculation； 3. **GPU Backend 层**：CUDA KV Gather/Scatter/COW Kernel、Pinned Memory、Stream 和 Event。 只有前两层而没有 CUDA 时，项目仍属于 LLM Serving Infra，但不满足本项目最终面向“高性能推理引擎”的完整验收标准。 项目面向： - LLM Serving / AI Infra 面试； - C++ 推理引擎与系统优化面试； - 模型部署、量化和性能工程面试； - 可复现的个人系统项目展示。 3. 核心原则 3.1 推理热路径优先 个人核心工作必须进入以下真实调用链： Request -> tokenize / template -> admission -> KV prepare -> schedule iteration -> build llama_batch -> llama_decode -> sample / verify draft -> update KV and runtime state -> stream result HTTP、配置、日志和脚本是必要配套，但不计为主要 AI Infra 创新。 3.2 深模块与小 Interface 每个核心 Module 必须隐藏复杂状态和算法，调用者只学习少量 Interface。测试与生产调用通过同一个 Seam，不为测试暴露内部数据结构。 3.3 默认兼容，策略可切换 - 默认配置必须保持上游语义和输出正确性； - 每项新策略都必须能单独开关； - A/B 必须使用同一模型、同一请求轨迹和同一硬件； - 负结果必须保留，不得只报告有利样本。 3.4 第三方代码不冒充个人贡献 - GGML 通用算子、既有 CUDA/Metal/Vulkan Backend、GGUF 基础格式和模型定义保留上游来源； - 项目必须新增一个自研 CUDA KV Block Backend，而不是只调用上游 CUDA 二进制； - 重构后的运行时、调度、KV 策略、CUDA KV Kernel、控制算法、测试和实验属于个人贡献； - Patch、Git commit 和代码统计分别报告继承、修改和新增代码。 4. 范围与非目标 4.1 本期必须覆盖 - 推理请求和 Sequence 状态所有权重构； - Token-level Continuous Batching； - Decode 优先与 Chunked Prefill； - KV Block Table 与容量账本； - Prefix Block 共享和 Copy-on-Write； - KV 成本感知淘汰； - 请求抢占、换出和恢复； - CUDA KV Block Gather/Scatter 与 Copy-on-Write Kernel； - CUDA Stream、Event 和 Pinned Host Memory 驱动的异步 KV Swap； - CPU Reference 与 CUDA Backend 的逐元素正确性对照； - 自适应 Speculative Decoding； - 模型结构、量化、KV 和性能成本建模； - TTFT、TPOT、吞吐、P95/P99、KV �",
+          "actual_prompt_tokens": 1024,
+          "joined_source_token_span": [
+            0,
+            1024
+          ],
+          "prompt_sha256": "dde59082418a9b70ed25682b9b09142a77c02bf691c2f02a8cbf03c8e41cf669"
+        },
+        {
+          "stream": 1,
+          "prompt": " * dst_v, const BlockCopy * mapping, KvTensorLayout layout); template <typename scalar_t> __global__ void scatter_kv_blocks(...); template <typename scalar_t> __global__ void clone_shared_tail_block(...); // Copy-on-Write 实现要求： - 支持 FP16，并为当前 llama.cpp KV 类型保留模板扩展点； - 一个 Kernel Launch 处理一组非连续 Block Mapping，避免每个 Block 单独发起 `cudaMemcpyAsync`； - K/V 可采用同一 Grid 中的独立 Plane，具体布局由 `KvTensorLayout` 描述，不在 Kernel 中写死模型结构； - Device-to-Host 使用 Pinned Memory Pool； - Copy、Swap Out、Swap In 使用独立 CUDA Stream，并用 Event 向 Engine 暴露依赖； - 禁止在调度主线程调用全局 `cudaDeviceSynchronize()`； - BackendEvent 完成前，源 Block 和目标 Block 都不得被回收或重新分配； - CUDA 错误必须转换为 Runtime Error，触发重计算或请求失败，不得留下半提交 Block Table； - CPU Reference 与 CUDA 输出逐元素相同； - 不支持 CUDA 的构建继续使用 CPU Adapter，功能正确但不宣称 GPU 性能收益。 性能目标不是击败单次大块连续 `cudaMemcpyAsync`，而是在真实的非连续 Block Mapping、Prefix COW 和多 Block Swap 场景中，减少 Launch 数、同步次数和尾延迟。 CUDA 子系统的依赖方向固定为： KvCacheManager -> KvBlockBackend Interface -> CpuKvBlockBackend -> PagedKvCudaBackend -> CUDA Runtime / GGML CUDA allocation Adapter `PagedKvCudaBackend` 不得反向依赖 Scheduler、HTTP 或 Request 类型。 9. 一次推理迭代的数据流 sequenceDiagram participant Q as RequestQueue participant E as InferenceEngine participant A as AdmissionController participant K as KvCacheManager participant B as KvBlockBackend participant S as InferenceScheduler participant P as SpeculationController participant R as LlamaRuntime Q->>E: new/cancel requests E->>A: evaluate waiting sequences A->>K: required blocks and prefix lookup K-->>A: admit/evict/preempt/queue A-->>E: admission decisions E->>S: scheduler snapshot + budget S->>P: draft decision candidates P-->>S: per-sequence draft length S-->>E: immutable IterationPlan E->>K: apply prepare/preemption K->>B: gather/COW/swap block mappings B-->>K: CUDA event or CPU completion K-->>E: KV prepare event E->>B: wait only required dependencies E->>R: decode PhysicalBatch R-->>E: logits + runtime timing E->>P: acceptance feedback E->>K: commit generated KV E->>S: latency/resource feedback E-->>Q: stream committed tokens 10. 并发与一致性模型 - 一个 Engine Loop 线程拥有调度状态和 Sequence 状态； - HTTP/网络线程只投递 Command，不直接修改 Slot/KV； - Backend Decode 可异步，但计划提交由 Engine Loop 串行完成； - Metrics 使用快照或原子计数，不持有 Engine 主锁执行 I/O； - Swap I/O 通过工作线程完成，Sequence 保持 `SWAPPED/PREEMPTED`； - CUDA Block 操作异步提交，Engine 只等待当前 Decode 真正依赖的 Event； - Pinned Buffer 和 Device Block 的生命周期延长到对应 CUDA Event 完成； - 同一 Sequence 同时最多存在一个未提交 IterationPlan。 必须保持： - Block 引用计数不为负； - Free Block 不得出现在任何 Block Table； - 每个物理 KV Position 最多归属允许共享的 Sequence 集合； - 输出 Token 只有在 Target 验证并提交后才能发送； - 取消不回收仍被正在执行 Batch 引用的 KV； - 失败回滚后 Scheduler Snapshot 与 Runtime Snapshot 一致。 - CUDA 操作失败时不得提交部分 Block Mapping；旧 Block Table 保持可重算。 11. 配置设计 配置分为兼容参数与实验策略参数。 --scheduler-policy upstream|cacheflow --slot-cache-eviction-penalty FLOAT --prefill-policy greedy|fixed|adaptive --prefill-chunk-size N --prefill-token-budget N --kv-block-size N --kv-admission-reserve-tokens N --kv-eviction-policy lru|cost --kv-swap-path PATH --kv-swap-budget-mib N --kv-block-backend cpu|cuda --kv-cuda-copy-streams N --kv-pinned-pool-mib N --spec-policy fixed|adaptive --",
+          "actual_prompt_tokens": 1024,
+          "joined_source_token_span": [
+            4483,
+            5507
+          ],
+          "prompt_sha256": "15b64df53146c655038e4993c440b8482cac156b1fb975c8147fc9d7d9109140"
+        },
+        {
+          "stream": 2,
+          "prompt": "低收益关闭 | | Windows WDDM Profiler 权限受限 | 无法采集 WPR sampled stacks | 保留失败记录；用生产 Engine Chrome/Perfetto trace 生成 phase flame chart，不伪装成 sampled CPU flame graph | | KV 物理布局因 Backend/模型变化 | Kernel 读写错误 | 显式 Layout 描述、CPU 对照、Capability 和 Sanitizer | | CUDA 异步生命周期错误 | UAF/数据竞争 | Event 持有 Block/Buffer lease，提交后统一回收 | | 指标测量扰动 | Benchmark 偏差 | 低开销计数、fresh process、多 Trial | | 全库重构范围失控 | 长期不可交付 | 按 Phase 替换，每阶段真实可运行 | 19. 架构决策摘要 1. 采用 llama.cpp fork，而不是外围 Wrapper 作为项目主体； 2. 保留成熟 Backend/模型实现，不做无价值逐行重写； 3. 重构重点是 Engine Loop、Scheduler、KV Memory、CUDA KV Backend 和 Speculation； 4. Scheduler 返回不可变计划，不直接修改 Runtime； 5. KV Block Manager 是 KV 状态唯一所有者； 6. Prefix 共享使用完整 Block，尾 Block 使用 COW； 7. Decode 优先，但通过 Aging 保证 Prefill 不饥饿； 8. Chunk 和 Draft 长度必须硬件/模型感知，固定参数仅作 Baseline； 9. 任何优化必须有上游兼容开关和真实模型 A/B； 10. 负结果属于设计输入，不从报告中删除。 11. CUDA 不是全部重写，但 Paged KV Gather/Scatter/COW/Swap 是本期强制个人实现； 12. CUDA 微基准与端到端收益必须同时成立，单独 Kernel 数字不能替代 Serving 指标。 20. 当前收口切片 核心实现切片已经进入生产路径，剩余工作不再新增横向功能，而是严格收口： 1. 从固定上游重新生成可重放 patch； 2. 同步 README、验收报告和面试深挖材料，删除所有过期状态； 3. 对 CPU/CUDA mixed workload 保留正负结果和 3 次 fresh-process 原始 trial； 4. 以生产 Engine trace 生成 phase flame chart，并明确 WPR sampled-stack 权限限制； 5. 执行唯一入口 `verify.ps1 -Full`，其中 Compute Sanitizer 是硬门槛； 6. 对最终差异做一次 Spec/Standards 代码审查，修复后重新运行受影响验证； 7. 只有本章与第 17 章逐条存在实现、自动化证据和限制说明时，才允许标记“可用于面试”。 21. Conservative Benefit Gating（已进入生产路径） 21.1 问题与边界 历史 mixed workload 表明，同一套 adaptive prefill 在 CPU/CUDA、吞吐优先/TTFT 优先负载上可能出现相反结论。因此 Engine 不再把“存在 CacheFlow plan”当作“应该执行 CacheFlow plan”。本阶段只门控 prefill allocation，不夸大为整个 KV、swap 或 speculation 栈的全局最优控制器。 21.2 深模块与 Seam `server_benefit_policy` 由 `server_inference_engine` 独占，生产与测试都只通过： - `choose(RuntimeSnapshot) -> Decision`； - `observe(Decision, Feedback)`； - `snapshot(Backend)`。 Scheduler 同时产生会改变 fairness cursor 的 CacheFlow plan，以及纯函数 `plan_upstream_prefill()` 生成的 counterfactual greedy plan。只有两个 plan 确实不同时才调用门控，避免用 decode-only 或等价动作污染在线模型。 21.3 算法 - CPU/CUDA 各维护 upstream、cacheflow 两个 10 维 contextual ridge model；特征含 batch/decode、两种 plan token 数、chunk 数、活跃序列、总/最大剩余 prefill、KV pressure。 - cost 为真实 iteration latency，加 SLO 超限惩罚和执行失败惩罚。 - 置信半径为 `beta * residual_ewma_std_ms * sqrt(x^T A^-1 x)`，量纲为毫秒。 - 仅当 `cacheflow_cost + radius + margin < upstream_cost - radius` 时，判定收益下界为正。 - 冷启动先建立 upstream 基线；CacheFlow 探索按 interval 稀疏发生，且总预算不超过 `3 * minimum_observations`",
+          "actual_prompt_tokens": 1024,
+          "joined_source_token_span": [
+            8965,
+            9989
+          ],
+          "prompt_sha256": "80fdda43c4220140507a23afdcc2e57bd1d4f56699238058fb9ecc4fa8e15bdd"
+        },
+        {
+          "stream": 3,
+          "prompt": "模块 `server_kv_action_policy` 是 Engine 独占的深模块，公开面只有 `choose(ActionSnapshot) -> Decision`、`observe(Decision, Feedback)` 与 `snapshot()`。Scheduler 只提供不可变快照，不修改模型状态；Runtime 只执行 `Decision.action`。一次动作从“scheduler snapshot 已就绪”计时到“下一次有用 decode 已可运行”，所以复制、恢复、重算和其后的 decode 不能使用不同边界。 快照包含 cached/decode token、KV byte、page run/连续性、reuse distance/probability、KV pressure、device/host bandwidth、launch、prefill/decode 估计和 Paged multiplier。系统先检查有限性与 capability/resource，再允许模型评分。非法、资源不足、冷启动、置信度不足或执行失败都 fail closed 到 H0；执行失败先作为原动作失败反馈，再产生只允许 Recompute 的新决策，不能把失败样本错误标成重算样本。 26.2 动作能力矩阵 | 动作 | 当前生产执行 | 完整反馈 | 选择边界 | |---|---|---|---| | Direct | 是 | 是 | KV 已驻留并直接进入下一次 decode | | CUDA-managed Swap | 是 | 是 | pinned-host snapshot 恢复后进入 decode | | Transactional host Swap | 是 | 是 | memory/file store 恢复后进入 decode | | Recompute | 是 | 是 | 重新 prefill 后进入 decode | | Remap | 是（真实跨 stream prefix adoption） | 是 | donor 已确定且 block runtime 可执行真实 CUDA 映射 | | Paged | 是（opt-in 受限 envelope） | 是 | Qwen2.5-0.5B、FP16 KV、D64、page 16、batch/query token 1、context ≤ 2048、全层 CUDA；v2.10 的 K2/K1 替换仅覆盖 context17，H10 另行覆盖 64–2048 的 Paged/Direct 负结果 | Remap 只有在真实 donor prefix 大于目标 slot 的 resident prefix 时才声明 capability；Paged 默认关闭，必须显式使用 `--kv-paged-decode`，任何 shape、dtype、page、mask、offload 或 context 不满足均在 KV mutation 前 fail closed。H3 的中长 context 负结果仍保留，所以生产 Paged 不扩展到中长 context，也不默认启用。 26.3 H0/A1/T1/L1 - H0：确定性合法动作顺序，是安全基线和所有不确定状态的 fallback。 - A1：组合 movement byte、带宽、launch、prefill/decode 与 reuse/pressure 的解析成本。 - T1：离线 action/context/batch/page-runs/pressure 分桶中位数查表；没有置信保护，用于检验稀疏 bucket 的直接切换是否有害。 - L1：固定 9 维特征的 bounded per-action Ridge，使用最小样本、残差不确定性、confidence beta 与 switch margin；只有候选置信上界严格优于 H0 才切换，否则精确执行 H0。 在线更新以 Sherman–Morrison 维护逆矩阵；热路径使用固定数组，不分配堆内存、不调用 CUDA API、不触发同步。`learned-shadow` 记录推荐动作但执行 H0，是 CacheFlow preset；正式样本尚未证明主动 `learned` 切换有收益。 26.4 服务集成与可观测性 `server_context::get_available_slot` 与显式 slot 请求共用同一个动作快照/能力构造器；override 只在该结果上做最终过滤，不能另写一套 capability。slot 保存 pending decision，直到下一次成功提交 decode 才 `observe`。Prometheus 暴露逐动作 decision/observation/failure/完整 cost、`{action,reason}` 联合 decision、逐 reason 汇总、safe fallback、invalid/cold/uncertainty/shadow、总决策时间与最大决策时间。CLI 为 `--kv-action-policy fixed|analytical|learned-shadow|learned`，并提供 `--kv-action-override` 受控验收入口、最小样本、confidence beta 和 switch margin。Direct、Remap、受限 Paged、两类 Swap、Recompute 的真实用户链路均要求 selected/observed 与实际执行一致；恢复或 CUDA 执行失败必须按原动作记录失败，再清理受影响状态。 27. Production Paged Dispatch 与故障原子性（Issue #7",
+          "actual_prompt_tokens": 1024,
+          "joined_source_token_span": [
+            13448,
+            14472
+          ],
+          "prompt_sha256": "f8fbfc55781e4346155929537da969c7af28c3cf73c240aa6c8c2e861a382450"
+        },
+        {
+          "stream": 4,
+          "prompt": "提交状态：token 位置已前进但 K/V 未写完，reservation 已释放但 block 仍被引用，或者 HTTP 已发出不可撤销的 chunk。事务把决策与提交分开： prepare -> immutable plan -> execute(runtime callback) -> commit | +-- failure -> abort/rollback 这里不是数据库 ACID 的完整实现。它保证的是单 iteration 内的原子可见性和资源守恒；网络已经发送的数据仍不能回滚，因此 HTTP publish 必须位于成功提交之后。 Scheduler 算法 目标不是单独最大化当前 prefix hit，而是在 token budget、KV capacity、deadline 和公平性下选择本轮动作。高层可写成： utility = reused_tokens - eviction_penalty * victim_recompute_tokens - deadline_risk + aging_bonus decode 通常优先，因为每延迟一轮都会直接增加 inter-token latency；prefill 用 aging 防止饥饿，并受本轮 chunk/token budget 限制。选择 slot 时对候选计算 LCP/复用与 victim 代价，当前 slot 数较小时是 O(S)；PrefixIndex 查找按 block token 哈希推进，近似 O(P/B)，其中 P 是 prompt token 数、B 是 block size。 追问“为什么不用最优全局调度”：精确求解需要未来到达、生成长度和回访概率，在线不可得且求解开销不适合每 token iteration。当前策略是可解释启发式，并通过 upstream 开关和 trial 验证。 Block Table、PrefixIndex、refcount 与 COW 每个 sequence 的逻辑 token 范围映射到物理 blocks。PrefixIndex 只发布已经写入且可共享的 exact token prefix，refcount 决定块何时回收。Reservation 在 admission 时预留最坏/计划容量，避免执行中才发现不足。 过去只共享完整块会浪费 1 到 B-1 个 token 的 prefix。本实现允许 exact partial tail 共享，但它不能原地 append：若 refcount > 1，先申请新块，复制有效 tail token，更新当前 sequence 的映射，再减少旧块 refcount。申请或复制失败时原映射保持不变。 COW 复杂度从复制整个 sequence 的 O(L) 降为 O(B)。当前 benchmark 中 64 blocks 整序列方案复制 12,582,912 B/128 launches，而 tail COW 复制 196,608 B/1 launch。 CUDA 侧为什么算 AI Infra AI Infra 不等于“写了一个 CUDA demo”。这里的 kernel 直接操作 llama Attention 的生产 K/V tensors，且必须处理： - K/V layout、element size、head/layer stride 和非整除 tail； - 非连续、重复和重叠 block mapping； - snapshot 语义，防止 in-place source 被提前覆盖； - stream/event 顺序、异步 buffer 生命周期和错误传播； - pinned host budget、D2H/H2D restore 和 allocation failure； - 与调度、refcount、COW、preemption 的一致性。 Gather 将 source descriptors 对应的 token ranges 写入 staging；Scatter 再写 destination，因此重叠映射读取的是同一快照。对完全 disjoint 的映射，两次 kernel 加 staging 反而比多个异步 memcpy 慢，所以生产 adapter 分流。这是机制驱动的优化，不是“CUDA 一定快”。 Host/File/CUDA Swap 的事务语义 Swap payload 不只含 K/V bytes，还含 opaque serialized llama sequence state，否则 restore 后逻辑位置与物理 K/V 可能不一致。 - save 成功：快照具备 checksum，file store 写临时文件后原子 rename，再允许释放 resident KV。 - save 失败：resident KV 保持，不得丢请求。 - restore 成功：先验证 budget/checksum/state，再安装映射。 - restore 失败：丢弃无效快照，回到完整 recompute；不能安装半份 K/V。 - CUDA copy：event 完成后才能复用 pinned/device buffer。 故障注入覆盖 next-save、next-restore、KV OOM、compute failure 和 CUDA allocation failure。 Adaptive Prefill 过小 chunk 增加 iteration/kernel launch 和调度开销，过大 chunk 会阻塞 decode、恶化 TTFT/TPOT。控制器按 backend、context、concurrency bucket 记录候选 chunk 的 wall time，估计 cost，在 greedy 和固定候选之间在线选择。 面试时必须主动讲负结果：历史版本的 CPU 在线 chunk 曾劣于 greedy 和所有 fixed 候选。最终控制器按 backend bucket 选择动作，CPU 在证据不足时回退候选集合中的 `chunk=0`",
+          "actual_prompt_tokens": 1024,
+          "joined_source_token_span": [
+            17931,
+            18955
+          ],
+          "prompt_sha256": "efb9f6bdcbe90cdf1ea3b0ecb6e2e78c0627e432e68cb2a6fdbc0b1ea8f3c4c9"
+        },
+        {
+          "stream": 5,
+          "prompt": "计算的小块，本项目固定为最多 32 token；**partition** 是由 8 个 tile 组成、可由一个 CTA 独立处理的 256-token 逻辑区间；**online softmax state** 是不保存全部 logits 也能继续合并的三元组 `(m,l,o)`，分别表示当前最大 logit、重标定后的指数和、未归一化的加权 V 向量。 原 K2 把整段上下文的 K/V 工作放进一个 CTA，shared memory 与串行工作都随长度增长，所以能力门停在 32 token。长上下文版本让第一层 CUDA kernel 并行计算多个 partition 的 `(m,l,o)`，第二层 kernel 再按 \\[ \\begin{aligned} m' &= \\max(m,m_t),\\\\ l' &= e^{m-m'}l+e^{m_t-m'}l_t,\\\\ o' &= e^{m-m'}o+e^{m_t-m'}o_t \\end{aligned} \\] 合并，最后输出 `o/l`。这样不会错误地平均各分区已经归一化的输出，也把单 CTA 的最长扫描限制为 256 token。生产 CPU/CUDA oracle 用 24 个长度覆盖页、tile、partition 边界，反转所有多页用例的物理页顺序，验证到 2048 token。 性能输入不是硬编码的 `one`。构建器从架构文档、面试手册、Paged 研究文档读取正文，用真实 Qwen tokenizer 生成每个来源的 64/128/256/512/1024/2048-token prompt，共 18 个 workload，并绑定源文件、模型和二进制哈希。H10 用 10 个匹配进程块形成旧 K2 根因基线；最终 H13 使用严格平衡的 6 组 Direct-first / 6 组 Paged-first，共 432 个 workload-arm 单元和 3456 个测量请求；输出一致且 0 fallback。 主指标选服务端 `prompt_ms`，因为单 token completion 的 KV 动作与 attention graph 在 prompt 阶段执行。早期 v3 误选恒为 0.001 ms 的 `predicted_ms`，因此整轮标记为无效并移入 superseded。H10 在 512–2048 token 上测得旧 K2 中位回退 50.35%，从而把根因定位到标量计算、GQA K/V 重复加载和固定分区。K4 用一个 CTA 覆盖 7:1 GQA 组、`half2` 访问与设备端自适应分区；H13 在严格平衡臂顺序的 12 个匹配进程块中把主中位回退降到 3.98%，95% 区间 2.50%–5.38%，P95 13.34%，最差 workload 8.76%。它只差 CI 上界门 0.38 个百分点，因此是明确的算法改进，但不能宣称 Paged 已优于 Direct 或已通过生产晋级。 面试时不要说“长上下文证明 Paged 更快”。应说：我解决了正确性和可扩展性，建立了来源绑定的客观评测，并证明当前 split-K2 仍受标量 QK/PV、scratch/merge 和空 partition 调度开销限制。因为 Direct/Paged 共享同一底层分配器，这组 A/B 也不能证明内存碎片或容量优势；要验证该价值，必须另建真实 contiguous-reservation allocator baseline。 Benefit Gating 怎么讲？ 先讲负结果：固定adaptive chunk在不同backend/workload上结论反号。然后画出同一生产Seam的两条shadow plan，说明learned policy只在悲观CacheFlow cost仍低于乐观upstream cost加安全margin时启用。重点追问是置信半径、SLO reward、drift与探索预算。最后展示16-trial联合 `backend×mode` Williams验收：每个treatment×位置和有向前驱各2次，trial边界有washout，并报告paired oracle regret；不声称这是所有模型和硬件上的全局最优。 最终在真实 socket send seam 固定并发发送顺序的短程fresh-process实验中，positive-lower-bound次数为0，验证backend-local冷启动风险边界。生产 `choose()` 用C++ `steady_clock` 原位计时并",
+          "actual_prompt_tokens": 1024,
+          "joined_source_token_span": [
+            22414,
+            23438
+          ],
+          "prompt_sha256": "103ff9f2d11e913fbe3541fd4cd6a40ac9fda8ee4ed6d6dd5aae0d327fa654e7"
+        },
+        {
+          "stream": 6,
+          "prompt": " 0.5B：`14/2/64`；7B kernel shape：`28/4/128`；两者 `group_size=7` | | dtype | Q/K/V 为 IEEE FP16；output、QK、softmax state 和 PV 均用 FP32 | | paging | page size 固定 16 token；K/V 分离物理平面；页表索引为 `uint32/int32` | | position | Q 和 cached K 已在模型 attention 层中完成 RoPE；kernel 内 `pos_encoding=NONE` | | mask | 全历史 causal decode；无 ALiBi、sliding window、custom mask、logit soft-cap 或 attention sink | | scale | 精确传入 `1/sqrt(head_dim)` 的 FP32 值；不得重复做 Q/K quantization scale | | residency | Q/K/V、page table、length、output 均在同一 CUDA device；执行期间页表和页不可变 | | output | `[batch, query_heads, head_dim]` FP32；一次调用每个 request 恰有一个 output token | 两条 shape 必须分栏报告。`14/2/64/16` 是当前 0.5B 的模型忠实内核几何；`28/4/128/16` 只说明 7B 模型几何下的 kernel 行为，不能冒充本机已加载 7B 权重或完成端到端服务。 3.2 物理数据布局 原型以单个 attention layer 为调用边界，使用独立 K/V plane 和 physical-page-outer NHD；生产接入时 由现有全层 block backend 提供目标层的 plane 偏移，而不是在 kernel 内重新拥有 allocator： K, V: fp16 [capacity_pages][16][kv_heads][head_dim] Q: fp16 [batch][query_heads][head_dim] O: fp32 [batch][query_heads][head_dim] offset(page, token, kv_head, dim) = page * (16 * kv_heads * head_dim) + token * (kv_heads * head_dim) + kv_head * head_dim + dim 这是“physical page outermost、page 内 NHD”。它保留现有整 block Copy/COW/Swap 的连续性，同时使 固定 layer 内相邻 FP16 head_dim 元素连续。K1 每个线程使用标量 FP16 load，不声明 16-byte vector fast path，也不把额外 alignment 作为支持条件；向量化或 shared staging 必须作为后续独立候选测量。 7B shape 每层每页 K+V 为 `2*16*4*128*2 = 32768` bytes；0.5B shape 为 4096 bytes。原型只分配 单层输入；生产接入必须另行记录实际层数和总分配，防止把单层 footprint 当成端到端显存需求。 原型采用矩形页表与显式 context length，不能从未初始化页槽推断长度： page_table: uint32 [batch][max_pages_per_sequence] context_lengths:uint32 [batch], 1 <= value <= 16 * max_pages_per_sequence physical_page = page_table[b][logical_token / 16] token_in_page = logical_token % 16 只有 `ceil(context_lengths[b]/16)` 个已使用槽参与验证；这些槽的 physical page id 必须小于 capacity， 未使用槽可以保留 sentinel。不同 request 可指向同一只读 prefix page。空 context、超过矩形容量的 context 与已使用的越界页必须在 host plan 创建时拒绝，不能让 kernel “保护性地”读 page 0 后继续算。 CSR-like `indptr/indices/last_page_len` 是 FlashInfer 的参考布局，不是本原型已实现接口。 3.3 causal 与位置语义 调用时 `context_len` **包含当前 decode token 已追加的 K/V**。该 query 对逻辑 token `[0, context_len)` 全可见，`[context_len, allocated_pages*16)` 全不可见。对 q_len=1 且 query 位于 最后一个 KV 位置，这等价于 FlashInfer decode 路径使用 non-causal mask：不存在未来的有效 KV， 但 last-page padding 仍必须被 length mask 排除。FlashInfer 固定 wrapper 也只在 planned q_len > 1 时选择 causal mask；单 token decode",
+          "actual_prompt_tokens": 1024,
+          "joined_source_token_span": [
+            26896,
+            27920
+          ],
+          "prompt_sha256": "1fff9458c279258b4e8f7caaefe78f334cf7a42a1c1c391ddde8d3ab45e34122"
+        },
+        {
+          "stream": 7,
+          "prompt": " memory-bound、DRAM bandwidth、L2 hit、occupancy 和 roofline 主张。 | 观测 | 下一步 | 可以说什么 | |---|---|---| | K1 随 context 近线性增长，K2 在相同输出下稳定降低 kernel time，且 NCU 证实 DRAM bytes/sector 降低 | 保留 K2，继续检查 registers/occupancy | GQA 组内 KV reuse 在该 regime 有因果支持 | | K2 bytes 降但 kernel time 不降或回退 | 保留负结果，不接入 K2 | 复用收益被并行度/归约/资源代价抵消 | | 长 context K1 明显变慢，K3 降低 event time且 merge launch 代价已包含 | 为长 context 设候选阈值，再做独立确认 | split-KV 在已测边界有效 | | K3 短 context 回退 | 必须保留，支持阈值策略 | split 并非普遍优化 | | random placement 比 identity 慢 | 只能称 placement-associated effect；有 NCU L2 指标后才讨论 cache mechanism | 页布局可能参与性能边界 | | paged kernel 快但 `remap+contiguous` 端到端更快 | Paged 不进入该 regime 的 action policy | 单 kernel 优势不足以支持动作选择 | 如果 NCU 不可用，仍可根据无 profiler paired latency、NSYS launch 数和人工控制的 intervention 决定 “下一个应实现 K2 还是 K3”，但结论必须写成受限关联/干预结果，不能补写硬件 counter 故事。 9. Issue #5 的严格交付门槛 - 非连续、reverse 和 random physical pages 上真实计算 attention output；源码路径中不存在先 gather 全量 K/V 到 contiguous buffer 的步骤。 - 第 7 节全部 differential/invalid/poison cases 通过，原始 seed/mapping/error 可审计；主 tolerance 固定 `atol=rtol=1e-3`。 - 所有不支持 shape/mode fail closed；若服务层启用 fallback，reason/cost/count 可见且不混入 fast path。 - 分别覆盖 D64/D128、边界/中/长 context、batch 1/4 和 identity/fragmented placement；必须报告 neutral 与 loss，不要求 universal speedup。 - 每个优化陈述都链接：raw inputs/page table → correctness record → no-profiler paired result → 对应 NSYS/NCU trace（若 NCU 不完整则明确 limited）。 - 报告明确区分：已实现的 Qwen2.5-7B 模型几何 kernel shape、已实现的本地 0.5B 模型几何，以及尚未 完成的生产服务 dispatch；在真实请求实验前，不得宣称已经加速现有 0.5B 用户路径。 - 本 Issue 只完成原型和 design decision。生产 dispatch、在线 policy 和用户请求接入仍由后续 Issue gate；不得因 microbenchmark 通过就默认启用。 10. 给实现者的最小顺序 1. 先把第 3 节合同变成 POD descriptor、host validator 和独立 CPU FP32 oracle。 2. 先写 invalid/boundary/poison/random differential tests，确认它们在没有 kernel 时失败。 3. 实现 K1 online-softmax，分别实例化 D64/64 threads 与 D128/128 threads；不启用 fast math，不做 K2/K3。 4. correctness、guards、Sanitizer gate 通过后，才运行第 8 节无 profiler paired benchmark。 5. 用 NSYS（以及条件允许时 NCU）选择 K2 或 K3；一次只改变一个机制。 6. 保留失败候选和反例，形成 Issue #5 报告；不要在本 Issue 接入默认服务路径。 11. 后续生产实现状态 上述内容是 Issue #5 当时的设计边界，后续已经完成生产 GGML dispatch、服务 action 接入和 1–2048 token oracle。旧 split-K2 的长上下文正式结果为 +50.35% 回退；按真实 GQA7 几何重构的 K4 使用整组 K/V 复用、`half2` 访问和设备端自适应 partition，在严格平衡的 H13 中把主中位回退降到 +3.98%，但 95% 区间上界 +5.38% 仍未通过 +5% 门。因此当前状态是“实现和正确性",
+          "actual_prompt_tokens": 1024,
+          "joined_source_token_span": [
+            31379,
+            32403
+          ],
+          "prompt_sha256": "63adf34ef388807d10fba3168708ef7b85e8efbbf9ed171293d95b751ccee30a"
+        }
+      ]
+    }
+  ]
+}
