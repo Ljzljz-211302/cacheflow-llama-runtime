@@ -298,6 +298,7 @@ def collect_arm(protocol: dict, corpus: dict, server: Path, model: Path, output:
     base_url = f"http://127.0.0.1:{port}"
     with log_path.open("wb") as log:
         environment = cuda_environment()
+        environment["LLAMA_CACHEFLOW_PAGED_CONTIGUOUS_FASTPATH"] = "0"
         if kernel_variant is not None:
             environment["LLAMA_CACHEFLOW_PAGED_KERNEL"] = str(kernel_variant)
         process = subprocess.Popen(command, cwd=ROOT, env=environment, stdout=log,

@@ -121,6 +121,34 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
         cell = summary["per_cell"]["block-1-batch-2-context-128"]
         self.assertEqual(cell["realized_sequences_per_graph"], 1.0)
 
+    def test_contiguous_fastpath_requires_upstream_route_and_zero_custom_cuda(self) -> None:
+        protocol = self.protocol()
+        protocol["service"] = {"paged_execution_mode": "contiguous_fastpath"}
+        protocol["acceptance"]["minimum_throughput_gain_lower_95_percent"] = -5.0
+        rows = self.rows(paged_ms=10.0)
+        for row in rows:
+            row["paged_contiguous_fastpath_calls"] = 0
+            row["paged_contiguous_fastpath_sequences"] = 0
+            if row["action"] == "paged":
+                row["paged_contiguous_fastpath_calls"] = 2
+                row["paged_contiguous_fastpath_sequences"] = row["batch_size"] * 2
+                row["paged_calls"] = 0
+                row["paged_sequences"] = 0
+                row["cuda_dispatches"] = 0
+                row["cuda_sequences"] = 0
+        summary = analyze(protocol, rows)
+        self.assertTrue(summary["promotion_passed"])
+        self.assertEqual(
+            summary["per_cell"]["block-1-batch-8-context-128"]["execution_route"],
+            "upstream-contiguous-fastpath",
+        )
+        tampered = self.rows(paged_ms=10.0)
+        for row in tampered:
+            row["paged_contiguous_fastpath_calls"] = 0
+            row["paged_contiguous_fastpath_sequences"] = 0
+        with self.assertRaisesRegex(ValueError, "contiguous fast path"):
+            analyze(protocol, tampered)
+
     def test_rederivation_rejects_modified_raw_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)

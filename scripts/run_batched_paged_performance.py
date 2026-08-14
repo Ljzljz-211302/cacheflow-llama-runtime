@@ -145,7 +145,12 @@ def collect_arm(
     base_url = f"http://127.0.0.1:{port}"
     rows = []
     with log_path.open("wb") as log_file:
-        environment = cuda_environment({"LLAMA_CACHEFLOW_PAGED_KERNEL": service["paged_kernel_variant"]})
+        environment = cuda_environment({
+            "LLAMA_CACHEFLOW_PAGED_KERNEL": service["paged_kernel_variant"],
+            "LLAMA_CACHEFLOW_PAGED_CONTIGUOUS_FASTPATH": (
+                "1" if service.get("paged_execution_mode") == "contiguous_fastpath" else "0"
+            ),
+        })
         process = subprocess.Popen(
             command, cwd=ROOT, env=environment, stdout=log_file, stderr=subprocess.STDOUT,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -190,6 +195,12 @@ def collect_arm(
                     "paged_calls": metric_delta(before, after, "llamacpp:paged_decode_calls_total"),
                     "paged_sequences": metric_delta(before, after, "llamacpp:paged_decode_sequences_total"),
                     "paged_fallbacks": metric_delta(before, after, "llamacpp:paged_decode_fallbacks_total"),
+                    "paged_contiguous_fastpath_calls": metric_delta(
+                        before, after, "llamacpp:paged_decode_contiguous_fastpath_calls_total"
+                    ),
+                    "paged_contiguous_fastpath_sequences": metric_delta(
+                        before, after, "llamacpp:paged_decode_contiguous_fastpath_sequences_total"
+                    ),
                     "cuda_dispatches": metric_delta(before, after, "llamacpp:paged_decode_cuda_dispatches_total"),
                     "cuda_sequences": metric_delta(before, after, "llamacpp:paged_decode_cuda_sequences_total"),
                     "action_decisions": metric_delta(before, after, f'llamacpp:kv_action_decisions_total{{action="{action}"}}'),

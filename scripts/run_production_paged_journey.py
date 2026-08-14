@@ -159,6 +159,7 @@ def main() -> None:
     )
     paged, paged_metrics, paged_log = run_mode(
         args.server, args.model, args.port + 2, "paged", n_probs=64,
+        environment_overrides={"LLAMA_CACHEFLOW_PAGED_CONTIGUOUS_FASTPATH": "0"},
     )
     long_prompt = "This prompt deliberately contains enough distinct words to cross the production paged decode short context envelope safely. " * 2
     fallback, fallback_metrics, fallback_log = run_mode(

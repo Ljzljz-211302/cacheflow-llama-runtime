@@ -62,6 +62,9 @@ def _cluster_interval(effects: dict[int, list[float]], protocol: dict[str, Any])
 
 
 def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    execution_mode = protocol.get("service", {}).get("paged_execution_mode", "custom_cuda")
+    if execution_mode not in ("custom_cuda", "contiguous_fastpath"):
+        raise ValueError("unknown Paged execution mode")
     expected = {
         (block, action, int(batch), int(context))
         for block in range(1, int(protocol["matched_process_blocks"]) + 1)
@@ -89,17 +92,28 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
         if float(row["action_decisions"]) != waves * batch or float(row["paged_fallbacks"]) != 0:
             raise ValueError("action counters differ from the requested workload")
         if key[1] == "paged":
-            dispatches = 24 * waves
-            calls = float(row["paged_calls"])
-            exact_batches = set(map(int, protocol["measurement"].get("require_exact_graph_batch_sizes", [])))
-            if (float(row["paged_sequences"]) != waves * batch or
-                    float(row["cuda_sequences"]) != dispatches * batch or
-                    float(row["cuda_dispatches"]) != calls * 24 or
-                    calls < waves or calls > waves * batch or
-                    (batch in exact_batches and calls != waves)):
-                raise ValueError("Paged cell lacks full CUDA dispatch evidence")
-        elif any(float(row[field]) != 0 for field in ("paged_calls", "paged_sequences", "cuda_dispatches", "cuda_sequences")):
-            raise ValueError("Direct cell entered Paged CUDA dispatch")
+            if execution_mode == "contiguous_fastpath":
+                if (float(row.get("paged_contiguous_fastpath_calls", 0)) != waves or
+                        float(row.get("paged_contiguous_fastpath_sequences", 0)) != waves * batch or
+                        any(float(row[field]) != 0 for field in (
+                            "paged_calls", "paged_sequences", "cuda_dispatches", "cuda_sequences"
+                        ))):
+                    raise ValueError("Paged cell lacks full contiguous fast path evidence")
+            else:
+                dispatches = 24 * waves
+                calls = float(row["paged_calls"])
+                exact_batches = set(map(int, protocol["measurement"].get("require_exact_graph_batch_sizes", [])))
+                if (float(row["paged_sequences"]) != waves * batch or
+                        float(row["cuda_sequences"]) != dispatches * batch or
+                        float(row["cuda_dispatches"]) != calls * 24 or
+                        calls < waves or calls > waves * batch or
+                        (batch in exact_batches and calls != waves)):
+                    raise ValueError("Paged cell lacks full CUDA dispatch evidence")
+        elif (any(float(row[field]) != 0 for field in (
+                "paged_calls", "paged_sequences", "cuda_dispatches", "cuda_sequences")) or
+                any(float(row.get(field, 0)) != 0 for field in (
+                    "paged_contiguous_fastpath_calls", "paged_contiguous_fastpath_sequences"))):
+            raise ValueError("Direct cell entered a Paged execution route")
         keyed[key] = row
     if set(keyed) != expected:
         raise ValueError("batched performance artifact does not cover the frozen matrix")
@@ -153,6 +167,10 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
                 ) * 100.0
                 effects_by_batch[batch][block].append(gain)
                 latency_regressions.append(latency)
+                route_calls = (paged.get("paged_contiguous_fastpath_calls", 0)
+                               if execution_mode == "contiguous_fastpath" else paged["paged_calls"])
+                route_sequences = (paged.get("paged_contiguous_fastpath_sequences", 0)
+                                   if execution_mode == "contiguous_fastpath" else paged["paged_sequences"])
                 per_cell[f"block-{block}-batch-{batch}-context-{context}"] = {
                     "throughput_gain_percent": gain,
                     "median_wave_latency_regression_percent": latency,
@@ -163,7 +181,9 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
                     "output_token_matches": cell_matches,
                     "output_token_comparisons": len(direct["output_token_ids"]),
                     "paged_graph_calls": paged["paged_calls"],
-                    "realized_sequences_per_graph": paged["paged_sequences"] / paged["paged_calls"],
+                    "execution_route": ("upstream-contiguous-fastpath"
+                                        if execution_mode == "contiguous_fastpath" else "custom-paged-cuda"),
+                    "realized_sequences_per_graph": route_sequences / route_calls,
                 }
 
     primary_batch = int(protocol["acceptance"]["primary_batch_size"])

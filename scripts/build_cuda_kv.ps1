@@ -51,7 +51,7 @@ if ($LASTEXITCODE -ne 0) { throw "CPU/CUDA KV correctness matrix failed" }
 if ($LASTEXITCODE -ne 0) { throw "vectorized CUDA KV remap correctness matrix failed" }
 & $pagedTestExe
 if ($LASTEXITCODE -ne 0) { throw "restricted paged decode differential tests failed" }
-foreach ($variant in @("K1", "K2", "K3", "K4")) {
+foreach ($variant in @("K1", "K2", "K3", "K4", "K5")) {
     $env:LLAMA_CACHEFLOW_PAGED_KERNEL = $variant
     & $backendOpsExe -b CUDA0 -o FLASH_ATTN_EXT -p "hsk=64,nh=14,nkv=2,kv=64"
     if ($LASTEXITCODE -ne 0) {

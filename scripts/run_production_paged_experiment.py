@@ -326,6 +326,7 @@ def main() -> None:
             result, metrics, log_path = run_mode(
                 args.server, args.model, args.port_base + (pair - 1) * 2 + order_in_pair - 1,
                 action, label, prompt=str(protocol["request"]["prompt"]),
+                environment_overrides={"LLAMA_CACHEFLOW_PAGED_CONTIGUOUS_FASTPATH": "0"},
             )
             artifact_log = raw_output / f"{action}-pair-{pair:02d}-{order_in_pair}.log"
             shutil.copy2(log_path, artifact_log)
@@ -394,6 +395,7 @@ def main() -> None:
         args.server, args.model, args.port_base + pairs * 2, "paged", "formal-nsys",
         launcher=nsys_launcher, launcher_manages_lifetime=True,
         prompt=str(protocol["request"]["prompt"]),
+        environment_overrides={"LLAMA_CACHEFLOW_PAGED_CONTIGUOUS_FASTPATH": "0"},
     )
     report_source = raw_prefix.with_suffix(".nsys-rep")
     if not report_source.exists():

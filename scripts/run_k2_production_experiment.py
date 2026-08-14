@@ -150,6 +150,7 @@ def collect_single_process_rows(
     ]
     environment = cuda_environment({
         "LLAMA_CACHEFLOW_PAGED_KERNEL_CONTROL_FILE": str(control_file.resolve()),
+        "LLAMA_CACHEFLOW_PAGED_CONTIGUOUS_FASTPATH": "0",
     })
     payload = {
         "prompt": str(protocol["request"]["prompt"]),
@@ -432,7 +433,10 @@ def profile_variant(
         server, model, port, "paged", f"formal-{variant}-nsys",
         launcher=launcher, launcher_manages_lifetime=True,
         prompt=str(protocol["request"]["prompt"]),
-        environment_overrides={"LLAMA_CACHEFLOW_PAGED_KERNEL": selector},
+        environment_overrides={
+            "LLAMA_CACHEFLOW_PAGED_KERNEL": selector,
+            "LLAMA_CACHEFLOW_PAGED_CONTIGUOUS_FASTPATH": "0",
+        },
         warm_requests=int(protocol["request"].get("warm_requests_before_measurement", 1)),
         n_predict=int(protocol["request"]["predicted_tokens"]),
         measured_requests=int(protocol["request"].get("measured_requests_per_arm", 1)),
@@ -708,7 +712,10 @@ def main() -> None:
                     args.port_base + (pair - 1) * 2 + order_in_pair - 1,
                     "paged", f"k2-pair-{pair:02d}-{variant}",
                     prompt=str(protocol["request"]["prompt"]),
-                    environment_overrides={"LLAMA_CACHEFLOW_PAGED_KERNEL": selector},
+                    environment_overrides={
+                        "LLAMA_CACHEFLOW_PAGED_KERNEL": selector,
+                        "LLAMA_CACHEFLOW_PAGED_CONTIGUOUS_FASTPATH": "0",
+                    },
                     warm_requests=int(protocol["request"].get("warm_requests_before_measurement", 1)),
                 )
                 artifact_log = raw / f"{variant}-pair-{pair:02d}-{order_in_pair}.log"

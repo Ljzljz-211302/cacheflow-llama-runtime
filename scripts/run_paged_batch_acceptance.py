@@ -57,6 +57,7 @@ def run_arm(server: Path, model: Path, port: int, action: str) -> dict[str, Any]
     ]
     environment = cuda_environment()
     environment["LLAMA_CACHEFLOW_PAGED_KERNEL"] = "K4"
+    environment["LLAMA_CACHEFLOW_PAGED_CONTIGUOUS_FASTPATH"] = "0"
     payloads = [
         {
             "prompt": prompt,
