@@ -220,7 +220,6 @@ def collect_arm(
 
 def render_report(summary: dict[str, Any]) -> str:
     interval = summary["primary_block_cluster_bootstrap_95_percent"]
-    execution = summary["execution_evidence"]
     lines = [
         "# Batched Paged Decode objective performance result", "",
         f"- Promotion: **{'PASS' if summary['promotion_passed'] else 'FAIL'}**",
@@ -229,14 +228,18 @@ def render_report(summary: dict[str, Any]) -> str:
         f"- Batch-{summary['primary_batch_size']} raw batched-wave P95 Direct/Paged: {summary['primary_direct_wave_latency_p95_ms']:.3f}/{summary['primary_paged_wave_latency_p95_ms']:.3f} ms",
         f"- Batch-{summary['primary_batch_size']} raw batched-wave P95 latency regression: {summary['primary_p95_wave_latency_regression_percent']:+.2f}%",
         f"- Worst cell median batched-wave latency regression: {summary['worst_cell_median_wave_latency_regression_percent']:+.2f}%", "",
-        f"- Execution mode: `{execution['mode']}`",
-        f"- Contiguous fast-path calls/sequences: {execution['contiguous_fastpath_calls']:.0f}/{execution['contiguous_fastpath_sequences']:.0f}",
-        f"- Custom Paged graph/CUDA dispatches: {execution['custom_paged_graph_calls']:.0f}/{execution['custom_cuda_dispatches']:.0f}", "",
         f"- Exact output-token matches: {summary['correctness']['output_token_matches']}/{summary['correctness']['output_token_comparisons']}",
         f"- Top-64 minimum overlap / maximum common logprob error: {summary['correctness']['minimum_top64_overlap']} / {summary['correctness']['maximum_common_logprob_error']:.6f}", "",
         f"- Probability rows compared / incomplete: {summary['correctness']['probability_rows_compared']} / {summary['correctness']['incomplete_probability_rows']}", "",
         "## Throughput by batch", "", "| Batch | Median gain | 95% interval |", "|---:|---:|---:|",
     ]
+    execution = summary.get("execution_evidence")
+    if execution is not None:
+        lines[9:9] = [
+            f"- Execution mode: `{execution['mode']}`",
+            f"- Contiguous fast-path calls/sequences: {execution['contiguous_fastpath_calls']:.0f}/{execution['contiguous_fastpath_sequences']:.0f}",
+            f"- Custom Paged graph/CUDA dispatches: {execution['custom_paged_graph_calls']:.0f}/{execution['custom_cuda_dispatches']:.0f}", "",
+        ]
     for batch, row in summary["throughput_by_batch"].items():
         ci = row["block_cluster_bootstrap_95_percent"]
         lines.append(f"| {batch} | {row['throughput_gain_percent']['median']:+.2f}% | [{ci[0]:+.2f}%, {ci[1]:+.2f}%] |")

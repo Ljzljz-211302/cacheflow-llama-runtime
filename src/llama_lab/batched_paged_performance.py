@@ -171,7 +171,7 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
                                if execution_mode == "contiguous_fastpath" else paged["paged_calls"])
                 route_sequences = (paged.get("paged_contiguous_fastpath_sequences", 0)
                                    if execution_mode == "contiguous_fastpath" else paged["paged_sequences"])
-                per_cell[f"block-{block}-batch-{batch}-context-{context}"] = {
+                cell_result = {
                     "throughput_gain_percent": gain,
                     "median_wave_latency_regression_percent": latency,
                     "direct_peak_gpu_memory_mib": direct["peak_gpu_memory_mib"],
@@ -181,10 +181,14 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
                     "output_token_matches": cell_matches,
                     "output_token_comparisons": len(direct["output_token_ids"]),
                     "paged_graph_calls": paged["paged_calls"],
-                    "execution_route": ("upstream-contiguous-fastpath"
-                                        if execution_mode == "contiguous_fastpath" else "custom-paged-cuda"),
                     "realized_sequences_per_graph": route_sequences / route_calls,
                 }
+                if "paged_execution_mode" in protocol.get("service", {}):
+                    cell_result["execution_route"] = (
+                        "upstream-contiguous-fastpath"
+                        if execution_mode == "contiguous_fastpath" else "custom-paged-cuda"
+                    )
+                per_cell[f"block-{block}-batch-{batch}-context-{context}"] = cell_result
 
     primary_batch = int(protocol["acceptance"]["primary_batch_size"])
     primary_effects = [value for values in effects_by_batch[primary_batch].values() for value in values]
@@ -221,7 +225,7 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
     primary_paged_p95 = _percentile(primary_paged_waves, 0.95)
     primary_p95_latency = (primary_paged_p95 / primary_direct_p95 - 1.0) * 100.0
     paged_rows = [row for key, row in keyed.items() if key[1] == "paged"]
-    return {
+    result = {
         "schema_version": 1,
         "protocol_version": protocol["protocol_version"],
         "observations": len(rows),
@@ -233,17 +237,6 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
         "primary_p95_wave_latency_regression_percent": primary_p95_latency,
         "worst_cell_median_wave_latency_regression_percent": worst_latency,
         "throughput_by_batch": by_batch,
-        "execution_evidence": {
-            "mode": execution_mode,
-            "contiguous_fastpath_calls": sum(
-                float(row.get("paged_contiguous_fastpath_calls", 0)) for row in paged_rows
-            ),
-            "contiguous_fastpath_sequences": sum(
-                float(row.get("paged_contiguous_fastpath_sequences", 0)) for row in paged_rows
-            ),
-            "custom_paged_graph_calls": sum(float(row["paged_calls"]) for row in paged_rows),
-            "custom_cuda_dispatches": sum(float(row["cuda_dispatches"]) for row in paged_rows),
-        },
         "correctness": {
             "output_token_matches": output_matches,
             "output_token_comparisons": output_comparisons,
@@ -261,3 +254,16 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
             and worst_latency <= float(gates["maximum_any_cell_median_latency_regression_percent"])
         ),
     }
+    if "paged_execution_mode" in protocol.get("service", {}):
+        result["execution_evidence"] = {
+            "mode": execution_mode,
+            "contiguous_fastpath_calls": sum(
+                float(row.get("paged_contiguous_fastpath_calls", 0)) for row in paged_rows
+            ),
+            "contiguous_fastpath_sequences": sum(
+                float(row.get("paged_contiguous_fastpath_sequences", 0)) for row in paged_rows
+            ),
+            "custom_paged_graph_calls": sum(float(row["paged_calls"]) for row in paged_rows),
+            "custom_cuda_dispatches": sum(float(row["cuda_dispatches"]) for row in paged_rows),
+        }
+    return result
