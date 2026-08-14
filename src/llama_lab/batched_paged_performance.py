@@ -210,8 +210,9 @@ def analyze(protocol: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, A
         }
     gates = protocol["acceptance"]
     correctness_passed = (
-        output_matches == output_comparisons
-        and incomplete_probability_rows == 0
+        (not bool(gates.get("require_exact_output_token_match", True)) or
+         output_matches == output_comparisons)
+        and incomplete_probability_rows <= int(gates.get("maximum_incomplete_probability_rows", 0))
         and global_minimum_overlap >= int(gates["minimum_top64_overlap"])
         and global_maximum_error <= float(gates["maximum_common_logprob_error"])
     )

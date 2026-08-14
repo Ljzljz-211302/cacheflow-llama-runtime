@@ -95,6 +95,15 @@ class BatchedPagedPerformanceTest(unittest.TestCase):
                          summary["correctness"]["output_token_comparisons"] - 1)
         self.assertFalse(summary["promotion_passed"])
 
+    def test_distribution_gate_can_replace_cross_process_top1_identity(self) -> None:
+        protocol = self.protocol()
+        protocol["acceptance"]["require_exact_output_token_match"] = False
+        rows = self.rows()
+        next(row for row in rows if row["action"] == "paged")["output_token_ids"][0] = [8]
+        summary = analyze(protocol, rows)
+        self.assertTrue(summary["correctness"]["passed"])
+        self.assertTrue(summary["promotion_passed"])
+
     def test_analyzer_retains_negative_result(self) -> None:
         summary = analyze(self.protocol(), self.rows(paged_ms=12.0))
         self.assertFalse(summary["promotion_passed"])
