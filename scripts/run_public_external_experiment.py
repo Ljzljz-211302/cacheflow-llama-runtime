@@ -63,6 +63,11 @@ def observed_binding(protocol_path: Path, server: Path, model: Path, workload: P
         base = protocol["artifact_binding"]["vendor_base_revision"]
         result.update({"vendor_base_revision": base,
                        "vendor_overlay_sha256": vendor_overlay_sha256(base)})
+    if "vendor_patch_sha256" in protocol["artifact_binding"]:
+        result["vendor_patch_sha256"] = {
+            path: sha256(ROOT / path)
+            for path in protocol["artifact_binding"]["vendor_patch_sha256"]
+        }
     return result
 
 
@@ -71,6 +76,8 @@ def verify_binding(protocol: dict[str, Any], observed: dict[str, Any]) -> None:
     fields = ["vendor_revision", "vendor_diff_sha256", "model_sha256", "runtime_sha256"]
     if "vendor_base_revision" in frozen:
         fields.extend(["vendor_base_revision", "vendor_overlay_sha256"])
+    if "vendor_patch_sha256" in frozen:
+        fields.append("vendor_patch_sha256")
     for field in fields:
         if observed[field] != frozen[field]:
             raise RuntimeError(f"public external {field} differs from preregistration")
@@ -300,6 +307,8 @@ def validate_artifact(protocol_path: Path, output: Path) -> dict[str, Any]:
     fields = ["vendor_revision", "vendor_diff_sha256", "model_sha256", "runtime_sha256"]
     if "vendor_base_revision" in protocol["artifact_binding"]:
         fields.extend(["vendor_base_revision", "vendor_overlay_sha256"])
+    if "vendor_patch_sha256" in protocol["artifact_binding"]:
+        fields.append("vendor_patch_sha256")
     for field in fields:
         if manifest["binding"][field] != protocol["artifact_binding"][field]:
             raise ValueError(f"public artifact {field} differs from the protocol")
