@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "protocol_version": "1.0.0",
+  "preregistered_at_utc": "2026-08-15T04:05:50Z",
+  "claim": "official-public-workload-production-paged-hybrid-noninferiority",
+  "random_seed": 20260815,
+  "matched_process_blocks": 4,
+  "arm_order": "balanced seeded Direct/Paged process order inside matched process blocks",
+  "workload_file": "results/research/h21-public-external-v1.0.0/workloads.json",
+  "workload_sha256": "5b0a4ac49190c39817e6e8a3df15a0b0970519be0e1d7d9231331c1ba1a93038",
+  "artifact_binding": {
+    "outer_revision": "6d91e2dde8790af9444202fe27c3044f1e9031f4",
+    "vendor_revision": "7d0defc38a7fa1b80e02543acfb23dbb55d4a4eb",
+    "vendor_diff_sha256": "c2a48bcc5623301f1f5f7c80c5e53b75da9ef16b6a7d0c17142971c279d865e7",
+    "model_sha256": "8e0ae26000627ed62de0e78e41860af70094558b9d2913385c842a6aa06cf3fc",
+    "runtime_sha256": {
+      "llama-server.exe": "4f8aab1cd1a3c377d8c70d8a3e64c0b40ddc7e1a29c3bb4cd7265a435b4624d7",
+      "llama-server-impl.dll": "de457686a83df11e8330dfa9a0fb84c5b682ee7468821b292ef4dadbe6f2dfdb",
+      "llama.dll": "539500aa3ddb2389248aeeb02578ddaced72d4dcbf5f42d13103a4712068ebd7",
+      "ggml.dll": "5c3f3414be6768113b65dc5b092dde1c94f739a4afc93c5d720359942afdc8d3",
+      "ggml-base.dll": "d3548b18e0e978bf952f69fce0b3013901178d8aae1ef51273ac382b0b9f5722",
+      "ggml-cpu.dll": "bb2977333429fe14b7bdc9291cf5f735be96ae04f14d4423fd411ea9d87055b5",
+      "ggml-cuda.dll": "7ecc7e7cd237fb8520c40487e1db8f291cae30673e812c1b84ada79956d392e8"
+    }
+  },
+  "device": {
+    "name": "NVIDIA GeForce RTX 4050 Laptop GPU",
+    "compute_capability": "8.9"
+  },
+  "trace_sources": ["burstgpt", "azure-code"],
+  "service": {
+    "context_size": 18432,
+    "parallel_slots": 8,
+    "threads": 8,
+    "gpu_layers": 99,
+    "kv_block_size_tokens": 16,
+    "paged_kernel_variant": "K4",
+    "paged_execution_mode": "contiguous_fastpath",
+    "kv_unified": false
+  },
+  "request": {
+    "temperature": 0,
+    "top_probabilities": 20,
+    "maximum_trace_output_tokens": 8
+  },
+  "replay": {
+    "requests_per_trace": 24,
+    "target_arrival_span_seconds": 1.5,
+    "arrival_transform": "Within each official contiguous trace window, divide every offset by the window span and multiply by 1.5 seconds. This preserves order and relative gaps but intentionally changes absolute rate.",
+    "provenance": "trace-driven-public-content-synthetic-replay"
+  },
+  "quality": {
+    "dataset": "THUDM/LongBench complete untruncated records",
+    "tasks": ["multifieldqa_en", "2wikimqa", "triviaqa"],
+    "cases_per_task": 2,
+    "maximum_output_tokens": 32,
+    "metric": "official LongBench English QA token F1, maximum over reference answers"
+  },
+  "statistics": {
+    "unit": "matched process block",
+    "effect": "100 * (Paged-hybrid completed requests per second / Direct completed requests per second - 1)",
+    "bootstrap_resamples": 10000,
+    "confidence": "matched-process-block cluster bootstrap 95% interval"
+  },
+  "acceptance": {
+    "minimum_throughput_gain_lower_95_percent": -10.0,
+    "maximum_p95_latency_regression_percent": 15.0,
+    "require_exact_output_tokens": true,
+    "maximum_quality_score_delta": 0.0,
+    "require_full_trace_source_coverage": true,
+    "require_contiguous_fastpath_evidence": true,
+    "zero_custom_paged_dispatch": true,
+    "zero_fallback": true,
+    "outcome_based_deletion": "forbidden"
+  },
+  "claim_boundary": "Passing supports functional equivalence and a 10% throughput/15% P95 operational noninferiority envelope for this production contiguous-layout Paged hybrid on this model, GPU, two transformed public traces and six supported LongBench QA cases. It does not show custom fragmented-page K4 superiority, does not reproduce the public traces' absolute arrival rates or joint content-arrival distribution, and is not a full LongBench or LongBench-E leaderboard result."
+}
