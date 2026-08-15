@@ -41,7 +41,14 @@ if (-not (Test-Path -LiteralPath $server)) {
 # The caller may partition state with a namespace, but cannot replace the
 # compatibility identity. Exact model bytes and the serving envelope are
 # always included, so evidence cannot cross models or deployment shapes.
-$modelSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $resolvedModel).Hash
+$modelHasher = [Security.Cryptography.SHA256]::Create()
+$modelStream = [IO.File]::OpenRead($resolvedModel)
+try {
+    $modelSha256 = [BitConverter]::ToString($modelHasher.ComputeHash($modelStream)).Replace("-", "")
+} finally {
+    $modelStream.Dispose()
+    $modelHasher.Dispose()
+}
 $machine = [Environment]::MachineName
 $checkpointIdentity = "schema=1;namespace=$CheckpointNamespace;model_sha256=$modelSha256;host=$machine;backend=$Backend;ctx=$ContextSize;parallel=$Parallel"
 $sha256 = [Security.Cryptography.SHA256]::Create()

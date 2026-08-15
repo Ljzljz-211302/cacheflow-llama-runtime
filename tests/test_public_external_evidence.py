@@ -8,7 +8,7 @@ from llama_lab.public_external_evidence import analyze_public_external
 def protocol() -> dict:
     return {
         "protocol_version": "1.0.0", "random_seed": 7, "matched_process_blocks": 2,
-        "trace_sources": ["burstgpt", "azure-code"],
+        "trace_sources": ["burstgpt", "azure-code"], "request": {"top_probabilities": 1},
         "statistics": {"bootstrap_resamples": 200},
         "acceptance": {
             "minimum_throughput_gain_lower_95_percent": -10.0,
@@ -26,7 +26,9 @@ def rows(paged_scale: float = 0.98) -> list[dict]:
             direct_requests = [
                 {"trace_row": index, "latency_ms": 100.0 + index,
                  "output_token_ids": [index, index + 10],
-                 "top_logprobs": [{"id": index, "logprob": -0.1}], "cache_tokens": 128}
+                 "top_logprobs": [[{"id": index, "logprob": -0.1}],
+                                   [{"id": index + 10, "logprob": -0.1}]],
+                 "cache_tokens": 128}
                 for index in (1, 2)
             ]
             for action, scale in (("direct", 1.0), ("paged", paged_scale)):
@@ -66,6 +68,20 @@ class PublicExternalEvidenceTest(unittest.TestCase):
         summary = analyze_public_external(protocol(), tampered)
         self.assertFalse(summary["correctness"]["passed"])
         self.assertFalse(summary["promotion_passed"])
+
+    def test_probability_gate_can_accept_near_tie_without_hiding_token_mismatch(self) -> None:
+        relaxed = protocol()
+        relaxed["acceptance"].update({
+            "require_exact_output_tokens": False,
+            "minimum_top_probability_overlap": 1,
+            "maximum_common_logprob_error": 0.1,
+        })
+        tampered = rows()
+        request = next(row for row in tampered if row["action"] == "paged")["requests"][0]
+        request["output_token_ids"] = [99, 11]
+        summary = analyze_public_external(relaxed, tampered)
+        self.assertTrue(summary["correctness"]["passed"])
+        self.assertLess(summary["correctness"]["token_matches"], summary["correctness"]["token_comparisons"])
 
     def test_analyzer_rejects_false_paged_route_evidence(self) -> None:
         tampered = rows()

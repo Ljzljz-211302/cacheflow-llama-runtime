@@ -218,6 +218,8 @@ def render_report(summary: dict[str, Any]) -> str:
         f"- Request P95 Direct/Paged: {summary['direct_request_latency_p95_ms']:.3f}/{summary['paged_request_latency_p95_ms']:.3f} ms",
         f"- P95 latency regression: {summary['p95_latency_regression_percent']:+.2f}%",
         f"- Exact trace outputs: {summary['correctness']['token_matches']}/{summary['correctness']['token_comparisons']}",
+        f"- Top-probability minimum overlap: {summary['correctness']['minimum_top_probability_overlap']}",
+        f"- Maximum common-token logprob error: {summary['correctness']['maximum_common_logprob_error']:.6f}",
         f"- LongBench paired outputs: {summary['quality']['token_matches']}/{summary['quality']['comparisons']}",
         f"- Maximum Direct/Paged LongBench score delta: {summary['quality']['maximum_score_delta']:.6f}", "",
         "BurstGPT/Azure arrival traces and LongBench text are separately sourced and then matched for replay. "
@@ -225,17 +227,106 @@ def render_report(summary: dict[str, Any]) -> str:
     ])
 
 
+def validate_workloads(protocol: dict[str, Any], workloads: dict[str, Any]) -> None:
+    if workloads.get("joint_distribution_claim") != "forbidden":
+        raise ValueError("public workload must forbid a joint-distribution claim")
+    if set(workloads["performance_replays"]) != set(protocol["trace_sources"]):
+        raise ValueError("public workload trace sources differ from the protocol")
+    expected_count = int(protocol["replay"]["requests_per_trace"])
+    for source, rows in workloads["performance_replays"].items():
+        if len(rows) != expected_count or len({int(row["trace_row"]) for row in rows}) != expected_count:
+            raise ValueError(f"public workload {source} coverage is incomplete")
+        if any(row["provenance"] != protocol["replay"]["provenance"] or
+               hashlib.sha256(row["prompt"].encode("utf-8")).hexdigest() != row["prompt_sha256"] or
+               not 128 <= int(row["actual_local_input_tokens"]) <= 1024 for row in rows):
+            raise ValueError(f"public workload {source} provenance is invalid")
+    quality = workloads["quality_cases"]
+    expected_quality = len(protocol["quality"]["tasks"]) * int(protocol["quality"]["cases_per_task"])
+    if len(quality) != expected_quality:
+        raise ValueError("LongBench quality coverage is incomplete")
+    counts = {task: 0 for task in protocol["quality"]["tasks"]}
+    for row in quality:
+        if row["dataset"] not in counts or not row["answers"] or int(row["actual_local_input_tokens"]) > 2048:
+            raise ValueError("LongBench quality case is outside the frozen scope")
+        if hashlib.sha256(row["prompt"].encode("utf-8")).hexdigest() != row["prompt_sha256"]:
+            raise ValueError("LongBench prompt hash differs from its content")
+        counts[row["dataset"]] += 1
+    if any(value != int(protocol["quality"]["cases_per_task"]) for value in counts.values()):
+        raise ValueError("LongBench task allocation differs from the protocol")
+
+
+def validate_artifact(protocol_path: Path, output: Path) -> dict[str, Any]:
+    protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+    workload_path = ROOT / protocol["workload_file"]
+    if sha256(workload_path) != protocol["workload_sha256"]:
+        raise ValueError("public workload hash differs from the protocol")
+    workloads = json.loads(workload_path.read_text(encoding="utf-8"))
+    validate_workloads(protocol, workloads)
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    if manifest["binding"]["protocol_sha256"] != sha256(protocol_path):
+        raise ValueError("public artifact protocol hash differs")
+    if manifest["binding"]["workload_sha256"] != protocol["workload_sha256"]:
+        raise ValueError("public artifact workload hash differs")
+    for field in ("vendor_revision", "vendor_diff_sha256", "model_sha256", "runtime_sha256"):
+        if manifest["binding"][field] != protocol["artifact_binding"][field]:
+            raise ValueError(f"public artifact {field} differs from the protocol")
+    if datetime.fromisoformat(manifest["generated_at_utc"]) < datetime.fromisoformat(
+            protocol["preregistered_at_utc"].replace("Z", "+00:00")):
+        raise ValueError("public artifact predates preregistration")
+    raw_files = {str(path.relative_to(output)).replace("\\", "/"): sha256(path)
+                 for path in sorted((output / "raw").rglob("*")) if path.is_file()}
+    if raw_files != manifest["raw_sha256"]:
+        raise ValueError("public raw evidence tree differs from the manifest")
+    rows = []
+    for path in sorted((output / "raw").glob("block-*/*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if path.name == "arm.json":
+            log_path = path.parent / "server.log"
+            if payload["server_log_sha256"] != sha256(log_path):
+                raise ValueError("public arm log hash differs")
+        else:
+            rows.append(payload)
+    stored_rows = json.loads((output / "trials.json").read_text(encoding="utf-8"))
+    row_key = lambda row: (int(row["block"]), int(row["order_in_block"]),
+                           str(row["action"]), str(row["trace_source"]))
+    if sorted(rows, key=row_key) != sorted(stored_rows, key=row_key):
+        raise ValueError("public trials copy differs from raw cells")
+    summary = analyze_public_external(protocol, rows)
+    if summary != json.loads((output / "summary.json").read_text(encoding="utf-8")):
+        raise ValueError("public summary differs from independently reconstructed result")
+    if render_report(summary) != (output / "report.md").read_text(encoding="utf-8"):
+        raise ValueError("public report differs from the reconstructed result")
+    return summary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--protocol", type=Path, required=True)
-    parser.add_argument("--server", type=Path, required=True)
-    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--server", type=Path)
+    parser.add_argument("--model", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8360)
+    parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--refresh-derived", action="store_true")
     args = parser.parse_args()
     protocol = json.loads(args.protocol.read_text(encoding="utf-8"))
     workload_path = ROOT / protocol["workload_file"]
     workloads = json.loads(workload_path.read_text(encoding="utf-8"))
+    validate_workloads(protocol, workloads)
+    if args.refresh_derived:
+        rows = json.loads((args.output / "trials.json").read_text(encoding="utf-8"))
+        summary = analyze_public_external(protocol, rows)
+        (args.output / "summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+        )
+        (args.output / "report.md").write_text(render_report(summary), encoding="utf-8")
+        print(json.dumps(summary))
+        return
+    if args.validate_only:
+        print(json.dumps(validate_artifact(args.protocol, args.output)))
+        return
+    if args.server is None or args.model is None:
+        parser.error("--server and --model are required for measurement")
     binding = observed_binding(args.protocol, args.server, args.model, workload_path)
     verify_binding(protocol, binding)
     args.output.mkdir(parents=True, exist_ok=False)

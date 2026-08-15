@@ -62,6 +62,9 @@ def analyze_public_external(protocol: dict[str, Any], rows: list[dict[str, Any]]
     effects = {block: [] for block in blocks}
     direct_latencies, paged_latencies = [], []
     token_matches = token_comparisons = 0
+    probability_rows_compared = 0
+    minimum_top_overlap = int(protocol["request"].get("top_probabilities", 0))
+    maximum_common_logprob_error = 0.0
     quality_matches = quality_comparisons = 0
     maximum_quality_delta = 0.0
     per_trace = {}
@@ -82,6 +85,24 @@ def analyze_public_external(protocol: dict[str, Any], rows: list[dict[str, Any]]
                 token_matches += left["output_token_ids"] == right["output_token_ids"]
                 if int(left["cache_tokens"]) != int(right["cache_tokens"]):
                     raise ValueError("Direct/Paged cache-token evidence differs")
+                for left_token, right_token, left_probs, right_probs in zip(
+                        left["output_token_ids"], right["output_token_ids"],
+                        left["top_logprobs"], right["top_logprobs"]):
+                    left_by_id = {int(item["id"]): float(item["logprob"]) for item in left_probs}
+                    right_by_id = {int(item["id"]): float(item["logprob"]) for item in right_probs}
+                    if not left_by_id or not right_by_id:
+                        raise ValueError("public trace probability evidence is incomplete")
+                    common = left_by_id.keys() & right_by_id.keys()
+                    minimum_top_overlap = min(minimum_top_overlap, len(common))
+                    if common:
+                        maximum_common_logprob_error = max(maximum_common_logprob_error, max(
+                            abs(left_by_id[token] - right_by_id[token]) for token in common
+                        ))
+                    probability_rows_compared += 1
+                    # Once greedy tokens differ, later rows condition on different
+                    # histories and are not a like-for-like numerical comparison.
+                    if left_token != right_token:
+                        break
             if block == 1 and trace == traces[0]:
                 direct_quality = {(row["dataset"], row["record_id"]): row for row in direct["quality"]}
                 paged_quality = {(row["dataset"], row["record_id"]): row for row in paged["quality"]}
@@ -100,7 +121,11 @@ def analyze_public_external(protocol: dict[str, Any], rows: list[dict[str, Any]]
     direct_p95, paged_p95 = percentile(direct_latencies, 0.95), percentile(paged_latencies, 0.95)
     p95_regression = (paged_p95 / direct_p95 - 1.0) * 100.0
     gates = protocol["acceptance"]
-    correctness_passed = (not gates["require_exact_output_tokens"] or token_matches == token_comparisons)
+    correctness_passed = (
+        (not gates["require_exact_output_tokens"] or token_matches == token_comparisons)
+        and minimum_top_overlap >= int(gates.get("minimum_top_probability_overlap", 0))
+        and maximum_common_logprob_error <= float(gates.get("maximum_common_logprob_error", math.inf))
+    )
     quality_passed = (quality_comparisons > 0 and quality_matches == quality_comparisons and
                       maximum_quality_delta <= float(gates["maximum_quality_score_delta"]))
     return {
@@ -115,6 +140,9 @@ def analyze_public_external(protocol: dict[str, Any], rows: list[dict[str, Any]]
         "paged_request_latency_p95_ms": paged_p95,
         "p95_latency_regression_percent": p95_regression,
         "correctness": {"token_matches": token_matches, "token_comparisons": token_comparisons,
+                        "probability_rows_compared": probability_rows_compared,
+                        "minimum_top_probability_overlap": minimum_top_overlap,
+                        "maximum_common_logprob_error": maximum_common_logprob_error,
                         "passed": correctness_passed},
         "quality": {"comparisons": quality_comparisons, "token_matches": quality_matches,
                     "maximum_score_delta": maximum_quality_delta, "passed": quality_passed},
