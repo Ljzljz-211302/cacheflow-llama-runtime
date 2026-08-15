@@ -24,7 +24,8 @@ def rows(paged_scale: float = 0.98) -> list[dict]:
     for block in (1, 2):
         for trace in ("burstgpt", "azure-code"):
             direct_requests = [
-                {"trace_row": index, "latency_ms": 100.0 + index, "output_token_ids": [index],
+                {"trace_row": index, "latency_ms": 100.0 + index,
+                 "output_token_ids": [index, index + 10],
                  "top_logprobs": [{"id": index, "logprob": -0.1}], "cache_tokens": 128}
                 for index in (1, 2)
             ]
@@ -35,8 +36,8 @@ def rows(paged_scale: float = 0.98) -> list[dict]:
                     "requests": [{**request, "latency_ms": request["latency_ms"] * scale}
                                  for request in direct_requests],
                     "route": {
-                        "paged_contiguous_fastpath_calls": 4 if action == "paged" else 0,
-                        "paged_contiguous_fastpath_sequences": 8 if action == "paged" else 0,
+                        "paged_contiguous_fastpath_calls": 2 if action == "paged" else 0,
+                        "paged_contiguous_fastpath_sequences": 2 if action == "paged" else 0,
                         "paged_calls": 0, "cuda_dispatches": 0, "paged_fallbacks": 0,
                     },
                     "quality": [
@@ -61,7 +62,7 @@ class PublicExternalEvidenceTest(unittest.TestCase):
 
     def test_analyzer_rejects_direct_paged_output_divergence(self) -> None:
         tampered = rows()
-        next(row for row in tampered if row["action"] == "paged")["requests"][0]["output_token_ids"] = [99]
+        next(row for row in tampered if row["action"] == "paged")["requests"][0]["output_token_ids"] = [99, 11]
         summary = analyze_public_external(protocol(), tampered)
         self.assertFalse(summary["correctness"]["passed"])
         self.assertFalse(summary["promotion_passed"])

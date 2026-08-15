@@ -44,11 +44,17 @@ def analyze_public_external(protocol: dict[str, Any], rows: list[dict[str, Any]]
                     "paged_contiguous_fastpath_calls", "paged_contiguous_fastpath_sequences",
                     "paged_calls", "cuda_dispatches", "paged_fallbacks")):
                 raise ValueError("Direct arm entered a Paged route")
-        elif (float(route["paged_contiguous_fastpath_calls"]) <= 0 or
-              float(route["paged_contiguous_fastpath_sequences"]) < len(row["requests"]) or
+        else:
+            expected_decode_sequences = sum(
+                max(0, len(request["output_token_ids"]) - 1) for request in row["requests"]
+            )
+            calls = float(route["paged_contiguous_fastpath_calls"])
+            sequences = float(route["paged_contiguous_fastpath_sequences"])
+            if (expected_decode_sequences <= 0 or calls <= 0 or calls > expected_decode_sequences or
+                    sequences != expected_decode_sequences or
               any(float(route[field]) != 0 for field in (
-                  "paged_calls", "cuda_dispatches", "paged_fallbacks"))):
-            raise ValueError("Paged route evidence is incomplete")
+                      "paged_calls", "cuda_dispatches", "paged_fallbacks"))):
+                raise ValueError("Paged route evidence is incomplete")
         keyed[key] = row
     if set(keyed) != expected:
         raise ValueError("public replay does not cover the complete paired matrix")
