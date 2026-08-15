@@ -300,6 +300,15 @@ def validate_artifact(protocol_path: Path, output: Path) -> dict[str, Any]:
     workloads = json.loads(workload_path.read_text(encoding="utf-8"))
     validate_workloads(protocol, workloads)
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    registry_path = ROOT / "config/formal_evidence_registry.json"
+    if registry_path.exists():
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        artifact_key = str(output.resolve().relative_to(ROOT.resolve())).replace("\\", "/")
+        registered = registry.get("artifacts", {}).get(artifact_key)
+        if registered is not None:
+            for name, expected_hash in registered.items():
+                if sha256(output / name) != expected_hash:
+                    raise ValueError(f"registered public artifact hash differs: {name}")
     if manifest["binding"]["protocol_sha256"] != sha256(protocol_path):
         raise ValueError("public artifact protocol hash differs")
     if manifest["binding"]["workload_sha256"] != protocol["workload_sha256"]:

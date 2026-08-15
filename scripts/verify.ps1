@@ -50,6 +50,10 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "H21 v1.2 public workload evidence validation failed"
     }
+    python scripts\run_public_external_experiment.py --protocol config\public_external_protocol_v1_3.json --output results\research\h21-public-external-result-v1.3.0 --validate-only
+    if ($LASTEXITCODE -ne 0) {
+        throw "H21 v1.3 public workload evidence validation failed"
+    }
 
     $manifest = Get-Content -Raw -Encoding utf8 "config\artifacts.json" | ConvertFrom-Json
     foreach ($artifact in $manifest.artifacts) {
