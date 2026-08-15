@@ -1,0 +1,116 @@
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+index 7c9263a..002c0f3 100644
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -152,6 +152,9 @@ struct server_slot {
+     server_kv_action pending_kv_action_effective = server_kv_action::recompute;
+     int64_t pending_kv_action_started_us = 0;
+     bool has_pending_kv_action = false;
++    // Decode routing lasts for the complete generation. The policy observation
++    // itself is one-shot, so it cannot also serve as persistent route state.
++    bool paged_decode_requested = false;
+ 
+     bool prompt_save(server_prompt_cache & prompt_cache) const {
+         if (prompt.tokens.size() == 0) {
+@@ -236,6 +239,7 @@ struct server_slot {
+ 
+         n_prompt_tokens_cache = 0;
+         has_pending_kv_action = false;
++        paged_decode_requested = false;
+ 
+         last_nl_pos    = 0;
+         generated_text = "";
+@@ -1711,6 +1715,8 @@ private:
+         target.pending_kv_action_effective = decision.action;
+         target.pending_kv_action_started_us = started;
+         target.has_pending_kv_action = true;
++        target.paged_decode_requested = decision.action == server_kv_action::paged ||
++                params_base.kv_action_override_mode == common_params::kv_action_override::paged;
+     }
+ 
+     server_slot * get_available_slot(const server_task & task) {
+@@ -1827,6 +1833,8 @@ private:
+             ret->pending_kv_action_effective = action_decision.action;
+             ret->pending_kv_action_started_us = action_started_us;
+             ret->has_pending_kv_action = true;
++            ret->paged_decode_requested = action_decision.action == server_kv_action::paged ||
++                    params_base.kv_action_override_mode == common_params::kv_action_override::paged;
+             if (store_restored || cuda_restored) update_cache = false;
+             update_cache = update_cache && prompt_cache;
+ 
+@@ -4191,8 +4199,37 @@ private:
+         int32_t i_next = 0;
+ 
+         // process the created batch of tokens
++        std::vector<server_slot *> batch_owners(batch.n_tokens, nullptr);
++        for (auto & slot : slots) {
++            if (slot.i_batch >= 0 && slot.i_batch < batch.n_tokens) {
++                batch_owners[slot.i_batch] = &slot;
++            }
++        }
+         for (int32_t i = 0; i < batch.n_tokens; i = i_next) {
+-            const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
++            const auto token_owner = [&](int32_t batch_index) {
++                return batch_owners[batch_index];
++            };
++            const auto token_is_decode = [&](int32_t batch_index) {
++                if (batch.n_seq_id[batch_index] != 1) return false;
++                const auto owner = token_owner(batch_index);
++                return owner != nullptr && owner->lifecycle.phase() == SLOT_STATE_GENERATING;
++            };
++            const auto token_requests_paged_decode = [&](int32_t batch_index) {
++                const auto owner = token_owner(batch_index);
++                return token_is_decode(batch_index) && owner != nullptr && owner->paged_decode_requested;
++            };
++            const int32_t maximum_tokens = std::min(n_batch, batch.n_tokens - i);
++            const bool first_is_decode = token_is_decode(i);
++            const bool first_requests_paged = token_requests_paged_decode(i);
++            int32_t n_tokens = 1;
++            // Use the same phase-homogeneous graph boundaries for every arm.
++            // Otherwise only splitting Paged decode out of mixed prefill chunks
++            // changes the reduction shape and confounds backend correctness/performance.
++            while (n_tokens < maximum_tokens &&
++                    token_is_decode(i + n_tokens) == first_is_decode &&
++                    token_requests_paged_decode(i + n_tokens) == first_requests_paged) {
++                ++n_tokens;
++            }
+ 
+             llama_batch batch_view = {
+                 n_tokens,
+@@ -4210,7 +4247,7 @@ private:
+             // sequence and every token belongs to a slot whose policy chose
+             // Paged. This prevents a mixed prefill/decode batch from being
+             // relabeled while allowing continuous batching across sequences.
+-            bool paged_batch = n_tokens > 0;
++            bool paged_batch = first_requests_paged;
+             std::vector<llama_seq_id> paged_sequences;
+             paged_sequences.reserve(n_tokens);
+             for (int32_t token = 0; token < n_tokens && paged_batch; ++token) {
+@@ -4227,12 +4264,8 @@ private:
+                 }
+                 paged_sequences.push_back(seq_id);
+ 
+-                const auto owner = std::find_if(slots.begin(), slots.end(),
+-                        [batch_index](const server_slot & slot) {
+-                            return slot.i_batch == batch_index;
+-                        });
+-                if (owner == slots.end() || !owner->has_pending_kv_action ||
+-                        owner->pending_kv_action.action != server_kv_action::paged) {
++                const auto owner = token_owner(batch_index);
++                if (owner == nullptr || !owner->paged_decode_requested) {
+                     paged_batch = false;
+                 }
+             }
+diff --git a/tools/server/server-kv-block-cuda.cu b/tools/server/server-kv-block-cuda.cu
+index c6d6ce0..b536fa3 100644
+--- a/tools/server/server-kv-block-cuda.cu
++++ b/tools/server/server-kv-block-cuda.cu
+@@ -13,6 +13,8 @@
+ #include <unordered_set>
+ #include <utility>
+ 
++using u64 = uint64_t;
++
+ namespace {
+ 
+ void cuda_check(cudaError_t status, const char * operation) {

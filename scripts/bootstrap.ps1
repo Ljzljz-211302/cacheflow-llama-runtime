@@ -59,23 +59,29 @@ if ($actualCommit -ne $manifest.llama_cpp.commit) {
 }
 Write-Host "[ok] llama.cpp $($manifest.llama_cpp.tag) ($actualCommit)"
 
-$enginePatch = Join-Path $projectRoot "patches\0001-cache-aware-slot-scheduler.patch"
-if (-not (Test-Path -LiteralPath $enginePatch)) {
-    throw "engine patch missing: $enginePatch"
-}
-& git -C $sourceRoot apply --reverse --check $enginePatch 2>$null
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "[ok] cache-aware scheduler patch already applied"
-} else {
-    & git -C $sourceRoot apply --check $enginePatch
-    if ($LASTEXITCODE -ne 0) {
-        throw "engine patch does not apply cleanly to pinned llama.cpp"
+$enginePatches = @(
+    "patches\0001-cache-aware-slot-scheduler.patch",
+    "patches\0002-public-workload-routing.patch"
+)
+foreach ($relativePatch in $enginePatches) {
+    $enginePatch = Join-Path $projectRoot $relativePatch
+    if (-not (Test-Path -LiteralPath $enginePatch)) {
+        throw "engine patch missing: $enginePatch"
     }
-    & git -C $sourceRoot apply $enginePatch
-    if ($LASTEXITCODE -ne 0) {
-        throw "failed to apply engine patch"
+    & git -C $sourceRoot apply --reverse --check $enginePatch 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "[ok] $relativePatch already applied"
+    } else {
+        & git -C $sourceRoot apply --check $enginePatch
+        if ($LASTEXITCODE -ne 0) {
+            throw "engine patch does not apply cleanly: $relativePatch"
+        }
+        & git -C $sourceRoot apply $enginePatch
+        if ($LASTEXITCODE -ne 0) {
+            throw "failed to apply engine patch: $relativePatch"
+        }
+        Write-Host "[ok] applied $relativePatch"
     }
-    Write-Host "[ok] applied cache-aware scheduler patch"
 }
 
 foreach ($artifact in $manifest.artifacts) {

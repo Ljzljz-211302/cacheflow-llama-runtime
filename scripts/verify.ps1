@@ -65,11 +65,11 @@ try {
     Write-Host "Artifact checksums passed."
 
     if ($Full) {
-        & git -C "vendor\llama.cpp" apply --reverse --check "..\..\patches\0001-cache-aware-slot-scheduler.patch"
+        & git -C "vendor\llama.cpp" apply --reverse --check "..\..\patches\0002-public-workload-routing.patch"
         if ($LASTEXITCODE -ne 0) {
-            throw "engine patch is not the exact reversible diff for the pinned fork"
+            throw "public workload routing patch is not reversible from the pinned fork"
         }
-        Write-Host "Pinned upstream patch reversibility passed."
+        Write-Host "Pinned public workload routing patch reversibility passed."
     }
 
     & "runtime\bin\llama-bench.exe" --list-devices

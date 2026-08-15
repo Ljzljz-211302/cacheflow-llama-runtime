@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from llama_lab.public_external_evidence import analyze_public_external  # noqa: E402
+from llama_lab.public_external_evidence import analyze_public_external, validate_recorded_workloads  # noqa: E402
 from llama_lab.public_workloads import longbench_qa_f1  # noqa: E402
 from production_journey import cuda_environment, get_text, request_json, terminate_process, wait_ready  # noqa: E402
 from run_batched_paged_performance import RUNTIME_FILES, metric, vendor_diff_sha256  # noqa: E402
@@ -29,6 +29,14 @@ def sha256(path: Path) -> str:
 
 def git(*args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
+
+
+def vendor_overlay_sha256(base_revision: str) -> str:
+    payload = subprocess.check_output(
+        ["git", "-C", "vendor/llama.cpp", "diff", "--binary", base_revision, "--"],
+        cwd=ROOT,
+    )
+    return hashlib.sha256(payload).hexdigest()
 
 
 def execution_plan(protocol: dict[str, Any]) -> list[tuple[int, int, str]]:
@@ -43,18 +51,27 @@ def execution_plan(protocol: dict[str, Any]) -> list[tuple[int, int, str]]:
 
 
 def observed_binding(protocol_path: Path, server: Path, model: Path, workload: Path) -> dict[str, Any]:
-    return {
+    protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+    result = {
         "protocol_sha256": sha256(protocol_path), "workload_sha256": sha256(workload),
         "runner_revision": git("rev-parse", "HEAD"),
         "vendor_revision": git("-C", "vendor/llama.cpp", "rev-parse", "HEAD"),
         "vendor_diff_sha256": vendor_diff_sha256(), "model_sha256": sha256(model),
         "runtime_sha256": {name: sha256(server.parent / name) for name in RUNTIME_FILES},
     }
+    if "vendor_base_revision" in protocol["artifact_binding"]:
+        base = protocol["artifact_binding"]["vendor_base_revision"]
+        result.update({"vendor_base_revision": base,
+                       "vendor_overlay_sha256": vendor_overlay_sha256(base)})
+    return result
 
 
 def verify_binding(protocol: dict[str, Any], observed: dict[str, Any]) -> None:
     frozen = protocol["artifact_binding"]
-    for field in ("vendor_revision", "vendor_diff_sha256", "model_sha256", "runtime_sha256"):
+    fields = ["vendor_revision", "vendor_diff_sha256", "model_sha256", "runtime_sha256"]
+    if "vendor_base_revision" in frozen:
+        fields.extend(["vendor_base_revision", "vendor_overlay_sha256"])
+    for field in fields:
         if observed[field] != frozen[field]:
             raise RuntimeError(f"public external {field} differs from preregistration")
     if observed["workload_sha256"] != protocol["workload_sha256"]:
@@ -93,6 +110,7 @@ def normalize_response(response: dict[str, Any], workload: dict[str, Any], laten
         ])
     return {
         "trace_row": int(workload["trace_row"]), "prompt_id": workload["prompt_id"],
+        "prompt_sha256": workload["prompt_sha256"],
         "source_arrival_seconds": float(workload["source_arrival_seconds"]),
         "scheduled_arrival_ms": scheduled_ms, "actual_start_ms": started_ms,
         "latency_ms": latency_ms, "output_token_ids": [int(value) for value in response["tokens"]],
@@ -126,7 +144,9 @@ def replay_trace(base_url: str, rows: list[dict[str, Any]], protocol: dict[str, 
         return normalize_response(response, row, (ended - started) * 1000.0,
                                   due * 1000.0, (started - origin) * 1000.0)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=int(protocol["service"]["parallel_slots"])) as pool:
+    # Arrival production must not be back-pressured by in-flight HTTP requests.
+    # The server concurrency limit is independent from the number of timed clients.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(rows)) as pool:
         responses = list(pool.map(issue, rows))
     elapsed_ms = (time.perf_counter() - origin) * 1000.0
     responses.sort(key=lambda row: row["trace_row"])
@@ -149,6 +169,7 @@ def run_quality(base_url: str, cases: list[dict[str, Any]], protocol: dict[str, 
         prediction = str(response.get("content", ""))
         results.append({
             "dataset": case["dataset"], "record_id": case["record_id"],
+            "prompt_sha256": case["prompt_sha256"],
             "prediction": prediction, "answers": case["answers"],
             "score": max(longbench_qa_f1(prediction, answer) for answer in case["answers"]),
             "output_token_ids": [int(value) for value in response["tokens"]],
@@ -209,7 +230,7 @@ def collect_arm(protocol: dict[str, Any], workloads: dict[str, Any], server: Pat
 
 def render_report(summary: dict[str, Any]) -> str:
     ci = summary["block_cluster_bootstrap_95_percent"]
-    return "\n".join([
+    lines = [
         "# Official public workload Direct/Paged result", "",
         f"- Promotion: **{'PASS' if summary['promotion_passed'] else 'FAIL'}**",
         f"- Trace sources: {', '.join(summary['trace_sources'])}",
@@ -217,6 +238,14 @@ def render_report(summary: dict[str, Any]) -> str:
         f"- Matched-process-block bootstrap 95% interval: [{ci[0]:+.2f}%, {ci[1]:+.2f}%]",
         f"- Request P95 Direct/Paged: {summary['direct_request_latency_p95_ms']:.3f}/{summary['paged_request_latency_p95_ms']:.3f} ms",
         f"- P95 latency regression: {summary['p95_latency_regression_percent']:+.2f}%",
+    ]
+    if "maximum_arrival_slip_ms" in summary:
+        p95_ci = summary["p95_latency_regression_block_bootstrap_95_percent"]
+        lines.extend([
+            f"- P95 regression block-bootstrap 95% interval: [{p95_ci[0]:+.2f}%, {p95_ci[1]:+.2f}%]",
+            f"- Maximum arrival slip: {summary['maximum_arrival_slip_ms']:.3f} ms",
+        ])
+    lines.extend([
         f"- Exact trace outputs: {summary['correctness']['token_matches']}/{summary['correctness']['token_comparisons']}",
         f"- Top-probability minimum overlap: {summary['correctness']['minimum_top_probability_overlap']}",
         f"- Maximum common-token logprob error: {summary['correctness']['maximum_common_logprob_error']:.6f}",
@@ -225,6 +254,7 @@ def render_report(summary: dict[str, Any]) -> str:
         "BurstGPT/Azure arrival traces and LongBench text are separately sourced and then matched for replay. "
         "This is trace-driven public-content synthetic replay, not a claim about their joint production distribution.", "",
     ])
+    return "\n".join(lines)
 
 
 def validate_workloads(protocol: dict[str, Any], workloads: dict[str, Any]) -> None:
@@ -267,7 +297,10 @@ def validate_artifact(protocol_path: Path, output: Path) -> dict[str, Any]:
         raise ValueError("public artifact protocol hash differs")
     if manifest["binding"]["workload_sha256"] != protocol["workload_sha256"]:
         raise ValueError("public artifact workload hash differs")
-    for field in ("vendor_revision", "vendor_diff_sha256", "model_sha256", "runtime_sha256"):
+    fields = ["vendor_revision", "vendor_diff_sha256", "model_sha256", "runtime_sha256"]
+    if "vendor_base_revision" in protocol["artifact_binding"]:
+        fields.extend(["vendor_base_revision", "vendor_overlay_sha256"])
+    for field in fields:
         if manifest["binding"][field] != protocol["artifact_binding"][field]:
             raise ValueError(f"public artifact {field} differs from the protocol")
     if datetime.fromisoformat(manifest["generated_at_utc"]) < datetime.fromisoformat(
@@ -291,6 +324,7 @@ def validate_artifact(protocol_path: Path, output: Path) -> dict[str, Any]:
                            str(row["action"]), str(row["trace_source"]))
     if sorted(rows, key=row_key) != sorted(stored_rows, key=row_key):
         raise ValueError("public trials copy differs from raw cells")
+    validate_recorded_workloads(protocol, workloads, rows)
     summary = analyze_public_external(protocol, rows)
     if summary != json.loads((output / "summary.json").read_text(encoding="utf-8")):
         raise ValueError("public summary differs from independently reconstructed result")

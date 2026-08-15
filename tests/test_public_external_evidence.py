@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from llama_lab.public_external_evidence import analyze_public_external
+from llama_lab.public_external_evidence import analyze_public_external, validate_recorded_workloads
 
 
 def protocol() -> dict:
@@ -13,6 +13,8 @@ def protocol() -> dict:
         "acceptance": {
             "minimum_throughput_gain_lower_95_percent": -10.0,
             "maximum_p95_latency_regression_percent": 10.0,
+            "maximum_p95_latency_regression_upper_95_percent": 20.0,
+            "maximum_arrival_slip_ms": 50.0,
             "require_exact_output_tokens": True,
             "maximum_quality_score_delta": 0.0,
         },
@@ -25,6 +27,10 @@ def rows(paged_scale: float = 0.98) -> list[dict]:
         for trace in ("burstgpt", "azure-code"):
             direct_requests = [
                 {"trace_row": index, "latency_ms": 100.0 + index,
+                 "scheduled_arrival_ms": float(index * 10),
+                 "actual_start_ms": float(index * 10 + 1),
+                 "prompt_id": f"p{index}", "prompt_sha256": f"hash{index}",
+                 "source_arrival_seconds": float(index), "actual_local_input_tokens": 128,
                  "output_token_ids": [index, index + 10],
                  "top_logprobs": [[{"id": index, "logprob": -0.1}],
                                    [{"id": index + 10, "logprob": -0.1}]],
@@ -44,8 +50,9 @@ def rows(paged_scale: float = 0.98) -> list[dict]:
                     },
                     "quality": [
                         {"dataset": "triviaqa", "record_id": "q1", "score": 0.5,
-                         "output_token_ids": [3, 4]},
-                    ] if block == 1 else [],
+                         "prediction": "alpha beta", "answers": ["alpha gamma"],
+                         "prompt_sha256": "quality-hash", "output_token_ids": [3, 4]},
+                    ] if block == 1 and trace == "burstgpt" else [],
                 })
     return result
 
@@ -57,6 +64,8 @@ class PublicExternalEvidenceTest(unittest.TestCase):
         self.assertEqual(summary["correctness"]["token_matches"], 8)
         self.assertEqual(summary["quality"]["comparisons"], 1)
         self.assertEqual(summary["trace_sources"], ["azure-code", "burstgpt"])
+        self.assertLessEqual(summary["maximum_arrival_slip_ms"], 50.0)
+        self.assertIn("p95_latency_regression_block_bootstrap_95_percent", summary)
 
     def test_analyzer_rejects_missing_cell(self) -> None:
         with self.assertRaisesRegex(ValueError, "complete paired matrix"):
@@ -88,6 +97,35 @@ class PublicExternalEvidenceTest(unittest.TestCase):
         next(row for row in tampered if row["action"] == "paged")["route"]["paged_contiguous_fastpath_calls"] = 0
         with self.assertRaisesRegex(ValueError, "Paged route evidence"):
             analyze_public_external(protocol(), tampered)
+
+    def test_arrival_slip_is_a_promotion_gate(self) -> None:
+        tampered = rows()
+        tampered[0]["requests"][0]["actual_start_ms"] = 1000.0
+        summary = analyze_public_external(protocol(), tampered)
+        self.assertGreater(summary["maximum_arrival_slip_ms"], 50.0)
+        self.assertFalse(summary["promotion_passed"])
+
+    def test_raw_rows_are_bound_to_frozen_workloads_and_quality_score(self) -> None:
+        checked_protocol = protocol()
+        checked_protocol["replay"] = {"target_arrival_span_seconds": 0.02}
+        checked_protocol["acceptance"]["require_raw_workload_binding"] = True
+        workloads = {
+            "performance_replays": {
+                source: [
+                    {"trace_row": index, "prompt_id": f"p{index}",
+                     "prompt_sha256": f"hash{index}", "actual_local_input_tokens": 128,
+                     "source_arrival_seconds": float(index)}
+                    for index in (1, 2)
+                ] for source in ("burstgpt", "azure-code")
+            },
+            "quality_cases": [{"dataset": "triviaqa", "record_id": "q1",
+                               "prompt_sha256": "quality-hash", "answers": ["alpha gamma"]}],
+        }
+        evidence = rows()
+        validate_recorded_workloads(checked_protocol, workloads, evidence)
+        evidence[0]["quality"][0]["score"] = 999.0
+        with self.assertRaisesRegex(ValueError, "score was not reconstructed"):
+            validate_recorded_workloads(checked_protocol, workloads, evidence)
 
 
 if __name__ == "__main__":
