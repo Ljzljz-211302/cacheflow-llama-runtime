@@ -1,8 +1,14 @@
-# llama.cpp engine patch
+# llama.cpp engine source and audit patches
+
+The complete project-owned C++/CUDA source is published directly in this
+repository on branch `engine/llama.cpp`. The `main` branch pins that exact
+snapshot through the `vendor/llama.cpp` submodule, and `scripts/bootstrap.ps1`
+checks the pinned commit before downloading runtime artifacts.
 
 `0001-cache-aware-slot-scheduler.patch` and
-`0002-public-workload-routing.patch` are applied in order to the pinned upstream
-commit `acd79d603cb2e1c84c0886137b80f1ad649b6857` by `scripts/bootstrap.ps1`.
+`0002-public-workload-routing.patch` are retained as audit exports relative to
+upstream commit `acd79d603cb2e1c84c0886137b80f1ad649b6857`; bootstrap does not
+reapply them because they are already present in the engine snapshot.
 
 The patch contains the project-owned C++ contribution:
 
@@ -13,9 +19,8 @@ The patch contains the project-owned C++ contribution:
 - engine-native KV, prompt-cache, scheduler, and memory metrics;
 - a native C++ scheduler test target covering compatibility and fairness.
 
-The complete upstream repository remains under `vendor/llama.cpp` and is ignored
-by the top-level Git repository, so personal changes remain auditable as one
-reviewable patch series instead of being mixed with unchanged upstream source.
+The full source is browsable without cloning another repository, while the
+patch series keeps personal changes reviewable against the fixed upstream.
 The second patch freezes the request-lifecycle and phase/action-homogeneous
 routing used by the public-workload experiment; it also retains a pre-existing
 Windows CUDA compilation alias that was present in the measured source tree.

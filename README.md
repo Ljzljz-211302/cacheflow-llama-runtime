@@ -8,6 +8,17 @@ CacheFlow Runtime 是一个直接重构 llama.cpp 推理热路径的单机 LLM S
 
 当前 fork 相对固定上游涉及 69 个文件，新增 11,030 行、删除 99 行 C/C++/CUDA；最终以可重放 patch 的 `git diff --stat` 为准。外层 Python 仅负责固定实验、故障注入和报告。
 
+## C++ / CUDA 源码入口
+
+完整引擎源码直接发布在本仓库的 [`engine/llama.cpp`](https://github.com/Ljzljz-211302/cacheflow-llama-runtime/tree/engine/llama.cpp) 分支，`main` 通过 `vendor/llama.cpp` 子模块固定到同一快照；无需跳转到另一个仓库。
+
+- [真实服务调度与请求生命周期](https://github.com/Ljzljz-211302/cacheflow-llama-runtime/blob/engine/llama.cpp/tools/server/server-context.cpp)
+- [Paged Attention CUDA kernel](https://github.com/Ljzljz-211302/cacheflow-llama-runtime/blob/engine/llama.cpp/ggml/src/ggml-cuda/fattn-paged.cuh)
+- [CUDA KV block runtime](https://github.com/Ljzljz-211302/cacheflow-llama-runtime/blob/engine/llama.cpp/tools/server/server-kv-block-cuda.cu)
+- [生产算子与双布局 oracle 测试](https://github.com/Ljzljz-211302/cacheflow-llama-runtime/blob/engine/llama.cpp/tests/test-backend-ops.cpp)
+
+`patches/` 同时保留相对固定上游的可审计差异；源码分支用于阅读与构建，patch 用于核查个人贡献边界。
+
 ## 实现了什么
 
 ```mermaid

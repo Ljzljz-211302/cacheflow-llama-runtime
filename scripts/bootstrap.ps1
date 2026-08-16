@@ -48,7 +48,7 @@ $vendorRoot = Join-Path $projectRoot "vendor"
 $sourceRoot = Join-Path $vendorRoot "llama.cpp"
 New-Item -ItemType Directory -Force -Path $vendorRoot | Out-Null
 if (-not (Test-Path -LiteralPath (Join-Path $sourceRoot ".git"))) {
-    & git clone --depth 1 --branch $manifest.llama_cpp.tag $manifest.llama_cpp.repository $sourceRoot
+    & git clone --depth 1 --branch $manifest.llama_cpp.branch $manifest.llama_cpp.repository $sourceRoot
     if ($LASTEXITCODE -ne 0) {
         throw "failed to clone llama.cpp"
     }
@@ -57,7 +57,7 @@ $actualCommit = (& git -C $sourceRoot rev-parse HEAD).Trim()
 if ($actualCommit -ne $manifest.llama_cpp.commit) {
     throw "llama.cpp commit mismatch: expected $($manifest.llama_cpp.commit), got $actualCommit"
 }
-Write-Host "[ok] llama.cpp $($manifest.llama_cpp.tag) ($actualCommit)"
+Write-Host "[ok] CacheFlow llama.cpp $($manifest.llama_cpp.branch) ($actualCommit)"
 
 $enginePatches = @(
     "patches\0001-cache-aware-slot-scheduler.patch",
@@ -68,20 +68,7 @@ foreach ($relativePatch in $enginePatches) {
     if (-not (Test-Path -LiteralPath $enginePatch)) {
         throw "engine patch missing: $enginePatch"
     }
-    & git -C $sourceRoot apply --reverse --check $enginePatch 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "[ok] $relativePatch already applied"
-    } else {
-        & git -C $sourceRoot apply --check $enginePatch
-        if ($LASTEXITCODE -ne 0) {
-            throw "engine patch does not apply cleanly: $relativePatch"
-        }
-        & git -C $sourceRoot apply $enginePatch
-        if ($LASTEXITCODE -ne 0) {
-            throw "failed to apply engine patch: $relativePatch"
-        }
-        Write-Host "[ok] applied $relativePatch"
-    }
+    Write-Host "[ok] audit patch present: $relativePatch"
 }
 
 foreach ($artifact in $manifest.artifacts) {
