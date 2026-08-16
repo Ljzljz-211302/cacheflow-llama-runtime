@@ -13,7 +13,7 @@ CacheFlow Runtime 是一个直接重构 llama.cpp 推理热路径的单机 LLM S
 完整引擎源码直接发布在本仓库的 [`engine/llama.cpp`](https://github.com/Ljzljz-211302/cacheflow-llama-runtime/tree/engine/llama.cpp) 分支，`main` 通过 `vendor/llama.cpp` 子模块固定到同一快照；无需跳转到另一个仓库。
 
 - [真实服务调度与请求生命周期](https://github.com/Ljzljz-211302/cacheflow-llama-runtime/blob/engine/llama.cpp/tools/server/server-context.cpp)
-- [Paged Attention CUDA kernel](https://github.com/Ljzljz-211302/cacheflow-llama-runtime/blob/engine/llama.cpp/ggml/src/ggml-cuda/fattn-paged.cuh)
+- [Paged Decode Attention CUDA kernel](https://github.com/Ljzljz-211302/cacheflow-llama-runtime/blob/engine/llama.cpp/ggml/src/ggml-cuda/fattn-paged.cuh)
 - [CUDA KV block runtime](https://github.com/Ljzljz-211302/cacheflow-llama-runtime/blob/engine/llama.cpp/tools/server/server-kv-block-cuda.cu)
 - [生产算子与双布局 oracle 测试](https://github.com/Ljzljz-211302/cacheflow-llama-runtime/blob/engine/llama.cpp/tests/test-backend-ops.cpp)
 
