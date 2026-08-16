@@ -4,9 +4,11 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
+import os
 import random
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,10 +34,20 @@ def git(*args: str) -> str:
 
 
 def vendor_overlay_sha256(base_revision: str) -> str:
-    payload = subprocess.check_output(
-        ["git", "-C", "vendor/llama.cpp", "diff", "--binary", base_revision, "--"],
-        cwd=ROOT,
-    )
+    # A clean bootstrap applies added files as untracked content. Use a temporary
+    # intent-to-add index so the canonical overlay is independent of local HEAD
+    # history without mutating the user's real vendor index.
+    with tempfile.TemporaryDirectory() as directory:
+        environment = os.environ.copy()
+        environment["GIT_INDEX_FILE"] = str(Path(directory) / "index")
+        subprocess.check_call(["git", "-C", "vendor/llama.cpp", "read-tree", "HEAD"],
+                              cwd=ROOT, env=environment)
+        subprocess.check_call(["git", "-C", "vendor/llama.cpp", "add", "-N", "--", "."],
+                              cwd=ROOT, env=environment)
+        payload = subprocess.check_output(
+            ["git", "-C", "vendor/llama.cpp", "diff", "--binary", base_revision, "--"],
+            cwd=ROOT, env=environment,
+        )
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -73,11 +85,13 @@ def observed_binding(protocol_path: Path, server: Path, model: Path, workload: P
 
 def verify_binding(protocol: dict[str, Any], observed: dict[str, Any]) -> None:
     frozen = protocol["artifact_binding"]
-    fields = ["vendor_revision", "vendor_diff_sha256", "model_sha256", "runtime_sha256"]
+    fields = ["model_sha256", "runtime_sha256"]
     if "vendor_base_revision" in frozen:
         fields.extend(["vendor_base_revision", "vendor_overlay_sha256"])
-    if "vendor_patch_sha256" in frozen:
-        fields.append("vendor_patch_sha256")
+        if "vendor_patch_sha256" in frozen:
+            fields.append("vendor_patch_sha256")
+    else:
+        fields.extend(["vendor_revision", "vendor_diff_sha256"])
     for field in fields:
         if observed[field] != frozen[field]:
             raise RuntimeError(f"public external {field} differs from preregistration")
@@ -301,23 +315,30 @@ def validate_artifact(protocol_path: Path, output: Path) -> dict[str, Any]:
     validate_workloads(protocol, workloads)
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     registry_path = ROOT / "config/formal_evidence_registry.json"
+    require_registry = tuple(int(part) for part in protocol["protocol_version"].split(".")) >= (1, 3, 0)
     if registry_path.exists():
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
         artifact_key = str(output.resolve().relative_to(ROOT.resolve())).replace("\\", "/")
         registered = registry.get("artifacts", {}).get(artifact_key)
+        if registered is None and require_registry:
+            raise ValueError("formal public artifact is absent from the trusted registry")
         if registered is not None:
             for name, expected_hash in registered.items():
                 if sha256(output / name) != expected_hash:
                     raise ValueError(f"registered public artifact hash differs: {name}")
+    elif require_registry:
+        raise ValueError("formal public evidence registry is missing")
     if manifest["binding"]["protocol_sha256"] != sha256(protocol_path):
         raise ValueError("public artifact protocol hash differs")
     if manifest["binding"]["workload_sha256"] != protocol["workload_sha256"]:
         raise ValueError("public artifact workload hash differs")
-    fields = ["vendor_revision", "vendor_diff_sha256", "model_sha256", "runtime_sha256"]
+    fields = ["model_sha256", "runtime_sha256"]
     if "vendor_base_revision" in protocol["artifact_binding"]:
         fields.extend(["vendor_base_revision", "vendor_overlay_sha256"])
-    if "vendor_patch_sha256" in protocol["artifact_binding"]:
-        fields.append("vendor_patch_sha256")
+        if "vendor_patch_sha256" in protocol["artifact_binding"]:
+            fields.append("vendor_patch_sha256")
+    else:
+        fields.extend(["vendor_revision", "vendor_diff_sha256"])
     for field in fields:
         if manifest["binding"][field] != protocol["artifact_binding"][field]:
             raise ValueError(f"public artifact {field} differs from the protocol")

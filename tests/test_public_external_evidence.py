@@ -114,7 +114,7 @@ class PublicExternalEvidenceTest(unittest.TestCase):
                 source: [
                     {"trace_row": index, "prompt_id": f"p{index}",
                      "prompt_sha256": f"hash{index}", "actual_local_input_tokens": 128,
-                     "source_arrival_seconds": float(index)}
+                     "source_arrival_seconds": float(index), "requested_output_tokens": 2}
                     for index in (1, 2)
                 ] for source in ("burstgpt", "azure-code")
             },
@@ -126,6 +126,36 @@ class PublicExternalEvidenceTest(unittest.TestCase):
         evidence[0]["quality"][0]["score"] = 999.0
         with self.assertRaisesRegex(ValueError, "score was not reconstructed"):
             validate_recorded_workloads(checked_protocol, workloads, evidence)
+
+    def test_raw_binding_rejects_cache_duplicate_and_output_overrun(self) -> None:
+        checked_protocol = protocol()
+        checked_protocol["replay"] = {"target_arrival_span_seconds": 0.02}
+        checked_protocol["acceptance"]["require_raw_workload_binding"] = True
+        workloads = {
+            "performance_replays": {
+                source: [
+                    {"trace_row": index, "prompt_id": f"p{index}",
+                     "prompt_sha256": f"hash{index}", "actual_local_input_tokens": 128,
+                     "source_arrival_seconds": float(index), "requested_output_tokens": 2}
+                    for index in (1, 2)
+                ] for source in ("burstgpt", "azure-code")
+            },
+            "quality_cases": [{"dataset": "triviaqa", "record_id": "q1",
+                               "prompt_sha256": "quality-hash", "answers": ["alpha gamma"]}],
+        }
+        for mutation in ("cache", "duplicate", "output"):
+            with self.subTest(mutation=mutation):
+                evidence = rows()
+                if mutation == "cache":
+                    for cell in evidence:
+                        cell["requests"][0]["cache_tokens"] = 127
+                elif mutation == "duplicate":
+                    paged = next(cell for cell in evidence if cell["action"] == "paged")
+                    paged["requests"][1] = dict(paged["requests"][0])
+                else:
+                    evidence[0]["requests"][0]["output_token_ids"] = [1, 2, 3]
+                with self.assertRaisesRegex(ValueError, "raw request"):
+                    validate_recorded_workloads(checked_protocol, workloads, evidence)
 
 
 if __name__ == "__main__":

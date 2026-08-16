@@ -33,7 +33,7 @@ flowchart LR
     D --> F
     F --> G["每源 24 请求，保持顺序与相对间隔"]
     G --> H["统一压缩到 1.5 秒窗口"]
-    H --> I["4 个匹配进程块 × Direct/Paged"]
+    H --> I["12 个匹配进程块 × Direct/Paged"]
     B --> J["3 个 QA 任务 × 2 条完整样本"]
     J --> I
 ```
@@ -51,7 +51,7 @@ flowchart LR
 1. 独立保存 request-scoped `paged_decode_requested`，不再随着一次性 action observation 清除；
 2. 对 Direct/Paged 两臂都使用相同的 phase-homogeneous 图边界，把 prefill 与 decode 分开，避免只改变 Paged arm 的 batch/reduction 形状。
 
-最终每个 Paged arm 中，BurstGPT 的 `192-24=168` 个生成 decode 输入和 Azure 的 `122-24=98` 个生成 decode 输入全部进入路由；四块合计 **1064/1064 sequence-route entries**、502 个 fast-path graph、0 custom K4、0 CUDA custom dispatch、0 fallback。也就是说本轮验证的是生产连续布局 hybrid，不是碎片页 custom K4 严格占优。
+最终每个 Paged arm 中，BurstGPT 的 `192-24=168` 个生成 decode 输入和 Azure 的 `122-24=98` 个生成 decode 输入全部进入路由；12 块合计 **3192/3192 sequence-route entries**、1429 个 fast-path graph、0 custom K4、0 CUDA custom dispatch、0 fallback。也就是说本轮验证的是生产连续布局 hybrid，不是碎片页 custom K4 严格占优。
 
 v1.2 后来发现 8 个客户端 worker 会反压 24 请求的定时提交，最大到达滑移约 1.29 秒，因此保留为历史无效 replay，不再作为正式结论。v1.3 在结果产生前冻结新的调度、证据和统计门槛。
 
@@ -76,8 +76,8 @@ v1.2 后来发现 8 个客户端 worker 会反压 24 请求的定时提交，最
 
 ## 6. 能说与不能说
 
-可以说：公开数据把“一 token、重复缓存 prompt”的隐藏假设暴露出来，推动了 request-lifecycle 状态解耦和 mixed prefill/decode phase 分图；最终真实服务在两个公开 trace 上完整执行 1064 个生成序列路由，吞吐近似持平，LongBench 配对质量完全一致。
+可以说：公开数据把“一 token、重复缓存 prompt”的隐藏假设暴露出来，推动了 request-lifecycle 状态解耦和 mixed prefill/decode phase+action 分图；最终真实服务在两个公开 trace 上完整执行 3192 个生成序列路由，吞吐近似持平，LongBench 配对质量完全一致。
 
-不能说：Paged 严格快于 Direct、custom K4 在公开 trace 上获胜、已经完成完整 LongBench/LongBench-E 评测，或 191/192 等于完全正确。当前生产结论仍是 **hybrid 保持 opt-in，严格晋级失败**；下一步应在更多模型/GPU上用 logits 容差与任务质量共同定义数值等价，但必须用新协议确认，不能回写 v1.2。
+不能说：Paged 严格快于 Direct、custom K4 在公开 trace 上获胜、已经完成完整 LongBench/LongBench-E 评测，或 565/576 等于完全正确。当前生产结论仍是 **hybrid 保持 opt-in，严格晋级失败**；下一步应在更多模型/GPU上用 logits 容差与任务质量共同定义数值等价，但必须用新协议确认，不能回写 v1.3。
 
 正式证据：[v1.3 报告](../../results/research/h21-public-external-result-v1.3.0/report.md) · [协议](../../config/public_external_protocol_v1_3.json) · [研究选型](public-workload-dataset-selection.md)。

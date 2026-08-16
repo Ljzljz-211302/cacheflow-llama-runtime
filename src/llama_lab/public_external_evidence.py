@@ -57,7 +57,9 @@ def validate_recorded_workloads(protocol: dict[str, Any], workloads: dict[str, A
     for row in rows:
         source = row["trace_source"]
         frozen = replay_by_source[source]
-        if {int(item["trace_row"]) for item in row["requests"]} != set(frozen):
+        request_rows = [int(item["trace_row"]) for item in row["requests"]]
+        if len(request_rows) != len(frozen) or len(set(request_rows)) != len(request_rows) or \
+                set(request_rows) != set(frozen):
             raise ValueError("raw requests differ from the frozen trace rows")
         span = max(float(item["source_arrival_seconds"]) for item in frozen.values())
         for request in row["requests"]:
@@ -67,6 +69,8 @@ def validate_recorded_workloads(protocol: dict[str, Any], workloads: dict[str, A
             if (request["prompt_id"] != expected["prompt_id"] or
                     request["prompt_sha256"] != expected["prompt_sha256"] or
                     int(request["actual_local_input_tokens"]) != int(expected["actual_local_input_tokens"]) or
+                    int(request["cache_tokens"]) != int(expected["actual_local_input_tokens"]) or
+                    not 1 <= len(request["output_token_ids"]) <= int(expected["requested_output_tokens"]) or
                     float(request["source_arrival_seconds"]) != float(expected["source_arrival_seconds"]) or
                     not math.isclose(float(request["scheduled_arrival_ms"]), expected_schedule,
                                      rel_tol=0.0, abs_tol=1e-6)):
